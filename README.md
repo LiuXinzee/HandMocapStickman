@@ -1,673 +1,266 @@
-# Web App Template (Static Frontend)
+# HandMocapStickman
 
-## 深色动捕手套识别
+一个面向触觉/压力传感器手套实验的浏览器端手部动捕与手语识别项目。系统可以同时读取摄像头中的手部骨架和左右手套的传感器、IMU 数据，完成同步录制、带标签的数据采集、浏览器端模型训练，以及训练后仅凭手套数据进行词汇识别或驱动单手骨架动画。
 
-摄像头检测会优先使用原始画面；MediaPipe 连续漏检时，系统会自动启用深色手套增强通道，将黑色手套轮廓临时着色后重新检测标准 21 个手部关键点。检测到手套后还会输出：
+> 当前项目属于研究原型。它适合验证“视觉教师 + 手套学生”的多模态学习路线，还不是能够识别任意连续手语、理解语法或直接从公开视频迁移到任意手套的成品翻译系统。
 
-- `palm`：银色面，表示掌心
-- `back`：纯黑面，表示手背
-- `unknown`：画面证据不足，暂时无法判断方向
+## 项目定位
 
-为保证黑色轮廓能够与背景分离，请使用光线均匀的浅色背景，让完整手掌、五指和一小段腕部进入画面。深色衣物不要与手套轮廓连在一起。手套增强属于通用模型的视觉后备方案；遮挡严重、握拳或复杂背景下若要达到生产级精度，仍需采集并标注这款手套的图像来训练专用关键点模型。
+项目目前包含两条相互关联的实验路线：
 
-Pure React 19 + Tailwind 4 template with shadcn/ui baked in. **Use this README as the checklist for shipping static experiences.**
+1. **手语词汇分类**：采集同步的视觉骨架和手套数据，先训练视觉与触觉融合的教师模型，再训练只接收手套数据的学生模型。实时翻译页面最终使用学生模型，不需要摄像头。
+2. **触觉到骨架回归**：把视觉检测得到的 21 个关键点作为训练目标，让模型学习从单只手套的传感器与 IMU 四元数预测 21 点骨架，随后仅用手套驱动虚拟手部骨架。
 
-> **Note:** This template includes a minimal `shared/` and `server/` directory with placeholder types to support imported templates. These are just compatibility placeholders - web-static remains a true static-only template without API functionality.
+视觉模块也针对本项目的黑色手套做了增强：银色面按掌心处理，纯黑色面按手背处理，并在普通检测漏检时启用深色轮廓提取、ROI 补检和双手结果融合。
 
----
+## 目前可以做什么
 
-## Stack Overview
+- 通过摄像头实时检测最多两只手，每只手输出 21 个 MediaPipe Hands 关键点。
+- 对深色手套执行额外的轮廓增强和局部 ROI 重试，并融合普通检测与补检结果。
+- 根据骨架附近的银色、黑色像素比例输出 `palm`、`back` 或 `unknown`。
+- 通过 Web Serial API 分别连接左右手套，解析传感器、IMU 四元数，以及硬件提供时的加速度和姿态角。
+- 同步录制视觉关键点帧与左右手套帧，按最近时间戳对齐并导出 CSV，或导出未经对齐的 JSON。
+- 按预置词汇标签采集单手或双手训练样本，并保存在浏览器 IndexedDB 中。
+- 使用 TensorFlow.js 在浏览器中训练手语教师模型和仅手套输入的学生模型。
+- 使用学生模型以 10 Hz 进行实时词汇预测，显示置信度、Top-K 候选，并通过连续帧平滑拼接识别历史。
+- 训练单手“触觉到骨架”回归模型，并仅凭一只手套驱动 Canvas 骨架动画。
 
-- Client-only routing powered by React + Wouter.
-- Design tokens live entirely in `client/src/index.css`—keep that file intact.
+## 当前局限
 
-## File Structure
+- 仓库没有预训练手语模型或可直接使用的训练数据。词汇表只是采集标签和动作提示，不代表这些词已经能被识别。
+- 当前手语模型是按帧/快照进行的闭集分类器，只能输出训练过的类别。连续动作、运动轨迹、停顿、面部信息和手语语法尚未建模。
+- 要得到可用的“仅手套推理”模型，仍需先采集同一动作下同步的视觉与手套数据。普通手语视频没有与手套信号一一对应，不能直接代替这部分配对数据。
+- 黑色手套视觉增强仍以通用 MediaPipe Hands 为基础，并不是专门训练的手套关键点模型。握拳、侧面、严重遮挡、双手交叉或外观相近时，关键点仍可能漏检、漂移或左右互换。
+- 骨架回归当前只选择一只有效手训练，优先右手、其次左手；虚拟动捕页面也是单手输入。它还没有骨长约束、关节角约束或时序模型。
+- 手语分类和骨架回归目前使用 137 个重映射传感值与 IMU 四元数。加速度和姿态角已经能够解析、录制和导出，但尚未作为模型输入。
+- 页面显示的验证准确率来自当前样本的随机划分。连续采集帧彼此相似时，该数值可能高估跨用户、跨日期、跨环境的真实效果。
+- `/train` 页面允许手动加载教师融合模型，但 `/translate` 的实时输入只有手套特征。翻译时应使用 `student/tactile` 模型，否则会发生输入维度不匹配。
+- 训练、推理和数据存储都在浏览器内完成，不包含集中式后端、账号系统、云端数据集或模型部署服务。
 
-```
-client/
-  public/       ← Small configuration files ONLY (favicon.ico, robots.txt). DO NOT put images/media here.
-  src/
-    pages/      ← Page-level components
-    components/ ← Reusable UI & shadcn/ui
-    contexts/   ← React contexts
-    hooks/      ← Custom React hooks
-    lib/        ← Utility helpers
-    App.tsx     ← Routes & top-level layout
-    main.tsx    ← React entry point
-    index.css   ← global style
-server/         ← Placeholder for imported template compatibility
-shared/         ← Placeholder for imported template compatibility
-  const.ts      ← Shared constants
-```
+## 主要页面
 
-### ⚠️ Handling Images & Media
+| 路由              | 功能                                               |
+| ----------------- | -------------------------------------------------- |
+| `/`               | 摄像头动捕、左右手套状态、同步录制和 CSV/JSON 导出 |
+| `/collect`        | 选择词汇，同步采集视觉骨架与单手/双手手套样本      |
+| `/train`          | 训练手语教师模型与仅手套输入的学生模型             |
+| `/translate`      | 加载最新学生模型，仅用手套进行实时词汇识别         |
+| `/train-skeleton` | 训练单手触觉到 21 点骨架的回归模型                 |
+| `/mocap`          | 加载最新骨架模型，仅用一只手套驱动骨架动画         |
 
-**DO NOT** store images, videos, or large assets in `client/public/` or `client/src/assets/`. Local media files will cause deployment timeouts.
+## 核心功能说明
 
-**Required workflow:**
+### 1. 摄像头与黑色手套视觉识别
 
-1. Upload assets using the CLI: `manus-upload-file --webdev path/to/image.png`
-2. Use the returned storage path directly in your code: `<img src="/manus-storage/image_a1b2c3d4.png" />`
-3. Store the original local file in `/home/ubuntu/webdev-static-assets/` (outside the project directory)
+视觉检测默认先处理原始摄像头画面。针对黑色手套，系统会分析深色连通区域，在普通检测不足时把候选手套轮廓临时着色后重新送入 MediaPipe Hands，并对每个候选区域进行 ROI 补检。随后系统会：
 
-Only small configuration files like `favicon.ico`, `robots.txt`, and `manifest.json` belong in `client/public/`.
+- 合并整帧检测和 ROI 检测，去除几何上重复的骨架；
+- 使用跟踪 ID、位置和历史状态尽量保持左右手身份稳定；
+- 在短时漏检时保留最近结果，减少骨架闪烁；
+- 根据银色区域判断掌心，根据纯黑区域判断手背。
 
-Files in `client/public` are available at the root of your site—reference them with absolute paths (`/robots.txt`, etc.) from HTML templates, JSX, or meta tags.
+为了获得更稳定的结果，建议使用均匀光线和浅色、低纹理背景，让手套与深色衣物分离；双手先分开进入画面，再逐渐执行交叉动作；完整保留手掌、手指和一小段手腕；同时避免银色条被强光完全过曝。侧面、握拳和大面积重叠仍应作为重点采集场景，而不能只采集正对摄像头的展开手掌。
 
----
+### 2. 手套数据与同步录制
 
-## 🎯 Development Workflow
+默认页面通过 Web Serial API 直接连接手套。每只手套的数据流会被解析为：
 
-1. **Choose a design style** before you write any frontend code according to Design Guide (color, font, shadow, art style). Tell user what you chose. Remember to edit `client/src/index.css` for global theming and add needed font using google font cdn in `client/index.html`.
-2. **Compose pages** in `client/src/pages/`. Keep sections modular so they can be reused across routes.
-3. **Share primitives** via `client/src/components/`—extend shadcn/ui when needed instead of duplicating markup.
-4. **Keep styling consistent** by relying on existing Tailwind tokens (spacing, colors, typography).
-5. **Fetch external data** with `useEffect` if the site needs dynamic content from public APIs.
+- 256 个原始传感器值；
+- 137 个按物理位置重映射的有效传感器值，包括 60 个手指压力点、5 个弯折值和 72 个手掌压力点；
+- IMU 四元数 `[w, x, y, z]`；
+- 可选的加速度 `[x, y, z]`；
+- 可选的姿态角 `[yaw, roll, pitch]`。
 
----
+同步录制使用同一个浏览器高精度时钟记录视觉关键点帧与左右手套帧。导出 CSV 时，每个视觉帧分别匹配时间上最近的左手套帧和右手套帧，并保留同步偏差；JSON 则保留各路原始时间序列。这里的“录制”不会编码或保存 RGB 视频文件。
 
-## 🎨 Frontend Development Guidelines
+### 3. 手语数据采集与训练
 
-**UI & Styling:**
+一个训练样本包含词汇标签、时间戳，以及可为空的 `left`、`right` 两只手数据。每只存在的手包含 137 个重映射传感值、4 个四元数分量和最多 21 个三维视觉关键点。缺失的手在模型特征中用 0 填充。
 
-- Prefer shadcn/ui components for interactions to keep a modern, consistent look; import from `@/components/ui/*` (e.g., `button`, `card`, `dialog`).
-- Compose Tailwind utilities with component variants for layout and states; avoid excessive custom CSS. Use built-in `variant`, `size`, etc. where available.
-- Preserve design tokens: keep the `@layer base` rules in `client/src/index.css`. Utilities like `border-border` and `font-sans` depend on them.
-- Consistent design language: use spacing, radius, shadows, and typography via tokens. Extract shared UI into `components/` for reuse instead of copy‑paste.
-- Accessibility and responsiveness: keep visible focus rings and ensure keyboard reachability; design mobile‑first with thoughtful breakpoints.
-- Theming: Choose dark/light theme to start with for ThemeProvider according to your design style (dark or light bg), then manage colors pallette with CSS variables in `client/src/index.css` instead of hard‑coding to keep global consistency.
-- Micro‑interactions and empty states: add motion, empty states, and icons tastefully to improve quality without distracting from content.
-- Navigation: For internal tools/admin panels, use persistent sidebar. For public-facing apps, design navigation based on content structure (top nav, side nav, or contextual)—ensure clear escape routes from all pages.
-- Placeholder UI elements: When adding structural placeholders (nav items, CTAs) for not-yet-implemented features, show toast on click ("Feature coming soon"). Inform user which elements are placeholders when presenting work.
+当前双手分类模型的实际输入维度为：
 
-**React Best Practices:**
+- 单手触觉特征：`137 + 4 = 141D`；
+- 双手触觉特征：`141 x 2 = 282D`；
+- 双手视觉特征：`21 x 3 x 2 = 126D`；
+- 教师模型融合输入：`282 + 126 = 408D`；
+- 学生模型输入：仅双手触觉 `282D`。
 
-- Never call setState/navigation in render phase → wrap in `useEffect`
+部分页面中的 `204D/141D` 是旧版单手架构的显示文字；当前双手实现应以这里的 `408D/282D` 和 `signLanguageModel.ts` 为准。
 
-**Customized Defaults:**
-This template customizes some Tailwind/shadcn defaults for simplified usage:
+训练分为两个阶段：
 
-- `.container` is customized to auto-center and add responsive padding (see `index.css`). Use directly without `mx-auto`/`px-*`. For custom widths, use `max-w-*` with `mx-auto px-4`.
-- `.flex` is customized to have `min-width:0` and `min-height:0` by default
-- `button` variant `outline` uses transparent background (not `bg-background`). Add bg color class manually if needed.
+1. 教师模型读取同步的视觉与手套特征，学习不同词汇在两种模态下的联合模式。
+2. 学生模型只读取手套特征，同时学习真实词汇标签和教师给出的概率分布。这个过程称为知识蒸馏。
 
----
+当有效视觉样本比例达到 80% 时，学生训练会使用教师软标签；比例不足时，当前实现会跳过蒸馏，仅用真实标签训练学生。翻译页面默认自动选择最新的 `student/tactile` 模型，因此正常推理阶段不依赖摄像头。不要把 `teacher/fused` 模型作为仅手套翻译模型加载。
 
-## 🎨 Design Guide
+这里视觉数据的作用不是在最终运行时替手套“看手”，而是在训练阶段提供更清楚的姿态参考，帮助学生模型区分仅靠压力分布不容易分开的手势。
 
-When generating frontend UI, avoid generic patterns that lack visual distinction:
+### 4. 触觉到骨架训练
 
-- Avoid generic full-page centered layouts—prefer asymmetric/sidebar/grid structures for landing pages and dashboards
-- When user provides vague requirements, make creative design decisions (choose specific color palette, typography, layout approach)
-- Prioritize visual diversity: combine different design systems (e.g., one color scheme + different typography + another layout principle)
-- For landing pages: prefer asymmetric layouts, specific color values (not just "blue"), and textured backgrounds over flat colors
-- For dashboards: use defined spacing systems, soft shadows over borders, and accent colors for hierarchy
+骨架回归从每个样本中选择一只有效手，以 `137` 个传感值和 `4` 个四元数分量作为 `141D` 输入，以视觉检测的 `21 x 3 = 63D` 坐标作为监督目标。训练完成后，虚拟动捕页面只读取手套数据并预测 21 点骨架。
 
----
+该功能证明了“训练时用视觉标注、运行时只用手套”的基本链路，但当前输出是归一化二维画面坐标加相对深度，不等同于经过标定的真实三维手部姿态。
 
-## Animation Guide
+## 技术栈
 
-Bake motion taste in from the first line of code. Snappy, physically intuitive interactions are not a polish pass — they are part of the initial build.
+- React 19、TypeScript、Vite 7
+- Tailwind CSS 4、Radix UI、Lucide React、Framer Motion
+- MediaPipe Hands 0.4
+- TensorFlow.js 4
+- Wouter 路由
+- Web Serial API、Canvas 2D、IndexedDB
+- Express 静态生产服务器
+- Python、pyserial、websockets，用于可选的串口到 WebSocket 桥接
+- Vitest，用于视觉增强、检测融合和跟踪等模块的单元测试
 
-- Decide whether to animate at all: keyboard-initiated actions (command palettes, shortcuts) must be instant — never animate them. High-frequency interactions (hover, list nav) should be minimal. Reserve richer motion for occasional events (modals, drawers, toasts) and rare delight moments (onboarding).
-- Keep UI animations under 300ms. A 180ms dropdown feels significantly better than a 400ms one. Typical ranges: button press 100–160ms, tooltips 125–200ms, dropdowns 150–250ms, modals/drawers 200–500ms.
-- Use strong custom easings, not the weak CSS defaults. Default to a snappy ease-out for entering/exiting UI: `--ease-out: cubic-bezier(0.23, 1, 0.32, 1);`. For moving/morphing use `--ease-in-out: cubic-bezier(0.77, 0, 0.175, 1);`. NEVER use `ease-in` for UI animations — it feels sluggish.
-- Buttons must feel responsive: add `transform: scale(0.97)` on `:active` with a ~160ms ease-out transition so the UI confirms it heard the user.
-- Never animate from `scale(0)` — nothing in the real world appears from nothing. Start from `scale(0.95)` combined with `opacity: 0`.
-- Origin-aware popovers/dropdowns: scale in from the trigger point (e.g. `transform-origin: var(--radix-popover-content-transform-origin)`). Modals are the exception and stay centered.
-- Prefer CSS transitions over @keyframes for dynamic UI state. Transitions can be interrupted and reversed smoothly mid-flight; keyframes restart from zero and feel broken when interrupted.
-- Only animate `transform` and `opacity` for motion — they run on the GPU and skip layout/paint. Avoid animating `width`, `height`, `padding`, `margin`, `top/left` unless absolutely necessary.
-- Stagger grouped entrances by 30–80ms per item to create a cascading reveal instead of a wall of motion.
-- Asymmetric timing for deliberate actions: hold-to-confirm should be slow and linear on press (e.g. 2s linear), but release/cancel should snap back fast (~200ms ease-out).
-- Respect `prefers-reduced-motion`: gate non-essential motion behind `@media (prefers-reduced-motion: no-preference)`.
+## 目录结构
 
----
-
-## Pre-built Components
-
-Before implementing UI features, check if these components already exist:
-
-Maps:
-
-- `client/src/components/Map.tsx` - Google Maps integration with proxy authentication. Provides MapView component with onMapReady callback for initializing Google Maps services (Places, Geocoder, Directions, Drawing, etc.). All map functionality works directly in the browser.
-
-When implementing features that match these categories, MUST evaluate the component first to decide whether to use or customize it.
-
----
-
-## 🗺️ Maps Integration
-
-**CRITICAL: The Manus proxy provides FULL access to ALL Google Maps features** - including advanced drawing, heatmaps, Street View, all layers, Places API, etc. Do NOT ask users for Google Map API keys - authentication is automatic.
-
-**Implementation:**
-
-- Frontend: Import MapView from `client/src/components/Map.tsx` and initialize ANY Google Maps service (geocoding, directions, places, drawing, visualization, geometry, etc.) in the onMapReady callback. ALL Google Maps JavaScript API features work directly in the browser.
-
-NEVER use external map libraries or request API keys from users - the Manus proxy handles everything automatically with no feature limitations.
-
----
-
-## ✅ Launch Checklist
-
-- [ ] UI layout and navigation structure correct, all image src valid.
-- [ ] Success + error paths verified in the browser
-
----
-
-## Core File References
-
-`package.json`
-
-```tsx
-{
-  "name": "hand_mocap_stickman",
-  "version": "1.0.0",
-  "type": "module",
-  "license": "MIT",
-  "scripts": {
-    "dev": "vite --host",
-    "build": "vite build && esbuild server/index.ts --platform=node --packages=external --bundle --format=esm --outdir=dist",
-    "start": "NODE_ENV=production node dist/index.js",
-    "preview": "vite preview --host",
-    "check": "tsc --noEmit",
-    "format": "prettier --write ."
-  },
-  "dependencies": {
-    "@hookform/resolvers": "^5.2.2",
-    "@radix-ui/react-accordion": "^1.2.12",
-    "@radix-ui/react-alert-dialog": "^1.1.15",
-    "@radix-ui/react-aspect-ratio": "^1.1.7",
-    "@radix-ui/react-avatar": "^1.1.10",
-    "@radix-ui/react-checkbox": "^1.3.3",
-    "@radix-ui/react-collapsible": "^1.1.12",
-    "@radix-ui/react-context-menu": "^2.2.16",
-    "@radix-ui/react-dialog": "^1.1.15",
-    "@radix-ui/react-dropdown-menu": "^2.1.16",
-    "@radix-ui/react-hover-card": "^1.1.15",
-    "@radix-ui/react-label": "^2.1.7",
-    "@radix-ui/react-menubar": "^1.1.16",
-    "@radix-ui/react-navigation-menu": "^1.2.14",
-    "@radix-ui/react-popover": "^1.1.15",
-    "@radix-ui/react-progress": "^1.1.7",
-    "@radix-ui/react-radio-group": "^1.3.8",
-    "@radix-ui/react-scroll-area": "^1.2.10",
-    "@radix-ui/react-select": "^2.2.6",
-    "@radix-ui/react-separator": "^1.1.7",
-    "@radix-ui/react-slider": "^1.3.6",
-    "@radix-ui/react-slot": "^1.2.3",
-    "@radix-ui/react-switch": "^1.2.6",
-    "@radix-ui/react-tabs": "^1.1.13",
-    "@radix-ui/react-toggle": "^1.1.10",
-    "@radix-ui/react-toggle-group": "^1.1.11",
-    "@radix-ui/react-tooltip": "^1.2.8",
-    "axios": "^1.12.0",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "cmdk": "^1.1.1",
-    "embla-carousel-react": "^8.6.0",
-    "express": "^4.21.2",
-    "framer-motion": "^12.23.22",
-    "input-otp": "^1.4.2",
-    "lucide-react": "^0.453.0",
-    "nanoid": "^5.1.5",
-    "next-themes": "^0.4.6",
-    "react": "^19.2.1",
-    "react-day-picker": "^9.11.1",
-    "react-dom": "^19.2.1",
-    "react-hook-form": "^7.64.0",
-    "react-resizable-panels": "^3.0.6",
-    "recharts": "^2.15.2",
-    "sonner": "^2.0.7",
-    "streamdown": "^1.4.0",
-    "tailwind-merge": "^3.3.1",
-    "tailwindcss-animate": "^1.0.7",
-    "vaul": "^1.1.2",
-    "wouter": "^3.3.5",
-    "zod": "^4.1.12"
-  },
-  "devDependencies": {
-    "@builder.io/vite-plugin-jsx-loc": "^0.1.1",
-    "@tailwindcss/typography": "^0.5.15",
-    "@tailwindcss/vite": "^4.1.3",
-    "@types/express": "4.17.21",
-    "@types/google.maps": "^3.58.1",
-    "@types/node": "^24.7.0",
-    "@types/react": "^19.2.1",
-    "@types/react-dom": "^19.2.1",
-    "@vitejs/plugin-react": "^5.0.4",
-    "add": "^2.0.6",
-    "autoprefixer": "^10.4.20",
-    "esbuild": "^0.25.0",
-    "pnpm": "^10.15.1",
-    "postcss": "^8.4.47",
-    "prettier": "^3.6.2",
-    "tailwindcss": "^4.1.14",
-    "tsx": "^4.19.1",
-    "tw-animate-css": "^1.4.0",
-    "typescript": "5.6.3",
-    "vite": "^7.1.7",
-    "vite-plugin-manus-runtime": "^0.0.57",
-    "vitest": "^2.1.4"
-  },
-  "packageManager": "pnpm@10.4.1+sha512.c753b6c3ad7afa13af388fa6d808035a008e30ea9993f58c6663e2bc5ff21679aa834db094987129aa4d488b86df57f7b634981b2f827cdcacc698cc0cfb88af",
-  "pnpm": {
-    "patchedDependencies": {
-      "wouter@3.7.1": "patches/wouter@3.7.1.patch"
-    },
-    "overrides": {
-      "tailwindcss>nanoid": "3.3.7"
-    }
-  }
-}
+```text
+HandMocapStickman/
+├─ client/
+│  ├─ index.html                 浏览器入口
+│  └─ src/
+│     ├─ pages/                  动捕、采集、训练、翻译和虚拟动捕页面
+│     ├─ components/             骨架画布、手套面板、录制面板和 UI 组件
+│     ├─ hooks/                  摄像头、Web Serial、双手套和同步录制逻辑
+│     └─ lib/                    视觉增强、协议解析、数据存储与模型代码
+├─ glove_bridge/                 可选的 Python WebSocket 桥接工具
+├─ server/                       生产环境静态文件服务器
+├─ shared/                       前后端共享常量
+├─ test_materials/
+│  └─ glove_gestures/            黑色手套视觉测试视频
+├─ patches/                      pnpm 依赖补丁
+├─ package.json                  脚本与依赖配置
+└─ vite.config.ts                Vite 开发与构建配置
 ```
 
-`client/src/App.tsx`
+## Windows CMD 环境准备
 
-```tsx
-import { Toaster } from "@/components/ui/sonner";
-import { TooltipProvider } from "@/components/ui/tooltip";
-import NotFound from "@/pages/NotFound";
-import { Route, Switch } from "wouter";
-import ErrorBoundary from "./components/ErrorBoundary";
-import { ThemeProvider } from "./contexts/ThemeContext";
-import Home from "./pages/Home";
+建议环境：
 
-function Router() {
-  return (
-    <Switch>
-      <Route path={"/"} component={Home} />
-      <Route path={"/404"} component={NotFound} />
-      {/* Final fallback route */}
-      <Route component={NotFound} />
-    </Switch>
-  );
-}
+- Node.js 20.19+ 或满足 Vite 7 要求的更新版本；
+- pnpm 10，仓库的 `packageManager` 固定为 `pnpm@10.4.1`；
+- Chrome 或 Edge，用于摄像头和 Web Serial；
+- Python 3，仅在使用 `glove_bridge` 时需要。
 
-// NOTE: About Theme
-// - First choose a default theme according to your design style (dark or light bg), than change color palette in index.css
-//   to keep consistent foreground/background color across components
-// - If you want to make theme switchable, pass `switchable` ThemeProvider and use `useTheme` hook
+在 Windows CMD 中执行：
 
-function App() {
-  return (
-    <ErrorBoundary>
-      <ThemeProvider
-        defaultTheme="light"
-        // switchable
-      >
-        <TooltipProvider>
-          <Toaster />
-          <Router />
-        </TooltipProvider>
-      </ThemeProvider>
-    </ErrorBoundary>
-  );
-}
-
-export default App;
+```bat
+git clone https://github.com/LiuXinzee/HandMocapStickman.git
+cd HandMocapStickman
+corepack enable
+corepack prepare pnpm@10.4.1 --activate
+pnpm install
 ```
 
-`client/src/pages/Home.tsx`
+如果系统没有 `corepack`，也可以安装 pnpm：
 
-```tsx
-import { Button } from "@/components/ui/button";
-import { Loader2 } from "lucide-react";
-import { Streamdown } from "streamdown";
-
-/**
- * All content in this page are only for example, replace with your own feature implementation
- * When building pages, remember your instructions in Frontend Best Practices, Design Guide and Common Pitfalls
- */
-export default function Home() {
-  // If theme is switchable in App.tsx, we can implement theme toggling like this:
-  // const { theme, toggleTheme } = useTheme();
-
-  return (
-    <div className="min-h-screen flex flex-col">
-      <main>
-        {/* Example: lucide-react for icons */}
-        <Loader2 className="animate-spin" />
-        Example Page
-        {/* Example: Streamdown for markdown rendering */}
-        <Streamdown>Any **markdown** content</Streamdown>
-        <Button variant="default">Example Button</Button>
-      </main>
-    </div>
-  );
-}
+```bat
+npm install -g pnpm@10.4.1
 ```
 
-`client/src/index.css`
+## 启动项目
 
-```tsx
-@import "tailwindcss";
-@import "tw-animate-css";
+在项目根目录的 Windows CMD 中运行：
 
-@custom-variant dark (&:is(.dark *));
-
-@theme inline {
-  --radius-sm: calc(var(--radius) - 4px);
-  --radius-md: calc(var(--radius) - 2px);
-  --radius-lg: var(--radius);
-  --radius-xl: calc(var(--radius) + 4px);
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-}
-
-:root {
-  --primary: var(--color-blue-700);
-  --primary-foreground: var(--color-blue-50);
-  --sidebar-primary: var(--color-blue-600);
-  --sidebar-primary-foreground: var(--color-blue-50);
-  --chart-1: var(--color-blue-300);
-  --chart-2: var(--color-blue-500);
-  --chart-3: var(--color-blue-600);
-  --chart-4: var(--color-blue-700);
-  --chart-5: var(--color-blue-800);
-  --radius: 0.65rem;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.235 0.015 65);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.235 0.015 65);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.235 0.015 65);
-  --secondary: oklch(0.98 0.001 286.375);
-  --secondary-foreground: oklch(0.4 0.015 65);
-  --muted: oklch(0.967 0.001 286.375);
-  --muted-foreground: oklch(0.552 0.016 285.938);
-  --accent: oklch(0.967 0.001 286.375);
-  --accent-foreground: oklch(0.141 0.005 285.823);
-  --destructive: oklch(0.577 0.245 27.325);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(0.92 0.004 286.32);
-  --input: oklch(0.92 0.004 286.32);
-  --ring: oklch(0.623 0.214 259.815);
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.235 0.015 65);
-  --sidebar-accent: oklch(0.967 0.001 286.375);
-  --sidebar-accent-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-border: oklch(0.92 0.004 286.32);
-  --sidebar-ring: oklch(0.623 0.214 259.815);
-}
-
-.dark {
-  --primary: var(--color-blue-700);
-  --primary-foreground: var(--color-blue-50);
-  --sidebar-primary: var(--color-blue-500);
-  --sidebar-primary-foreground: var(--color-blue-50);
-  --background: oklch(0.141 0.005 285.823);
-  --foreground: oklch(0.85 0.005 65);
-  --card: oklch(0.21 0.006 285.885);
-  --card-foreground: oklch(0.85 0.005 65);
-  --popover: oklch(0.21 0.006 285.885);
-  --popover-foreground: oklch(0.85 0.005 65);
-  --secondary: oklch(0.24 0.006 286.033);
-  --secondary-foreground: oklch(0.7 0.005 65);
-  --muted: oklch(0.274 0.006 286.033);
-  --muted-foreground: oklch(0.705 0.015 286.067);
-  --accent: oklch(0.274 0.006 286.033);
-  --accent-foreground:  oklch(0.92 0.005 65);
-  --destructive: oklch(0.704 0.191 22.216);
-  --destructive-foreground: oklch(0.985 0 0);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.488 0.243 264.376);
-  --chart-1: var(--color-blue-300);
-  --chart-2: var(--color-blue-500);
-  --chart-3: var(--color-blue-600);
-  --chart-4: var(--color-blue-700);
-  --chart-5: var(--color-blue-800);
-  --sidebar: oklch(0.21 0.006 285.885);
-  --sidebar-foreground: oklch(0.85 0.005 65);
-  --sidebar-accent: oklch(0.274 0.006 286.033);
-  --sidebar-accent-foreground:  oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.488 0.243 264.376);
-}
-
-@layer base {
-  * {
-    @apply border-border outline-ring/50;
-  }
-  body {
-    @apply bg-background text-foreground;
-  }
-  button:not(:disabled),
-  [role="button"]:not([aria-disabled="true"]),
-  [type="button"]:not(:disabled),
-  [type="submit"]:not(:disabled),
-  [type="reset"]:not(:disabled),
-  a[href],
-  select:not(:disabled),
-  input[type="checkbox"]:not(:disabled),
-  input[type="radio"]:not(:disabled) {
-    @apply cursor-pointer;
-  }
-}
-
-@layer components {
-  /**
-   * Custom container utility that centers content and adds responsive padding.
-   *
-   * This overrides Tailwind's default container behavior to:
-   * - Auto-center content (mx-auto)
-   * - Add responsive horizontal padding
-   * - Set max-width for large screens
-   *
-   * Usage: <div className="container">...</div>
-   *
-   * For custom widths, use max-w-* utilities directly:
-   * <div className="max-w-6xl mx-auto px-4">...</div>
-   */
-  .container {
-    width: 100%;
-    margin-left: auto;
-    margin-right: auto;
-    padding-left: 1rem; /* 16px - mobile padding */
-    padding-right: 1rem;
-  }
-
-  .flex {
-    min-height: 0;
-    min-width: 0;
-  }
-
-  @media (min-width: 640px) {
-    .container {
-      padding-left: 1.5rem; /* 24px - tablet padding */
-      padding-right: 1.5rem;
-    }
-  }
-
-  @media (min-width: 1024px) {
-    .container {
-      padding-left: 2rem; /* 32px - desktop padding */
-      padding-right: 2rem;
-      max-width: 1280px; /* Standard content width */
-    }
-  }
-}
+```bat
+pnpm dev
 ```
 
-`client/index.html`
+终端通常会显示 `http://localhost:3000/`。如果 `3000` 已被占用，Vite 会自动选择下一个可用端口，请以终端输出为准。
 
-```tsx
-<!doctype html>
-<html lang="en">
+打开页面后：
 
-  <head>
-    <meta charset="UTF-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1.0, maximum-scale=1" />
-    <title>{{project_title}}</title>
-    <!-- THIS IS THE START OF A COMMENT BLOCK, BLOCK TO BE DELETED: Google Fonts here, example:
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
-    THIS IS THE END OF A COMMENT BLOCK, BLOCK TO BE DELETED -->
-  </head>
+1. 点击“启动摄像头”，允许浏览器访问摄像头。MediaPipe 脚本和模型文件首次从 jsDelivr CDN 加载，需要网络连接。
+2. 在需要手套的页面分别点击“连接左手”和“连接右手”，在浏览器弹窗中选择对应设备。单手功能只需连接一只手套。
+3. 浏览器会直接占用所选串口。同一个串口不能同时被其他串口工具、Python 桥接程序或另一个浏览器页面打开。
 
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-    <script
-      defer
-      src="%VITE_ANALYTICS_ENDPOINT%/umami"
-      data-website-id="%VITE_ANALYTICS_WEBSITE_ID%"></script>
-  </body>
+Web Serial 主要由 Chromium 浏览器支持。请使用 `localhost` 或 HTTPS 页面，不建议用不支持 Web Serial 的浏览器测试手套连接。
 
-</html>
+## 可选的手套 WebSocket 桥接
+
+`glove_bridge/` 可以把一个串口的数据转发到 `ws://localhost:8765`，适合协议调试或接入自定义 WebSocket 客户端。它不是当前页面的默认连接路径；现有动捕、采集、训练和翻译页面使用 Web Serial 直连，因此正常运行本项目不需要启动桥接服务。
+
+在另一个 Windows CMD 中执行：
+
+```bat
+cd glove_bridge
+py -m pip install -r requirements.txt
+py glove_ws_bridge.py --list-ports
+py glove_ws_bridge.py
 ```
 
-`server/index.ts`
+桥接工具支持自动检测端口，也支持通过命令行显式指定参数。请查看 [`glove_bridge/README.md`](glove_bridge/README.md) 和 `py glove_ws_bridge.py --help`，并以实际硬件配置为准。不要让桥接工具与浏览器同时打开同一个串口。
 
-```tsx
-import express from "express";
-import { createServer } from "http";
-import path from "path";
-import { fileURLToPath } from "url";
+## 常用脚本
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+| 命令           | 说明                                                                        |
+| -------------- | --------------------------------------------------------------------------- |
+| `pnpm dev`     | 启动 Vite 开发服务器并监听局域网地址                                        |
+| `pnpm check`   | 运行 TypeScript 类型检查，不生成文件                                        |
+| `pnpm test`    | 运行 Vitest 单元测试                                                        |
+| `pnpm build`   | 构建前端并打包 Express 静态服务器到 `dist/`                                 |
+| `pnpm preview` | 预览已经构建的 Vite 前端                                                    |
+| `pnpm format`  | 使用 Prettier 格式化仓库文件，会直接修改文件                                |
+| `pnpm start`   | 使用 `package.json` 中的生产启动脚本；其中的环境变量语法更适合类 Unix shell |
 
-async function startServer() {
-  const app = express();
-  const server = createServer(app);
+在 Windows CMD 中启动生产构建可使用：
 
-  // Serve static files from dist/public in production
-  const staticPath =
-    process.env.NODE_ENV === "production"
-      ? path.resolve(__dirname, "public")
-      : path.resolve(__dirname, "..", "dist", "public");
-
-  app.use(express.static(staticPath));
-
-  // Handle client-side routing - serve index.html for all routes
-  app.get("*", (_req, res) => {
-    res.sendFile(path.join(staticPath, "index.html"));
-  });
-
-  const port = process.env.PORT || 3000;
-
-  server.listen(port, () => {
-    console.log(`Server running on http://localhost:${port}/`);
-  });
-}
-
-startServer().catch(console.error);
+```bat
+pnpm build
+set NODE_ENV=production&& node dist\index.js
 ```
 
----
+建议在提交代码前至少执行：
 
-## Common Pitfalls
-
-### Infinite loading loops from unstable references
-
-**Anti-pattern:** Creating new objects/arrays in render that are used as query inputs
-
-```tsx
-// ❌ Bad: New Date() creates new reference every render → infinite queries
-const { data } = trpc.items.getByDate.useQuery({
-  date: new Date(), // ← New object every render!
-});
-
-// ❌ Bad: Array/object literals in query input
-const { data } = trpc.items.getByIds.useQuery({
-  ids: [1, 2, 3], // ← New array reference every render!
-});
+```bat
+pnpm check
+pnpm test
+pnpm build
 ```
 
-**Correct approach:** Stabilize references with useState/useMemo
+## 测试素材
 
-```tsx
-// ✅ Good: Initialize once with useState
-const [date] = useState(() => new Date());
-const { data } = trpc.items.getByDate.useQuery({ date });
+`test_materials/glove_gestures/` 中包含四段黑色手套视频：
 
-// ✅ Good: Memoize complex inputs
-const ids = useMemo(() => [1, 2, 3], []);
-const { data } = trpc.items.getByIds.useQuery({ ids });
-```
+| 文件          | 场景           |
+| ------------- | -------------- |
+| `palm.mp4`    | 银色掌心面握拳 |
+| `back.mp4`    | 纯黑手背面握拳 |
+| `side.mp4`    | 手套侧面       |
+| `overlap.mp4` | 双手交叉或重叠 |
 
-**Why this happens:** TRPC queries trigger when input references change. Objects/arrays created in render have new references each time, causing infinite re-fetches.
+这些视频用于复现和人工检查视觉检测问题，目前不会被 `pnpm test` 自动读取，也不会自动加入 IndexedDB 训练集。若要训练手语分类模型，仍需在 `/collect` 页面为具体词汇采集带标签的同步手套数据。
 
-### Navigation dead-ends in subpages
+## 数据、模型与隐私
 
-**Problem:** Creating nested routes without escape routes—no header nav, no sidebar, no back button.
+- `/collect` 采集的训练样本，以及 `/train`、`/train-skeleton` 生成的模型，默认保存在当前网站来源对应的浏览器 IndexedDB 中，不会随着 Git 提交上传到仓库。
+- 清除浏览器站点数据、更换浏览器用户配置，或使用不同的协议、主机、端口打开应用，都可能导致原数据不可见。重要实验应保留主页面导出的 CSV/JSON，并另行建立数据集和模型备份流程。
+- 当前应用没有实现把摄像头画面、手套数据或 IndexedDB 模型上传到业务后端的接口，但 MediaPipe、字体或界面图片等资源可能从外部 CDN 请求。
+- 开发模式包含本地调试日志收集器，浏览器日志、网络请求和会话调试事件可能写入本机 `.manus-logs/`；该目录已被 Git 忽略。处理敏感参与者数据前，应检查并按实验规范关闭不需要的调试或分析配置。
+- `client/index.html` 预留了分析脚本环境变量。公开部署或采集真实参与者数据前，应核对实际构建环境是否配置分析服务，并在知情同意中说明。
+- 仓库中的四段测试视频会随 Git 一起分发，请只提交已经确认可以公开的素材。
 
-**Root cause:** Implementing individual pages before establishing global layout structure.
+## 推荐实验流程
 
-**Solution:** Define layout wrapper in App.tsx first, then build pages inside it. For admin tools use DashboardLayout; for detail pages add back button with `router.back()`.
+1. 固定摄像头、背景、曝光和手套佩戴方式，确认左右手套通道正确。
+2. 在主页面短时同步录制并导出 CSV/JSON，先检查传感器、四元数和视觉关键点是否正常。
+3. 在 `/collect` 中为至少两个词汇采集样本；每个词汇覆盖不同速度、角度、手指力度和自然重复，而不是连续保持完全相同的姿势。
+4. 按采集轮次、日期或参与者保留独立测试集，避免只看相邻帧随机划分得到的准确率。
+5. 在 `/train` 训练学生模型，并在 `/translate` 只连接手套验证。调整置信度阈值和平滑窗口只能减少抖动，不能弥补训练集中缺失的动作变化。
+6. 如需手套驱动骨架，在 `/train-skeleton` 训练后到 `/mocap` 验证单手输出。
 
-### Invisible text from theme/color mismatches
+## 后续方向
 
-**Root cause:** Semantic colors (`bg-background`, `text-foreground`) are CSS variables that resolve based on ThemeProvider's active theme. Mismatches cause invisible text.
+- 为黑色手套建立专用的分割、关键点与遮挡标注数据集，训练专用模型替代启发式 ROI 补检。
+- 把静态样本升级为带起止边界的时序片段，使用 TCN、LSTM 或 Transformer 建模动态手势和双手运动趋势。
+- 将加速度、姿态角、压力变化率和传感器空间结构纳入模型，并增加佩戴校准和跨设备归一化。
+- 采用按参与者、按采集会话划分的验证方案，报告混淆矩阵、召回率、延迟和跨环境表现。
+- 研究“公开视频骨架预训练 + 少量同步手套数据对齐”的跨模态方案。公开视频可以扩大视觉动作知识，但仍需要一定数量的视觉与手套配对样本建立两种模态之间的映射。
+- 增加训练数据集和模型的显式导入、导出、版本管理及可复现实验配置。
+- 将单手骨架回归扩展为双手时序模型，并加入骨长、关节角和左右手身份约束。
 
-**Two critical rules:**
+## 许可证
 
-1. **Match theme to CSS variables:** If `defaultTheme="dark"` in App.tsx, ensure `.dark {}` in index.css has dark background + light foreground values
-2. **Always pair bg with text:** When using `bg-{semantic}`, MUST also use `text-{semantic}-foreground` (not automatic - text inherits from parent otherwise)
-
-**Quick reference:**
-
-```tsx
-// ✅ Theme + CSS alignment
-<ThemeProvider defaultTheme="dark">  {/* Must match .dark in index.css */}
-  <div className="bg-background text-foreground">...</div>
-</ThemeProvider>
-
-// ✅ Required class pairs
-<div className="bg-popover text-popover-foreground">...</div>
-<div className="bg-card text-card-foreground">...</div>
-<div className="bg-accent text-accent-foreground">...</div>
-```
-
-### Nested anchor tags in Link components
-
-**Problem:** Wrapping `<a>` tags inside another `<a>` or wouter's `<Link>` creates nested anchors and runtime errors.
-
-**Solution:** Pass children directly to Link—it already renders an `<a>` internally.
-
-```tsx
-// ❌ Bad: <Link><a>...</a></Link> or <a><a>...</a></a>
-// ✅ Good: <Link>...</Link> or just <a>...</a>
-```
-
-### Empty `Select.Item` values
-
-**Rule:** Every `<Select.Item>` must have a non-empty `value` prop—never `""`, `undefined`, or omitted.
-
-**Rule:** Use sonner for toasts; do not add react-toastify or @radix-ui/react-toast
-
-**Rule:** If you put placeholder components for App.tsx routes, you MUST replace them with actual components after your implementation.
+`package.json` 当前声明为 MIT。正式发布或接收外部贡献前，建议在仓库根目录补充完整的 `LICENSE` 文件。

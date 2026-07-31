@@ -1,6 +1,7 @@
 {
   "name": "hand_mocap_stickman",
   "version": "1.0.0",
+  "description": "融合摄像头手部骨架、压力传感器与 IMU 数据的手语采集、训练和翻译系统",
   "type": "module",
   "license": "MIT",
   "scripts": {
