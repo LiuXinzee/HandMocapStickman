@@ -11,7 +11,7 @@
  */
 import {
   classifyGloveSurface,
-  enhanceDarkGloveFrame,
+  enhanceGloveFrame,
   type EnhancedGloveFrame,
   type GloveSurfaceClassification,
   type GloveVisionRegion,
@@ -122,11 +122,11 @@ export interface HandResult {
   surfaces: HandSurface[];
   /** 与 surfaces 同序，范围 0..1。 */
   surfaceConfidences: number[];
-  /** 与 landmarks 同序，表示当前目标为深色手套的可能性，范围 0..1。 */
+  /** 与 landmarks 同序，表示当前目标为视觉增强手套的可能性，范围 0..1。 */
   gloveConfidences: number[];
   /** 与 landmarks 同序，记录每只手来自整帧还是手套 ROI 补检。 */
   detectionSources: HandDetectionSource[];
-  /** 当前结果来自原始画面还是深色手套增强画面。 */
+  /** 当前结果来自原始画面还是手套增强画面。 */
   detectionSource: HandDetectionSource;
 }
 
@@ -134,7 +134,7 @@ interface UseHandTrackingOptions {
   maxHands?: number;
   minDetectionConfidence?: number;
   minTrackingConfidence?: number;
-  /** 原始画面连续漏检时，启用针对深色手套的轮廓着色重试。 */
+  /** 原始画面连续漏检时，启用明暗手套轮廓和边缘增强重试。 */
   gloveEnhancement?: boolean;
 }
 
@@ -278,7 +278,7 @@ function prepareEnhancedGloveFrame(
   maxHands: number,
   preferredRegions: ReadonlyArray<GloveVisionRegion> = []
 ): EnhancedGloveFrame | null {
-  const enhanced = enhanceDarkGloveFrame(
+  const enhanced = enhanceGloveFrame(
     frame.data,
     frame.width,
     frame.height,

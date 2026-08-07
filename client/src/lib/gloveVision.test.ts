@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   classifyGloveSurface,
   enhanceDarkGloveFrame,
+  enhanceGloveFrame,
+  enhanceLightGloveFrame,
   type GloveVisionRegion,
   type GloveVisionLandmark,
 } from "./gloveVision";
@@ -180,18 +182,18 @@ function makeDarkFrame(): Uint8ClampedArray {
 function paintCompactGlove(
   frame: Uint8ClampedArray,
   centerX: number,
-  centerY: number
+  centerY: number,
+  color: Rgb = [22, 26, 30]
 ): void {
-  const dark: Rgb = [22, 26, 30];
-  paintDisk(frame, centerX, centerY + 7, 12, dark);
-  paintRect(frame, centerX - 9, centerY + 5, centerX + 9, centerY + 20, dark);
+  paintDisk(frame, centerX, centerY + 7, 12, color);
+  paintRect(frame, centerX - 9, centerY + 5, centerX + 9, centerY + 20, color);
   for (const offset of [-8, 0, 8]) {
     paintSegment(
       frame,
       [centerX + offset, centerY + 2],
       [centerX + offset, centerY - 17],
       3,
-      dark
+      color
     );
   }
   paintSegment(
@@ -199,7 +201,7 @@ function paintCompactGlove(
     [centerX - 8, centerY + 7],
     [centerX - 17, centerY],
     3,
-    dark
+    color
   );
 }
 
@@ -545,5 +547,178 @@ describe("enhanceDarkGloveFrame", () => {
     expect(() =>
       classifyGloveSurface(new Uint8ClampedArray(7), 2, 1, LANDMARKS)
     ).toThrow(RangeError);
+  });
+});
+
+describe("enhanceLightGloveFrame", () => {
+  it("finds a satin glove on a warm background without mutating input", () => {
+    const frame = makeFrame([112, 75, 58]);
+    paintCompactGlove(frame, 64, 48, [230, 224, 209]);
+    const snapshot = new Uint8ClampedArray(frame);
+
+    const result = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result.found).toBe(true);
+    expect(frame).toEqual(snapshot);
+    expect(result.threshold).toBeGreaterThanOrEqual(138);
+    expect(result.threshold).toBeLessThanOrEqual(224);
+    expect(result.maskCoverage).toBeGreaterThan(0.03);
+    expect(result.maskCoverage).toBeLessThan(0.4);
+    expect(result.regions).toHaveLength(1);
+    expectValidRegion(result.regions[0]);
+    const glove = pixelAt(result.pixels, 64, 55);
+    expect(glove[0]).toBeGreaterThan(glove[1]);
+    expect(glove[1]).toBeGreaterThan(glove[2]);
+    expect(pixelAt(result.pixels, 5, 5)[0]).toBeLessThan(100);
+  });
+
+  it("preserves a sharpened fold without splitting the hand ROI", () => {
+    const frame = makeFrame([105, 72, 55]);
+    paintCompactGlove(frame, 64, 48, [224, 220, 208]);
+    paintSegment(frame, [55, 49], [55, 31], 1, [252, 249, 238]);
+    paintRect(frame, 64, 36, 64, 66, [180, 177, 169]);
+    const result = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(1);
+    const outputContrast =
+      pixelAt(result.pixels, 63, 54)[0] - pixelAt(result.pixels, 64, 54)[0];
+    const toneOnlyContrast =
+      Math.round((224 - result.threshold) * 0.12) -
+      Math.round((180 - result.threshold) * 0.12);
+    expect(outputContrast).toBeGreaterThan(toneOnlyContrast + 20);
+  });
+
+  it("rejects a uniform white scene during cold start", () => {
+    const frame = makeFrame([238, 238, 238]);
+    const result = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result).toMatchObject({ found: false, maskCoverage: 0 });
+    expect(result.regions).toEqual([]);
+    expect(result.pixels).toEqual(frame);
+  });
+
+  it("uses a historical ROI when a white glove merges into a white scene", () => {
+    const frame = makeFrame([232, 232, 232]);
+    paintRect(frame, 64, 20, 64, 75, [207, 207, 207]);
+    const hint = { x: 35, y: 12, width: 72, height: 72, area: 0 };
+
+    const cold = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 1);
+    const result = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 1, [hint]);
+
+    expect(cold.found).toBe(false);
+    expect(result).toMatchObject({ found: true, maskCoverage: 0 });
+    expect(result.regions).toHaveLength(1);
+    expectValidRegion(result.regions[0]);
+    expect(pixelAt(result.pixels, 64, 45)).not.toEqual(pixelAt(frame, 64, 45));
+  });
+
+  it("returns separate ROIs for two light gloves", () => {
+    const frame = makeFrame([108, 72, 54]);
+    paintCompactGlove(frame, 31, 50, [228, 222, 207]);
+    paintCompactGlove(frame, 96, 50, [235, 230, 215]);
+
+    const result = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 2);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(2);
+    result.regions.forEach(expectValidRegion);
+  });
+
+  it("keeps the dark-glove path in automatic mode", () => {
+    const frame = makeDarkFrame();
+    paintCompactGlove(frame, 64, 48);
+
+    const result = enhanceGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(1);
+    const glove = pixelAt(result.pixels, 64, 55);
+    expect(glove[0]).toBeGreaterThan(glove[1]);
+    expect(glove[1]).toBeGreaterThan(glove[2]);
+  });
+
+  it("ranks a light hand above a disconnected white device frame", () => {
+    const frame = makeFrame([108, 72, 54]);
+    paintCompactGlove(frame, 38, 54, [230, 224, 210]);
+    const device: Rgb = [242, 242, 237];
+    paintRect(frame, 75, 5, 122, 9, device);
+    paintRect(frame, 75, 9, 79, 43, device);
+    paintRect(frame, 118, 9, 122, 43, device);
+    paintRect(frame, 75, 39, 122, 43, device);
+
+    const result = enhanceLightGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(1);
+    expect(result.regions[0].x + result.regions[0].width * 0.5).toBeLessThan(
+      65
+    );
+  });
+
+  it("keeps a dark hand ahead of a white device in automatic mode", () => {
+    const frame = makeFrame([120, 78, 58]);
+    paintCompactGlove(frame, 40, 54);
+    const device: Rgb = [242, 242, 237];
+    paintRect(frame, 75, 5, 122, 9, device);
+    paintRect(frame, 75, 9, 79, 43, device);
+    paintRect(frame, 118, 9, 122, 43, device);
+    paintRect(frame, 75, 39, 122, 43, device);
+
+    const result = enhanceGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(1);
+    expect(result.regions[0].x + result.regions[0].width * 0.5).toBeLessThan(
+      65
+    );
+    const glove = pixelAt(result.pixels, 40, 61);
+    expect(glove[0]).toBeGreaterThan(glove[1]);
+    expect(glove[1]).toBeGreaterThan(glove[2]);
+  });
+
+  it("keeps a light hand ahead of a dark device in automatic mode", () => {
+    const frame = makeFrame([112, 75, 58]);
+    paintCompactGlove(frame, 38, 54, [230, 224, 210]);
+    const device: Rgb = [18, 21, 24];
+    paintRect(frame, 75, 5, 122, 9, device);
+    paintRect(frame, 75, 9, 79, 43, device);
+    paintRect(frame, 118, 9, 122, 43, device);
+    paintRect(frame, 75, 39, 122, 43, device);
+
+    const result = enhanceGloveFrame(frame, WIDTH, HEIGHT, 1);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(1);
+    expect(result.regions[0].x + result.regions[0].width * 0.5).toBeLessThan(
+      65
+    );
+    const glove = pixelAt(result.pixels, 38, 61);
+    expect(glove[0]).toBeGreaterThan(glove[1]);
+    expect(glove[1]).toBeGreaterThan(glove[2]);
+  });
+
+  it("merges one light and one dark hand in automatic mode", () => {
+    const frame = makeFrame([112, 75, 58]);
+    paintCompactGlove(frame, 31, 52, [230, 224, 210]);
+    paintCompactGlove(frame, 96, 52);
+
+    const result = enhanceGloveFrame(frame, WIDTH, HEIGHT, 2);
+
+    expect(result.found).toBe(true);
+    expect(result.regions).toHaveLength(2);
+    const centers = result.regions
+      .map(region => region.x + region.width * 0.5)
+      .sort((first, second) => first - second);
+    expect(centers[0]).toBeLessThan(64);
+    expect(centers[1]).toBeGreaterThan(64);
+    for (const point of [
+      [31, 59],
+      [96, 59],
+    ] as const) {
+      const glove = pixelAt(result.pixels, point[0], point[1]);
+      expect(glove[0]).toBeGreaterThan(glove[1]);
+      expect(glove[1]).toBeGreaterThan(glove[2]);
+    }
   });
 });

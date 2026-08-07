@@ -20,10 +20,14 @@ export interface EnhancedGloveFrame {
   found: boolean;
   /** Fraction of the frame covered by selected glove components and their holes. */
   maskCoverage: number;
-  /** Adaptive luminance threshold used to create the dark-pixel mask. */
+  /** Adaptive luminance threshold used by the selected dark/light mask. */
   threshold: number;
   /** Padded, near-square source-frame ROIs suitable for MediaPipe retries. */
   regions: GloveVisionRegion[];
+  /** Internal ranking score for choosing between light and dark candidates. */
+  candidateScore?: number;
+  /** Per-region scores used when automatic mode merges light and dark hands. */
+  candidateScores?: number[];
 }
 
 export type GloveSurface = "palm" | "back" | "unknown";
@@ -168,6 +172,66 @@ function isLowChromaDark(
     chroma * 2 <= max + 20 &&
     !warmSkinTone
   );
+}
+
+function adaptiveLightThreshold(histogram: Uint32Array, total: number): number {
+  if (total <= 0) return 255;
+
+  const median = histogramPercentile(histogram, total, 0.5);
+  const percentile72 = histogramPercentile(histogram, total, 0.72);
+  return Math.round(clamp(Math.max(median + 18, percentile72 - 18), 138, 224));
+}
+
+function isLowChromaLight(
+  r: number,
+  g: number,
+  b: number,
+  threshold: number
+): boolean {
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const chroma = max - min;
+  const light = luminance(r, g, b);
+  const warmSkinTone =
+    r - b >= 18 &&
+    r > g * 1.07 &&
+    g > b * 1.04 &&
+    chroma / Math.max(max, 1) >= 0.13;
+  return (
+    light >= threshold &&
+    min >= 105 &&
+    chroma <= 54 &&
+    chroma * 4 <= max + 36 &&
+    !warmSkinTone
+  );
+}
+
+function bridgeSinglePixelLightGaps(
+  labels: Int32Array,
+  width: number,
+  height: number
+): void {
+  if (width < 3 || height < 3) return;
+
+  const additions = new Uint8Array(labels.length);
+  for (let y = 1; y + 1 < height; y++) {
+    let pixel = y * width + 1;
+    for (let x = 1; x + 1 < width; x++, pixel++) {
+      if (labels[pixel] === -1) continue;
+      const horizontal = labels[pixel - 1] === -1 && labels[pixel + 1] === -1;
+      const vertical =
+        labels[pixel - width] === -1 && labels[pixel + width] === -1;
+      const diagonal =
+        (labels[pixel - width - 1] === -1 &&
+          labels[pixel + width + 1] === -1) ||
+        (labels[pixel - width + 1] === -1 && labels[pixel + width - 1] === -1);
+      if (horizontal || vertical || diagonal) additions[pixel] = 1;
+    }
+  }
+
+  for (let pixel = 0; pixel < labels.length; pixel++) {
+    if (additions[pixel] !== 0) labels[pixel] = -1;
+  }
 }
 
 function bridgeNarrowNeutralGaps(
@@ -333,7 +397,7 @@ function componentCandidateScore(
   // Area remains the safest cold-start signal: patterned clothing produces
   // many compact dark specks. Temporal hints can still override it once a
   // glove has been observed.
-  const areaScore = Math.sqrt(area / minArea) * 1.25;
+  const areaScore = Math.min(Math.sqrt(area / minArea) * 1.25, 5);
   const compactnessScore =
     clamp(1 - Math.abs(fillRatio - 0.43) / 0.43, 0, 1) * 1.5;
   const centerX = ((minX + maxX + 1) * 0.5) / frameWidth;
@@ -378,6 +442,53 @@ function componentCandidateScore(
     hintAffinity * 18 -
     borderPenalty -
     extentPenalty
+  );
+}
+
+function lightComponentCandidateScore(
+  area: number,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  fillRatio: number,
+  coreFillRatio: number,
+  minArea: number,
+  frameWidth: number,
+  frameHeight: number,
+  pixelCount: number,
+  hintOverlaps: Int32Array,
+  hints: ReadonlyArray<ClippedHintRegion>
+): number {
+  const baseScore = componentCandidateScore(
+    area,
+    minX,
+    minY,
+    maxX,
+    maxY,
+    fillRatio,
+    minArea,
+    frameWidth,
+    frameHeight,
+    pixelCount,
+    hintOverlaps,
+    hints
+  );
+  const boxWidth = maxX - minX + 1;
+  const boxHeight = maxY - minY + 1;
+  const aspectRatio = Math.max(boxWidth / boxHeight, boxHeight / boxWidth);
+  const aspectPenalty = Math.max(0, aspectRatio - 1.9) * 2.8;
+  const handFillBonus =
+    clamp(1 - Math.abs(fillRatio - 0.42) / 0.34, 0, 1) * 1.2;
+  const palmCoreBonus = clamp((coreFillRatio - 0.08) / 0.52, 0, 1) * 3;
+  const hollowCorePenalty = Math.max(0, 0.12 - coreFillRatio) * 20;
+
+  return (
+    baseScore +
+    handFillBonus -
+    aspectPenalty +
+    palmCoreBonus -
+    hollowCorePenalty
   );
 }
 
@@ -493,6 +604,25 @@ function buildGloveRegions(
     );
   }
   return regions;
+}
+
+function buildRegionScores(
+  regions: ReadonlyArray<GloveVisionRegion>,
+  selectedIds: Int32Array,
+  selectedScores: Float64Array
+): number[] {
+  let componentCount = 0;
+  while (
+    componentCount < selectedIds.length &&
+    selectedIds[componentCount] !== 0
+  ) {
+    componentCount++;
+  }
+  if (componentCount === 0) return [];
+  if (regions.length > componentCount) {
+    return regions.map(() => selectedScores[0]);
+  }
+  return regions.map((_, index) => selectedScores[index]);
 }
 
 /**
@@ -879,7 +1009,585 @@ export function enhanceDarkGloveFrame(
     maskCoverage: selectedPixelCount / pixelCount,
     threshold,
     regions,
+    candidateScore: selectedScores[0],
+    candidateScores: buildRegionScores(regions, selectedIds, selectedScores),
   };
+}
+
+function makeHintSquareRegion(
+  hint: ClippedHintRegion,
+  frameWidth: number,
+  frameHeight: number
+): GloveVisionRegion {
+  const hintWidth = hint.maxX - hint.minX;
+  const hintHeight = hint.maxY - hint.minY;
+  const side = Math.max(
+    1,
+    Math.min(Math.max(hintWidth, hintHeight), frameWidth, frameHeight)
+  );
+  const centerX = (hint.minX + hint.maxX) * 0.5;
+  const centerY = (hint.minY + hint.maxY) * 0.5;
+  return {
+    x: Math.round(clamp(centerX - side * 0.5, 0, frameWidth - side)),
+    y: Math.round(clamp(centerY - side * 0.5, 0, frameHeight - side)),
+    width: side,
+    height: side,
+    area: hint.area,
+  };
+}
+
+function enhanceHintRegions(
+  data: Uint8ClampedArray,
+  output: Uint8ClampedArray,
+  width: number,
+  height: number,
+  hints: ReadonlyArray<ClippedHintRegion>
+): void {
+  const lightAt = (pixel: number) => {
+    const offset = pixel * 4;
+    return luminance(data[offset], data[offset + 1], data[offset + 2]);
+  };
+
+  for (const hint of hints) {
+    let lightSum = 0;
+    let sampleCount = 0;
+    for (let y = hint.minY; y < hint.maxY; y += 2) {
+      let pixel = y * width + hint.minX;
+      for (let x = hint.minX; x < hint.maxX; x += 2, pixel += 2) {
+        lightSum += lightAt(pixel);
+        sampleCount++;
+      }
+    }
+    const meanLight = sampleCount > 0 ? lightSum / sampleCount : 128;
+
+    const minY = Math.max(1, hint.minY);
+    const maxY = Math.min(height - 1, hint.maxY);
+    const minX = Math.max(1, hint.minX);
+    const maxX = Math.min(width - 1, hint.maxX);
+    for (let y = minY; y < maxY; y++) {
+      let pixel = y * width + minX;
+      for (let x = minX; x < maxX; x++, pixel++) {
+        const center = lightAt(pixel);
+        const laplacian =
+          center * 4 -
+          lightAt(pixel - 1) -
+          lightAt(pixel + 1) -
+          lightAt(pixel - width) -
+          lightAt(pixel + width);
+        const delta = Math.round(
+          clamp(laplacian * 0.2, -20, 20) +
+            clamp((center - meanLight) * 0.12, -8, 8)
+        );
+        const offset = pixel * 4;
+        output[offset] = clamp(data[offset] + delta, 0, 255);
+        output[offset + 1] = clamp(data[offset + 1] + delta, 0, 255);
+        output[offset + 2] = clamp(data[offset + 2] + delta, 0, 255);
+      }
+    }
+  }
+}
+
+/**
+ * Builds a skin-like MediaPipe retry image for bright, low-chroma gloves.
+ * Local sharpening keeps folds and contours without producing a binary edge
+ * image.
+ */
+export function enhanceLightGloveFrame(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  maxHands = 2,
+  preferredRegions: ReadonlyArray<GloveVisionRegion> = []
+): EnhancedGloveFrame {
+  const pixelCount = validateFrame(data, width, height);
+  if (!Number.isFinite(maxHands)) {
+    throw new RangeError("maxHands must be finite");
+  }
+
+  const output = new Uint8ClampedArray(data);
+  const hints = clipHintRegions(preferredRegions, width, height);
+  const requestedComponents = Math.min(
+    MAX_COMPONENTS,
+    Math.max(0, Math.trunc(maxHands))
+  );
+  const histogram = new Uint32Array(256);
+  let opaquePixelCount = 0;
+  for (let pixel = 0, offset = 0; pixel < pixelCount; pixel++, offset += 4) {
+    if (data[offset + 3] < 16) continue;
+    histogram[luminance(data[offset], data[offset + 1], data[offset + 2])]++;
+    opaquePixelCount++;
+  }
+
+  const threshold = adaptiveLightThreshold(histogram, opaquePixelCount);
+  if (requestedComponents === 0 || opaquePixelCount === 0) {
+    return {
+      pixels: output,
+      found: false,
+      maskCoverage: 0,
+      threshold,
+      regions: [],
+    };
+  }
+
+  const labels = new Int32Array(pixelCount);
+  for (let pixel = 0, offset = 0; pixel < pixelCount; pixel++, offset += 4) {
+    if (
+      data[offset + 3] >= 16 &&
+      isLowChromaLight(
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        threshold
+      )
+    ) {
+      labels[pixel] = -1;
+    }
+  }
+  bridgeSinglePixelLightGaps(labels, width, height);
+
+  const queue = new Int32Array(pixelCount);
+  const selectedIds = new Int32Array(requestedComponents);
+  const selectedAreas = new Int32Array(requestedComponents);
+  const selectedMinX = new Int32Array(requestedComponents);
+  const selectedMinY = new Int32Array(requestedComponents);
+  const selectedMaxX = new Int32Array(requestedComponents);
+  const selectedMaxY = new Int32Array(requestedComponents);
+  const selectedScores = new Float64Array(requestedComponents);
+  selectedScores.fill(Number.NEGATIVE_INFINITY);
+  const minArea = Math.max(24, Math.floor(pixelCount * 0.0025));
+  const maxArea = Math.floor(pixelCount * 0.56);
+  const minExtent = Math.max(4, Math.floor(Math.min(width, height) * 0.025));
+  const hintOverlaps = new Int32Array(hints.length);
+  let componentId = 0;
+  for (let start = 0; start < pixelCount; start++) {
+    if (labels[start] !== -1) continue;
+
+    componentId++;
+    let head = 0;
+    let tail = 0;
+    let area = 0;
+    let minX = width;
+    let maxX = 0;
+    let minY = height;
+    let maxY = 0;
+    hintOverlaps.fill(0);
+    labels[start] = componentId;
+    queue[tail++] = start;
+
+    while (head < tail) {
+      const pixel = queue[head++];
+      const x = pixel % width;
+      const y = (pixel / width) | 0;
+      area++;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+      for (let hintIndex = 0; hintIndex < hints.length; hintIndex++) {
+        const hint = hints[hintIndex];
+        if (
+          x >= hint.minX &&
+          x < hint.maxX &&
+          y >= hint.minY &&
+          y < hint.maxY
+        ) {
+          hintOverlaps[hintIndex]++;
+        }
+      }
+
+      const fromY = y > 0 ? y - 1 : y;
+      const toY = y + 1 < height ? y + 1 : y;
+      const fromX = x > 0 ? x - 1 : x;
+      const toX = x + 1 < width ? x + 1 : x;
+      for (let neighborY = fromY; neighborY <= toY; neighborY++) {
+        let neighbor = neighborY * width + fromX;
+        for (let neighborX = fromX; neighborX <= toX; neighborX++, neighbor++) {
+          if (neighborX === x && neighborY === y) continue;
+          if (labels[neighbor] === -1) {
+            labels[neighbor] = componentId;
+            queue[tail++] = neighbor;
+          }
+        }
+      }
+    }
+    const boxWidth = maxX - minX + 1;
+    const boxHeight = maxY - minY + 1;
+    const fillRatio = area / (boxWidth * boxHeight);
+    const spansOppositeBorders =
+      (minX === 0 && maxX === width - 1) || (minY === 0 && maxY === height - 1);
+    if (
+      area < minArea ||
+      area > maxArea ||
+      boxWidth < minExtent ||
+      boxHeight < minExtent ||
+      fillRatio < 0.1 ||
+      fillRatio > 0.88 ||
+      spansOppositeBorders
+    ) {
+      continue;
+    }
+
+    const coreMinX = minX + Math.floor(boxWidth * 0.3);
+    const coreMaxX = maxX - Math.floor(boxWidth * 0.3);
+    const coreMinY = minY + Math.floor(boxHeight * 0.3);
+    const coreMaxY = maxY - Math.floor(boxHeight * 0.3);
+    let corePixels = 0;
+    let coreArea = 0;
+    for (let coreY = coreMinY; coreY <= coreMaxY; coreY++) {
+      let corePixel = coreY * width + coreMinX;
+      for (let coreX = coreMinX; coreX <= coreMaxX; coreX++, corePixel++) {
+        coreArea++;
+        if (labels[corePixel] === componentId) corePixels++;
+      }
+    }
+    const coreFillRatio = corePixels / Math.max(coreArea, 1);
+    const candidateScore = lightComponentCandidateScore(
+      area,
+      minX,
+      minY,
+      maxX,
+      maxY,
+      fillRatio,
+      coreFillRatio,
+      minArea,
+      width,
+      height,
+      pixelCount,
+      hintOverlaps,
+      hints
+    );
+    for (let slot = 0; slot < requestedComponents; slot++) {
+      if (
+        candidateScore < selectedScores[slot] ||
+        (candidateScore === selectedScores[slot] && area <= selectedAreas[slot])
+      ) {
+        continue;
+      }
+      for (let move = requestedComponents - 1; move > slot; move--) {
+        selectedScores[move] = selectedScores[move - 1];
+        selectedAreas[move] = selectedAreas[move - 1];
+        selectedIds[move] = selectedIds[move - 1];
+        selectedMinX[move] = selectedMinX[move - 1];
+        selectedMinY[move] = selectedMinY[move - 1];
+        selectedMaxX[move] = selectedMaxX[move - 1];
+        selectedMaxY[move] = selectedMaxY[move - 1];
+      }
+      selectedScores[slot] = candidateScore;
+      selectedAreas[slot] = area;
+      selectedIds[slot] = componentId;
+      selectedMinX[slot] = minX;
+      selectedMinY[slot] = minY;
+      selectedMaxX[slot] = maxX;
+      selectedMaxY[slot] = maxY;
+      break;
+    }
+  }
+  if (selectedIds[0] === 0) {
+    const hintRegions = hints
+      .slice(0, requestedComponents)
+      .map(hint => makeHintSquareRegion(hint, width, height));
+    if (hintRegions.length === 0) {
+      return {
+        pixels: output,
+        found: false,
+        maskCoverage: 0,
+        threshold,
+        regions: [],
+      };
+    }
+
+    enhanceHintRegions(data, output, width, height, hints);
+    return {
+      pixels: output,
+      found: true,
+      maskCoverage: 0,
+      threshold,
+      regions: hintRegions,
+    };
+  }
+
+  const regions = buildGloveRegions(
+    selectedIds,
+    selectedAreas,
+    selectedMinX,
+    selectedMinY,
+    selectedMaxX,
+    selectedMaxY,
+    width,
+    height,
+    pixelCount,
+    minArea
+  );
+  const firstId = selectedIds[0];
+  const secondId = requestedComponents > 1 ? selectedIds[1] : 0;
+  const selectedMask = new Uint8Array(pixelCount);
+  for (let pixel = 0; pixel < pixelCount; pixel++) {
+    const label = labels[pixel];
+    if (label === firstId || (secondId !== 0 && label === secondId)) {
+      selectedMask[pixel] = 1;
+    }
+  }
+  const isSelected = (pixel: number) => selectedMask[pixel] !== 0;
+  const outside = new Uint8Array(pixelCount);
+  let head = 0;
+  let tail = 0;
+  const seedOutside = (pixel: number) => {
+    if (!isSelected(pixel) && outside[pixel] === 0) {
+      outside[pixel] = 1;
+      queue[tail++] = pixel;
+    }
+  };
+  const enqueueNeighbors = (pixel: number, mark: number) => {
+    const x = pixel % width;
+    const enqueue = (next: number) => {
+      if (!isSelected(next) && outside[next] === 0) {
+        outside[next] = mark;
+        queue[tail++] = next;
+      }
+    };
+    if (x > 0) enqueue(pixel - 1);
+    if (x + 1 < width) enqueue(pixel + 1);
+    if (pixel >= width) enqueue(pixel - width);
+    if (pixel + width < pixelCount) enqueue(pixel + width);
+  };
+
+  for (let x = 0; x < width; x++) {
+    seedOutside(x);
+    if (height > 1) seedOutside((height - 1) * width + x);
+  }
+  for (let y = 1; y + 1 < height; y++) {
+    seedOutside(y * width);
+    if (width > 1) seedOutside(y * width + width - 1);
+  }
+  while (head < tail) {
+    enqueueNeighbors(queue[head++], 1);
+  }
+  const selectedArea =
+    selectedAreas[0] + (requestedComponents > 1 ? selectedAreas[1] : 0);
+  const maxHoleArea = Math.max(16, Math.floor(selectedArea * 0.18));
+  for (let start = 0; start < pixelCount; start++) {
+    if (isSelected(start) || outside[start] !== 0) continue;
+    head = 0;
+    tail = 0;
+    outside[start] = 2;
+    queue[tail++] = start;
+    while (head < tail) {
+      enqueueNeighbors(queue[head++], 2);
+    }
+    if (tail <= maxHoleArea) {
+      for (let index = 0; index < tail; index++) {
+        selectedMask[queue[index]] = 1;
+      }
+    }
+  }
+
+  for (let offset = 0; offset < data.length; offset += 4) {
+    output[offset] = (data[offset] * 3 + 46 * 5) >> 3;
+    output[offset + 1] = (data[offset + 1] * 3 + 50 * 5) >> 3;
+    output[offset + 2] = (data[offset + 2] * 3 + 56 * 5) >> 3;
+  }
+  const lightAt = (pixel: number) => {
+    const offset = pixel * 4;
+    return luminance(data[offset], data[offset + 1], data[offset + 2]);
+  };
+  let selectedPixelCount = 0;
+  for (let pixel = 0; pixel < pixelCount; pixel++) {
+    if (!isSelected(pixel)) continue;
+    const x = pixel % width;
+    const center = lightAt(pixel);
+    const left = x > 0 ? lightAt(pixel - 1) : center;
+    const right = x + 1 < width ? lightAt(pixel + 1) : center;
+    const top = pixel >= width ? lightAt(pixel - width) : center;
+    const bottom = pixel + width < pixelCount ? lightAt(pixel + width) : center;
+    const laplacian = center * 4 - left - right - top - bottom;
+    const detail = Math.round(
+      clamp((center - threshold) * 0.12, -12, 18) +
+        clamp(laplacian * 0.2, -22, 22)
+    );
+    const offset = pixel * 4;
+    output[offset] = clamp(SKIN_R + detail, 0, 255);
+    output[offset + 1] = clamp(SKIN_G + Math.round(detail * 0.78), 0, 255);
+    output[offset + 2] = clamp(SKIN_B + Math.round(detail * 0.58), 0, 255);
+    selectedPixelCount++;
+  }
+
+  return {
+    pixels: output,
+    found: true,
+    maskCoverage: selectedPixelCount / pixelCount,
+    threshold,
+    regions,
+    candidateScore: selectedScores[0],
+    candidateScores: buildRegionScores(regions, selectedIds, selectedScores),
+  };
+}
+
+interface EnhancedRegionCandidate {
+  frame: EnhancedGloveFrame;
+  region: GloveVisionRegion;
+  score: number;
+  sourceOrder: number;
+}
+
+function regionsRepresentSameHand(
+  first: GloveVisionRegion,
+  second: GloveVisionRegion
+): boolean {
+  const overlapWidth = Math.max(
+    0,
+    Math.min(first.x + first.width, second.x + second.width) -
+      Math.max(first.x, second.x)
+  );
+  const overlapHeight = Math.max(
+    0,
+    Math.min(first.y + first.height, second.y + second.height) -
+      Math.max(first.y, second.y)
+  );
+  const overlapArea = overlapWidth * overlapHeight;
+  const smallerArea = Math.min(
+    first.width * first.height,
+    second.width * second.height
+  );
+  return smallerArea > 0 && overlapArea / smallerArea >= 0.55;
+}
+
+function copyEnhancedRegion(
+  target: Uint8ClampedArray,
+  source: Uint8ClampedArray,
+  width: number,
+  height: number,
+  region: GloveVisionRegion
+): void {
+  const minX = Math.floor(clamp(region.x, 0, width));
+  const minY = Math.floor(clamp(region.y, 0, height));
+  const maxX = Math.ceil(clamp(region.x + region.width, 0, width));
+  const maxY = Math.ceil(clamp(region.y + region.height, 0, height));
+  for (let y = minY; y < maxY; y++) {
+    const from = (y * width + minX) * 4;
+    const to = (y * width + maxX) * 4;
+    target.set(source.subarray(from, to), from);
+  }
+}
+
+export function enhanceGloveFrame(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  maxHands = 2,
+  preferredRegions: ReadonlyArray<GloveVisionRegion> = []
+): EnhancedGloveFrame {
+  const light = enhanceLightGloveFrame(
+    data,
+    width,
+    height,
+    maxHands,
+    preferredRegions
+  );
+  const dark = enhanceDarkGloveFrame(
+    data,
+    width,
+    height,
+    maxHands,
+    preferredRegions
+  );
+  const lightHasMask = light.found && light.maskCoverage > 0;
+  const darkHasMask = dark.found && dark.maskCoverage > 0;
+  if (lightHasMask && darkHasMask) {
+    const requestedComponents = Math.min(
+      MAX_COMPONENTS,
+      Math.max(0, Math.trunc(maxHands))
+    );
+    const lightScore = light.candidateScore ?? Number.NEGATIVE_INFINITY;
+    const darkScore = dark.candidateScore ?? Number.NEGATIVE_INFINITY;
+
+    // Three regions represent the whole contour plus two alternating crops for
+    // one merged component. Keep that group intact instead of treating its
+    // overlapping crops as independent hands.
+    if (
+      light.regions.length > requestedComponents ||
+      dark.regions.length > requestedComponents
+    ) {
+      return lightScore >= darkScore ? light : dark;
+    }
+
+    const candidates: EnhancedRegionCandidate[] = [];
+    const addCandidates = (frame: EnhancedGloveFrame, sourceOrder: number) => {
+      frame.regions.forEach((region, index) => {
+        candidates.push({
+          frame,
+          region,
+          score:
+            frame.candidateScores?.[index] ??
+            frame.candidateScore ??
+            Number.NEGATIVE_INFINITY,
+          sourceOrder,
+        });
+      });
+    };
+    addCandidates(light, 0);
+    addCandidates(dark, 1);
+    candidates.sort(
+      (first, second) =>
+        second.score - first.score ||
+        second.region.area - first.region.area ||
+        first.sourceOrder - second.sourceOrder
+    );
+
+    const selected: EnhancedRegionCandidate[] = [];
+    for (const candidate of candidates) {
+      if (selected.length >= requestedComponents) break;
+      if (
+        selected.some(existing =>
+          regionsRepresentSameHand(existing.region, candidate.region)
+        )
+      ) {
+        continue;
+      }
+      selected.push(candidate);
+    }
+    if (selected.length === 0) {
+      return lightScore >= darkScore ? light : dark;
+    }
+
+    const baseFrame = selected[0].frame;
+    if (
+      selected.length === baseFrame.regions.length &&
+      selected.every(candidate => candidate.frame === baseFrame)
+    ) {
+      return baseFrame;
+    }
+
+    const pixels = new Uint8ClampedArray(baseFrame.pixels);
+    for (let index = 1; index < selected.length; index++) {
+      const candidate = selected[index];
+      if (candidate.frame !== baseFrame) {
+        copyEnhancedRegion(
+          pixels,
+          candidate.frame.pixels,
+          width,
+          height,
+          candidate.region
+        );
+      }
+    }
+    const usesLight = selected.some(candidate => candidate.frame === light);
+    const usesDark = selected.some(candidate => candidate.frame === dark);
+    return {
+      pixels,
+      found: true,
+      maskCoverage:
+        usesLight && usesDark
+          ? Math.min(1, light.maskCoverage + dark.maskCoverage)
+          : baseFrame.maskCoverage,
+      threshold: baseFrame.threshold,
+      regions: selected.map(candidate => candidate.region),
+      candidateScore: selected[0].score,
+      candidateScores: selected.map(candidate => candidate.score),
+    };
+  }
+  if (lightHasMask) return light;
+  if (darkHasMask) return dark;
+  return light.found ? light : dark;
 }
 
 function unknownSurface(): GloveSurfaceClassification {
