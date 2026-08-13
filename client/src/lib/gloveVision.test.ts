@@ -175,6 +175,34 @@ function makeHandFrame(
   return frame;
 }
 
+function makeLightHandFrame(
+  points: ReadonlyArray<readonly [number, number]> = POINTS,
+  surface: "rough" | "uniform" = "uniform"
+): { frame: Uint8ClampedArray; landmarks: GloveVisionLandmark[] } {
+  const frame = makeFrame([188, 194, 200]);
+  const handColor: Rgb = [244, 247, 250];
+  for (const [from, to] of CONNECTIONS) {
+    paintSegment(frame, points[from], points[to], 7, handColor);
+  }
+  if (surface === "rough") {
+    const seamColor: Rgb = [210, 218, 224];
+    for (const [from, to] of CONNECTIONS) {
+      paintSegment(frame, points[from], points[to], 1, seamColor, 0.12, 0.88);
+    }
+    for (const index of [0, 5, 9, 13, 17]) {
+      paintDisk(frame, points[index][0], points[index][1], 2, [226, 232, 237]);
+    }
+  }
+  return {
+    frame,
+    landmarks: points.map(([x, y]) => ({
+      x: x / (WIDTH - 1),
+      y: y / (HEIGHT - 1),
+      z: 0,
+    })),
+  };
+}
+
 function makeDarkFrame(): Uint8ClampedArray {
   return makeFrame([224, 228, 232]);
 }
@@ -265,6 +293,78 @@ describe("classifyGloveSurface", () => {
     expect(surface.isGlove).toBe(true);
     expect(surface.surface).toBe("back");
     expect(enhanced.found).toBe(true);
+  });
+
+  it("combines rough palm texture and uniform back texture with hand geometry", () => {
+    const mirroredPoints = POINTS.map(([x, y]) => [WIDTH - 1 - x, y] as const);
+    const rightPalmFrame = makeLightHandFrame(mirroredPoints, "rough");
+    const rightBackFrame = makeLightHandFrame(POINTS, "uniform");
+    const leftPalmFrame = makeLightHandFrame(POINTS, "rough");
+    const leftBackFrame = makeLightHandFrame(mirroredPoints, "uniform");
+
+    const classify = (
+      sample: ReturnType<typeof makeLightHandFrame>,
+      handedness: "Left" | "Right"
+    ) =>
+      classifyGloveSurface(
+        sample.frame,
+        WIDTH,
+        HEIGHT,
+        sample.landmarks,
+        handedness
+      );
+    const rightPalm = classify(rightPalmFrame, "Right");
+    const rightBack = classify(rightBackFrame, "Right");
+    const leftPalm = classify(leftPalmFrame, "Left");
+    const leftBack = classify(leftBackFrame, "Left");
+
+    expect(rightPalm).toMatchObject({ isGlove: true, surface: "palm" });
+    expect(rightPalm.lightRatio).toBeGreaterThan(0.75);
+    expect(rightPalm.confidence).toBeGreaterThan(0.5);
+    expect(rightBack.surface).toBe("back");
+    expect(leftPalm.surface).toBe("palm");
+    expect(leftBack.surface).toBe("back");
+  });
+
+  it("uses decisive glove texture when handedness metadata briefly flips", () => {
+    const roughPalm = makeLightHandFrame(POINTS, "rough");
+    const uniformBack = makeLightHandFrame(POINTS, "uniform");
+    const palmWithWrongGeometry = classifyGloveSurface(
+      roughPalm.frame,
+      WIDTH,
+      HEIGHT,
+      roughPalm.landmarks,
+      "Right"
+    );
+    const backWithWrongGeometry = classifyGloveSurface(
+      uniformBack.frame,
+      WIDTH,
+      HEIGHT,
+      uniformBack.landmarks,
+      "Left"
+    );
+
+    expect(palmWithWrongGeometry.surface).toBe("palm");
+    expect(backWithWrongGeometry.surface).toBe("back");
+  });
+
+  it("keeps a near-edge-on white hand orientation unknown", () => {
+    const sidePoints = POINTS.map(point => [...point] as [number, number]);
+    sidePoints[5] = [60, 70];
+    sidePoints[17] = [58, 64];
+    const side = makeLightHandFrame(sidePoints);
+
+    const result = classifyGloveSurface(
+      side.frame,
+      WIDTH,
+      HEIGHT,
+      side.landmarks,
+      "Right"
+    );
+
+    expect(result.isGlove).toBe(true);
+    expect(result.surface).toBe("unknown");
+    expect(result.confidence).toBe(0);
   });
 
   it("does not treat skin or an empty bright frame as a glove", () => {

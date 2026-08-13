@@ -20,6 +20,8 @@ export interface GloveFrame {
   hand: number;
   sensor_data: number[];
   quaternion: [number, number, number, number];
+  acceleration: [number, number, number] | null;
+  attitude: [number, number, number] | null;
   frame_id: number;
 }
 

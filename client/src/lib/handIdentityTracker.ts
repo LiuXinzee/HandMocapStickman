@@ -62,7 +62,7 @@ interface MatchedDetection<TSource extends string> {
 }
 
 const PALM_INDICES = [0, 5, 9, 13, 17] as const;
-const HANDEDNESS_SWITCH_FRAMES = 9;
+const HANDEDNESS_SWITCH_FRAMES = 15;
 
 function clamp(value: number, min: number, max: number): number {
   return value < min ? min : value > max ? max : value;
@@ -127,6 +127,22 @@ function makeDetectionFeature<TSource extends string>(
     centerY,
     scale,
   };
+}
+
+function assignColdStartHandedness<TSource extends string>(
+  detections: Array<DetectionFeature<TSource>>
+): void {
+  if (detections.length !== 2) return;
+  const labels = new Set(detections.map(detection => detection.handedness));
+  if (labels.has("Left") && labels.has("Right")) return;
+
+  const spatialOrder = [...detections].sort(
+    (first, second) => first.centerX - second.centerX
+  );
+  // The source frame is not mirrored: the user's right hand appears on the
+  // left side of the camera image during a normal two-hand cold start.
+  spatialOrder[0].handedness = "Right";
+  spatialOrder[1].handedness = "Left";
 }
 
 function normalizedShapeDistance<TSource extends string>(
@@ -202,7 +218,8 @@ function matchCost<TSource extends string>(
 
 function updateHandednessEvidence(
   track: HandTrack,
-  observedHandedness: string
+  observedHandedness: string,
+  allowSwitch: boolean
 ): void {
   track.leftEvidence *= 0.9;
   track.rightEvidence *= 0.9;
@@ -234,13 +251,78 @@ function updateHandednessEvidence(
     track.pendingHandednessFrames = 1;
   }
 
-  if (track.pendingHandednessFrames >= HANDEDNESS_SWITCH_FRAMES) {
+  if (
+    allowSwitch &&
+    track.pendingHandednessFrames >= HANDEDNESS_SWITCH_FRAMES
+  ) {
     track.stableHandedness = observedHandedness;
     track.pendingHandedness = "Unknown";
     track.pendingHandednessFrames = 0;
     track.leftEvidence = observedHandedness === "Left" ? 2.5 : 0;
     track.rightEvidence = observedHandedness === "Right" ? 2.5 : 0;
   }
+}
+
+function setStableHandedness(track: HandTrack, handedness: string): void {
+  track.stableHandedness = handedness;
+  track.pendingHandedness = "Unknown";
+  track.pendingHandednessFrames = 0;
+  track.leftEvidence = handedness === "Left" ? 2.5 : 0;
+  track.rightEvidence = handedness === "Right" ? 2.5 : 0;
+}
+
+function oppositeHandedness(handedness: string): string {
+  return handedness === "Left" ? "Right" : "Left";
+}
+
+function ensureUniqueHandednessPair(tracks: HandTrack[]): void {
+  if (tracks.length !== 2) return;
+  const [first, second] = tracks;
+  if (
+    first.stableHandedness !== "Unknown" &&
+    second.stableHandedness !== "Unknown" &&
+    first.stableHandedness !== second.stableHandedness
+  ) {
+    return;
+  }
+
+  if (
+    first.stableHandedness === "Unknown" &&
+    second.stableHandedness !== "Unknown"
+  ) {
+    setStableHandedness(first, oppositeHandedness(second.stableHandedness));
+    return;
+  }
+  if (
+    second.stableHandedness === "Unknown" &&
+    first.stableHandedness !== "Unknown"
+  ) {
+    setStableHandedness(second, oppositeHandedness(first.stableHandedness));
+    return;
+  }
+
+  if (
+    first.stableHandedness === second.stableHandedness &&
+    first.age !== second.age
+  ) {
+    const established = first.age > second.age ? first : second;
+    const newer = established === first ? second : first;
+    const establishedSide =
+      established.stableHandedness === "Unknown"
+        ? established.centerX < newer.centerX
+          ? "Right"
+          : "Left"
+        : established.stableHandedness;
+    setStableHandedness(established, establishedSide);
+    setStableHandedness(newer, oppositeHandedness(establishedSide));
+    return;
+  }
+
+  const spatialOrder = [...tracks].sort(
+    (leftmost, rightmost) => leftmost.centerX - rightmost.centerX
+  );
+  setStableHandedness(spatialOrder[0], "Right");
+  setStableHandedness(spatialOrder[1], "Left");
 }
 
 /**
@@ -291,6 +373,9 @@ export class HandIdentityTracker<TSource extends string = string> {
     }
 
     const assignment = this.findBestAssignment(features);
+    if (this.tracks.length === 0) {
+      assignColdStartHandedness(features);
+    }
     const matched: Array<MatchedDetection<TSource>> = [];
     const usedDetections = new Uint8Array(features.length);
 
@@ -306,7 +391,7 @@ export class HandIdentityTracker<TSource extends string = string> {
 
       const detection = features[detectionIndex];
       usedDetections[detectionIndex] = 1;
-      this.updateTrack(track, detection);
+      this.updateTrack(track, detection, this.tracks.length < 2);
       matched.push({ track, detection });
     }
 
@@ -331,6 +416,8 @@ export class HandIdentityTracker<TSource extends string = string> {
         matched.push({ track, detection });
       }
     }
+
+    ensureUniqueHandednessPair(this.tracks);
 
     matched.sort((first, second) => first.track.order - second.track.order);
     return {
@@ -417,7 +504,8 @@ export class HandIdentityTracker<TSource extends string = string> {
 
   private updateTrack(
     track: HandTrack,
-    detection: DetectionFeature<TSource>
+    detection: DetectionFeature<TSource>,
+    allowHandednessSwitch: boolean
   ): void {
     const elapsedFrames = track.missedFrames + 1;
     const observedVelocityX =
@@ -432,6 +520,10 @@ export class HandIdentityTracker<TSource extends string = string> {
     track.landmarks = detection.landmarks;
     track.missedFrames = 0;
     track.age++;
-    updateHandednessEvidence(track, detection.handedness);
+    updateHandednessEvidence(
+      track,
+      detection.handedness,
+      allowHandednessSwitch
+    );
   }
 }

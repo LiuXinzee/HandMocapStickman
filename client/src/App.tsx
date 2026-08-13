@@ -10,6 +10,9 @@ import Train from "./pages/Train";
 import Translate from "./pages/Translate";
 import TrainSkeleton from "./pages/TrainSkeleton";
 import VirtualMocap from "./pages/VirtualMocap";
+import DynamicCollect from "./pages/DynamicCollect";
+import DynamicTrain from "./pages/DynamicTrain";
+import DynamicTranslate from "./pages/DynamicTranslate";
 
 function Router() {
   return (
@@ -19,6 +22,9 @@ function Router() {
       <Route path={"/train"} component={Train} />
       <Route path={"/train-skeleton"} component={TrainSkeleton} />
       <Route path={"/translate"} component={Translate} />
+      <Route path={"/collect-dynamic"} component={DynamicCollect} />
+      <Route path={"/train-dynamic"} component={DynamicTrain} />
+      <Route path={"/translate-dynamic"} component={DynamicTranslate} />
       <Route path={"/mocap"} component={VirtualMocap} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />

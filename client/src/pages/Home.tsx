@@ -29,6 +29,9 @@ import {
   MessageSquare,
   Bone,
   Hand,
+  Clapperboard,
+  BrainCircuit,
+  Radio,
 } from "lucide-react";
 import { Link } from "wouter";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -55,7 +58,7 @@ export default function Home() {
   // ===== 同步录制 =====
   const recorder = useSyncRecorder();
 
-  // ===== 手套双手连接 (Web Serial API 直连，296B 带加速度) =====
+  // ===== 手套双手连接 (Web Serial API 直连，自动兼容 272B/296B) =====
   const {
     left: gloveLeft,
     right: gloveRight,
@@ -139,7 +142,7 @@ export default function Home() {
   if (!isRunning && !isLoading) {
     return (
       <div
-        className="min-h-screen flex flex-col items-center justify-center relative overflow-hidden"
+        className="min-h-screen flex flex-col items-center justify-center relative overflow-x-hidden overflow-y-auto py-8"
         style={{
           backgroundImage: `url(${HERO_BG})`,
           backgroundSize: "cover",
@@ -263,6 +266,9 @@ export default function Home() {
             <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider text-center mb-2">
               Sign Language Recognition System
             </div>
+            <div className="text-[8px] font-mono text-[#445566] uppercase tracking-wider mb-1">
+              静态手势 · 单帧分类
+            </div>
             <div className="grid grid-cols-3 gap-2">
               <Link href="/collect" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#00f0ff]/50 transition-all duration-200 block">
                 <Database className="w-5 h-5 mx-auto text-[#00f0ff] mb-1" />
@@ -275,6 +281,23 @@ export default function Home() {
               <Link href="/translate" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#ff2d7b]/50 transition-all duration-200 block">
                 <MessageSquare className="w-5 h-5 mx-auto text-[#ff2d7b] mb-1" />
                 <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">手语翻译</div>
+              </Link>
+            </div>
+            <div className="text-[8px] font-mono text-[#445566] uppercase tracking-wider mt-2 mb-1">
+              动态手势 · TCN 时序分类
+            </div>
+            <div className="grid grid-cols-3 gap-2">
+              <Link href="/collect-dynamic" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#00f0ff]/50 transition-all duration-200 block">
+                <Clapperboard className="w-5 h-5 mx-auto text-[#00f0ff] mb-1" />
+                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">动态采集</div>
+              </Link>
+              <Link href="/train-dynamic" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#00e5a0]/50 transition-all duration-200 block">
+                <BrainCircuit className="w-5 h-5 mx-auto text-[#00e5a0] mb-1" />
+                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">TCN 训练</div>
+              </Link>
+              <Link href="/translate-dynamic" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#ff2d7b]/50 transition-all duration-200 block">
+                <Radio className="w-5 h-5 mx-auto text-[#ff2d7b] mb-1" />
+                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">动态识别</div>
               </Link>
             </div>
             <div className="grid grid-cols-2 gap-2 mt-2">

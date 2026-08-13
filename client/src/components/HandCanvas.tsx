@@ -116,16 +116,15 @@ export default function HandCanvas({
           drawSkeleton(ctx, smoothed, canvas.width, canvas.height);
           drawJoints(ctx, smoothed, canvas.width, canvas.height);
           drawPalmCrosshair(ctx, smoothed, canvas.width, canvas.height);
-          if ((currentResults.gloveConfidences[handIdx] ?? 0) >= 0.45) {
-            drawSurfaceLabel(
-              ctx,
-              smoothed,
-              canvas.width,
-              canvas.height,
-              currentResults.surfaces[handIdx],
-              currentResults.surfaceConfidences[handIdx] ?? 0
-            );
-          }
+          drawHandLabel(
+            ctx,
+            smoothed,
+            canvas.width,
+            canvas.height,
+            currentResults.handedness[handIdx],
+            currentResults.surfaces[handIdx],
+            currentResults.surfaceConfidences[handIdx] ?? 0
+          );
         });
       }
 
@@ -408,11 +407,12 @@ export default function HandCanvas({
     ctx.restore();
   }
 
-  function drawSurfaceLabel(
+  function drawHandLabel(
     ctx: CanvasRenderingContext2D,
     landmarks: { x: number; y: number; z: number }[],
     w: number,
     h: number,
+    handedness: string | undefined,
     surface: HandResult["surfaces"][number] | undefined,
     confidence: number
   ) {
@@ -425,12 +425,14 @@ export default function HandCanvas({
       (palmIndices.reduce((sum, i) => sum + landmarks[i].y, 0) /
         palmIndices.length) *
       h;
-    const text =
+    const handText =
+      handedness === "Left" ? "左手" : handedness === "Right" ? "右手" : "手部";
+    const surfaceText =
       surface === "palm"
-        ? "掌心 · 银色面"
+        ? "手心"
         : surface === "back"
-          ? "手背 · 黑色面"
-          : "手套方向识别中";
+          ? "手背"
+          : "正反面识别中";
     const color =
       surface === "palm"
         ? "#d8e2e8"
@@ -440,7 +442,11 @@ export default function HandCanvas({
 
     ctx.save();
     ctx.font = '11px "JetBrains Mono", monospace';
-    const label = `${text} ${Math.round(confidence * 100)}%`;
+    const confidenceText =
+      surface === "unknown" || !surface
+        ? ""
+        : ` ${Math.round(confidence * 100)}%`;
+    const label = `${handText} · ${surfaceText}${confidenceText}`;
     const labelWidth = ctx.measureText(label).width + 16;
     const boxX = Math.min(Math.max(6, x + 24), w - labelWidth - 6);
     const boxY = Math.min(Math.max(20, y - 30), h - 24);

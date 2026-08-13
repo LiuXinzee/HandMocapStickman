@@ -16,16 +16,28 @@ import {
 } from "@/lib/skeletonModel";
 import { getLatestSkeletonModel } from "@/lib/datasetStore";
 import { FINGER_CONNECTION_GROUPS } from "@/hooks/useHandTracking";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { getBendValues } from "@/lib/sensorMapping";
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link } from "wouter";
 import {
   ArrowLeft,
   Bone,
+  Box,
   Hand,
   Wifi,
   WifiOff,
   Activity,
 } from "lucide-react";
+
+const GlbHandScene = lazy(() => import("@/components/GlbHandScene"));
 
 const FINGER_COLORS: Record<string, string> = {
   thumb: "#00f0ff",
@@ -47,6 +59,11 @@ const FINGER_GLOW_COLORS: Record<string, string> = {
 
 const CANVAS_W = 640;
 const CANVAS_H = 480;
+type MocapViewMode = "skeleton" | "model";
+const NEUTRAL_GLB_POSE = {
+  quaternion: [1, 0, 0, 0] as const,
+  fingerBends: [0, 0, 0, 0, 0] as const,
+};
 
 export default function VirtualMocap() {
   const {
@@ -66,6 +83,7 @@ export default function VirtualMocap() {
   const [loadMsg, setLoadMsg] = useState("");
   const [predFps, setPredFps] = useState(0);
   const [confidence, setConfidence] = useState(0);
+  const [viewMode, setViewMode] = useState<MocapViewMode>("skeleton");
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef<number>(0);
@@ -74,6 +92,25 @@ export default function VirtualMocap() {
   );
   const fpsCountRef = useRef({ count: 0, lastTime: performance.now() });
   // 使用 useGloveSerial 暴露的全速 ref，不再自己维护
+
+  const glbPose = useMemo(() => {
+    if (!latestFrame) return null;
+    const sensorBends = getBendValues(
+      latestFrame.sensor_data,
+      latestFrame.hand
+    );
+    const anatomicalBends =
+      latestFrame.hand === 0x01 ? [...sensorBends].reverse() : sensorBends;
+    return {
+      quaternion: latestFrame.quaternion,
+      fingerBends: anatomicalBends.map(value =>
+        Math.min(90, (Math.max(0, value) / 255) * 90)
+      ),
+    };
+  }, [latestFrame]);
+  const glbHandIsLeft =
+    latestFrame?.hand === 0x01 || latestFrame?.hand === 0x03;
+  const displayedGlbPose = glbPose ?? NEUTRAL_GLB_POSE;
 
   // 自动加载最新骨架模型
   useEffect(() => {
@@ -143,10 +180,7 @@ export default function VirtualMocap() {
       let predicted = false;
 
       if (frame && modelReady && isSkeletonModelLoaded()) {
-        const landmarks = predictSkeleton(
-          frame.mapped_data,
-          frame.quaternion
-        );
+        const landmarks = predictSkeleton(frame.mapped_data, frame.quaternion);
 
         if (landmarks && landmarks.length === 21) {
           const smoothed = smoothLandmarks(landmarks);
@@ -202,7 +236,7 @@ export default function VirtualMocap() {
       style={{ backgroundColor: "#0a0e1a" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="min-h-12 flex flex-wrap items-center justify-between gap-2 px-3 sm:px-4 py-2 border-b border-[#00f0ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -215,13 +249,13 @@ export default function VirtualMocap() {
           <span className="text-xs font-bold tracking-widest text-[#f59e0b] font-mono">
             VIRTUAL MOCAP
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="hidden md:inline text-[9px] text-[#556677] font-mono ml-2">
             TACTILE → SKELETON RENDERING
           </span>
         </div>
-        <div className="flex items-center gap-4 text-[10px] font-mono">
+        <div className="ml-auto flex items-center gap-4 text-[10px] font-mono">
           {modelReady && (
-            <span className="text-[#f59e0b] flex items-center gap-1">
+            <span className="hidden sm:flex text-[#f59e0b] items-center gap-1">
               <Bone className="w-3 h-3" />
               MODEL: {modelName || "LOADED"}
             </span>
@@ -241,24 +275,49 @@ export default function VirtualMocap() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      <div className="flex-1 flex flex-col lg:flex-row overflow-auto lg:overflow-hidden min-h-0">
         {/* 主画布 */}
-        <div className="flex-1 flex items-center justify-center p-4">
+        <div className="flex-1 flex items-center justify-center p-2 sm:p-4 min-w-0">
           <div
-            className="relative border border-[#f59e0b]/20 rounded-sm overflow-hidden"
+            className="relative w-full max-w-[640px] aspect-[4/3] border border-[#f59e0b]/20 rounded-sm overflow-hidden"
             style={{
-              boxShadow: "0 0 30px rgba(245,158,11,0.1), inset 0 0 30px rgba(10,14,26,0.5)",
+              boxShadow:
+                "0 0 30px rgba(245,158,11,0.1), inset 0 0 30px rgba(10,14,26,0.5)",
             }}
           >
             <canvas
               ref={canvasRef}
-              className="block"
+              className={
+                (viewMode === "skeleton" ? "block" : "hidden") +
+                " w-full h-full"
+              }
               style={{
-                width: `${CANVAS_W}px`,
-                height: `${CANVAS_H}px`,
                 imageRendering: "auto",
               }}
             />
+            {viewMode === "model" && (
+              <Suspense
+                fallback={
+                  <div
+                    className="flex items-center justify-center text-[10px] font-mono text-[#f59e0b]"
+                    style={{ width: "100%", height: "100%" }}
+                  >
+                    正在加载 3D 手模...
+                  </div>
+                }
+              >
+                <GlbHandScene
+                  leftPose={glbHandIsLeft ? displayedGlbPose : null}
+                  rightPose={glbHandIsLeft ? null : displayedGlbPose}
+                  style={{ width: "100%", height: "100%", minHeight: 0 }}
+                />
+              </Suspense>
+            )}
+            {viewMode === "model" && !glbPose && (
+              <div className="absolute inset-0 flex items-center justify-center text-[10px] font-mono text-[#556677] pointer-events-none">
+                等待手套数据
+              </div>
+            )}
             {/* 模式标签 */}
             <div className="absolute top-2 left-2 px-2 py-0.5 rounded-sm bg-[#f59e0b]/15 border border-[#f59e0b]/30">
               <span className="text-[9px] font-mono text-[#f59e0b]">
@@ -266,11 +325,47 @@ export default function VirtualMocap() {
                 GLOVE-ONLY MODE
               </span>
             </div>
+            <div
+              className="absolute top-2 right-2 flex border border-[#f59e0b]/30 bg-[#0a0e1a]/85"
+              role="group"
+              aria-label="骨架显示模式"
+            >
+              <button
+                type="button"
+                className={
+                  "w-7 h-7 flex items-center justify-center transition-colors " +
+                  (viewMode === "skeleton"
+                    ? "bg-[#f59e0b]/20 text-[#f59e0b]"
+                    : "text-[#667788] hover:text-[#f59e0b]")
+                }
+                onClick={() => setViewMode("skeleton")}
+                aria-pressed={viewMode === "skeleton"}
+                aria-label="点线骨架"
+                title="点线骨架"
+              >
+                <Bone className="w-3.5 h-3.5" />
+              </button>
+              <button
+                type="button"
+                className={
+                  "w-7 h-7 flex items-center justify-center border-l border-[#f59e0b]/20 transition-colors " +
+                  (viewMode === "model"
+                    ? "bg-[#f59e0b]/20 text-[#f59e0b]"
+                    : "text-[#667788] hover:text-[#f59e0b]")
+                }
+                onClick={() => setViewMode("model")}
+                aria-pressed={viewMode === "model"}
+                aria-label="3D 手模"
+                title="3D 手模"
+              >
+                <Box className="w-3.5 h-3.5" />
+              </button>
+            </div>
           </div>
         </div>
 
         {/* 右侧面板 */}
-        <div className="w-64 border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-4 shrink-0">
+        <div className="w-full lg:w-64 border-t lg:border-t-0 lg:border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-4 shrink-0">
           {/* 手套连接 */}
           <Section title="GLOVE CONNECTION">
             <div className="flex items-center justify-between text-[10px] font-mono">
@@ -281,8 +376,8 @@ export default function VirtualMocap() {
                 {isConnected
                   ? "CONNECTED"
                   : isConnecting
-                  ? "CONNECTING..."
-                  : "DISCONNECTED"}
+                    ? "CONNECTING..."
+                    : "DISCONNECTED"}
               </span>
             </div>
             {isConnected && (
@@ -350,21 +445,19 @@ export default function VirtualMocap() {
                     confidence > 70
                       ? "#00e5a0"
                       : confidence > 40
-                      ? "#f59e0b"
-                      : "#ff2d7b",
+                        ? "#f59e0b"
+                        : "#ff2d7b",
                   boxShadow: `0 0 6px ${
                     confidence > 70
                       ? "rgba(0,229,160,0.5)"
                       : confidence > 40
-                      ? "rgba(245,158,11,0.5)"
-                      : "rgba(255,45,123,0.5)"
+                        ? "rgba(245,158,11,0.5)"
+                        : "rgba(255,45,123,0.5)"
                   }`,
                 }}
               />
             </div>
-            {loadMsg && (
-              <p className="text-[8px] text-[#f59e0b]">{loadMsg}</p>
-            )}
+            {loadMsg && <p className="text-[8px] text-[#f59e0b]">{loadMsg}</p>}
           </Section>
 
           {/* 传感器概览 */}
@@ -458,9 +551,14 @@ function MiniHeatmap({ data }: { data: number[] }) {
 
 // ===== Canvas 绘制函数 =====
 
-function computeSpread(landmarks: { x: number; y: number; z: number }[]): number {
+function computeSpread(
+  landmarks: { x: number; y: number; z: number }[]
+): number {
   // 基于关键点分布范围估算置信度
-  let minX = 1, maxX = 0, minY = 1, maxY = 0;
+  let minX = 1,
+    maxX = 0,
+    minY = 1,
+    maxY = 0;
   for (const lm of landmarks) {
     if (lm.x < minX) minX = lm.x;
     if (lm.x > maxX) maxX = lm.x;

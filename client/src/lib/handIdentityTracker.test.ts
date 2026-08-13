@@ -84,6 +84,38 @@ describe("HandIdentityTracker", () => {
     expect(centerX(reversed.landmarks[1])).toBeCloseTo(0.73, 2);
   });
 
+  it("assigns a unique physical side when a two-hand cold start has unusable labels", () => {
+    for (const labels of [
+      ["Unknown", "Unknown"],
+      ["Left", "Left"],
+      ["Right", "Right"],
+    ]) {
+      const tracker = new HandIdentityTracker<DetectionSource>();
+      const result = update(tracker, [
+        { x: 0.24, label: labels[0] },
+        { x: 0.76, label: labels[1] },
+      ]);
+
+      expect(result.handedness).toEqual(["Left", "Right"]);
+      expect(centerX(result.landmarks[0])).toBeCloseTo(0.76, 2);
+      expect(centerX(result.landmarks[1])).toBeCloseTo(0.24, 2);
+    }
+  });
+
+  it("keeps an established hand and assigns the later duplicate label to the opposite side", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    const first = update(tracker, [{ x: 0.74, label: "Left" }]);
+    const pair = update(tracker, [
+      { x: 0.72, label: "Left" },
+      { x: 0.24, label: "Left" },
+    ]);
+
+    expect(pair.trackingIds[0]).toBe(first.trackingIds[0]);
+    expect(pair.handedness).toEqual(["Left", "Right"]);
+    expect(centerX(pair.landmarks[0])).toBeCloseTo(0.72, 2);
+    expect(centerX(pair.landmarks[1])).toBeCloseTo(0.24, 2);
+  });
+
   it("ignores a one-frame handedness flip without changing identities", () => {
     const tracker = new HandIdentityTracker<DetectionSource>();
     const first = update(tracker, [
@@ -140,11 +172,28 @@ describe("HandIdentityTracker", () => {
     expect(centerX(crossed.landmarks[1])).toBeCloseTo(0.49, 2);
   });
 
-  it("requires nine consecutive opposite labels before switching handedness", () => {
+  it("locks a live two-hand pair through sustained opposite detector labels", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    const first = update(tracker, [
+      { x: 0.3, label: "Left" },
+      { x: 0.7, label: "Right" },
+    ]);
+
+    for (let frame = 0; frame < 24; frame++) {
+      const result = update(tracker, [
+        { x: 0.3, label: "Right" },
+        { x: 0.7, label: "Left" },
+      ]);
+      expect(result.trackingIds).toEqual(first.trackingIds);
+      expect(result.handedness).toEqual(["Left", "Right"]);
+    }
+  });
+
+  it("requires fifteen consecutive opposite labels before switching one hand", () => {
     const tracker = new HandIdentityTracker<DetectionSource>();
     const first = update(tracker, [{ x: 0.35, label: "Left" }]);
 
-    for (let frame = 0; frame < 8; frame++) {
+    for (let frame = 0; frame < 14; frame++) {
       const result = update(tracker, [{ x: 0.35, label: "Right" }]);
       expect(result.trackingIds).toEqual(first.trackingIds);
       expect(result.handedness).toEqual(["Left"]);

@@ -22,6 +22,7 @@ import {
   type HandDetectionCandidate,
 } from "@/lib/handDetectionFusion";
 import { HandIdentityTracker } from "@/lib/handIdentityTracker";
+import { stabilizeHandSurface } from "@/lib/handSurfaceStabilizer";
 import {
   excludeDetectedGloveRegions,
   GloveRoiTracker,
@@ -31,6 +32,8 @@ import {
   type MediaPipeHandsLike,
 } from "@/lib/mediaPipeHandsRunner";
 import { useCallback, useEffect, useRef, useState } from "react";
+
+const MEDIAPIPE_HANDS_ASSET_ROOT = "/vendor/mediapipe-hands";
 
 export const HAND_CONNECTIONS: [number, number][] = [
   [0, 1],
@@ -178,8 +181,7 @@ function loadMediaPipeScript(): Promise<void> {
       return;
     }
     const script = document.createElement("script");
-    script.src =
-      "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js";
+    script.src = `${MEDIAPIPE_HANDS_ASSET_ROOT}/hands.js`;
     script.setAttribute("data-mediapipe-hands", "true");
     script.crossOrigin = "anonymous";
     script.onload = () => {
@@ -187,18 +189,18 @@ function loadMediaPipeScript(): Promise<void> {
       resolve();
     };
     script.onerror = () => {
-      reject(new Error("Failed to load MediaPipe Hands script from CDN"));
+      reject(new Error("Failed to load local MediaPipe Hands script"));
     };
     document.head.appendChild(script);
   });
 }
 
-const DETECTION_FRAME_WIDTH = 512;
-const ANALYSIS_FRAME_WIDTH = 320;
+const DETECTION_FRAME_WIDTH = 640;
+const ANALYSIS_FRAME_WIDTH = 416;
 const MAIN_DETECTION_INTERVAL_MS = 1000 / 30;
 const ROI_DETECTION_SIZE = 256;
-const ROI_RETRY_INTERVAL_MS = 250;
-const ROI_RESULT_TTL_MS = 520;
+const ROI_RETRY_INTERVAL_MS = 180;
+const ROI_RESULT_TTL_MS = 680;
 const RESULT_HOLD_MS = 360;
 const SURFACE_ANALYSIS_INTERVAL_MS = 125;
 const UI_RESULT_INTERVAL_MS = 66;
@@ -341,7 +343,8 @@ function prepareRoiCanvas(
 
 function classifyVisibleHands(
   frame: ImageData | null,
-  hands: HandLandmark[][]
+  hands: HandLandmark[][],
+  handedness: ReadonlyArray<string>
 ): GloveSurfaceClassification[] {
   if (!frame) {
     return hands.map(() => ({
@@ -350,11 +353,18 @@ function classifyVisibleHands(
       silverRatio: 0,
       darkRatio: 0,
       confidence: 0,
+      lightRatio: 0,
     }));
   }
 
-  return hands.map(landmarks =>
-    classifyGloveSurface(frame.data, frame.width, frame.height, landmarks)
+  return hands.map((landmarks, index) =>
+    classifyGloveSurface(
+      frame.data,
+      frame.width,
+      frame.height,
+      landmarks,
+      handedness[index]
+    )
   );
 }
 
@@ -511,7 +521,10 @@ export function useHandTracking(
   const sessionRef = useRef(0);
   const teardownPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const surfaceTracksRef = useRef(
-    new Map<string, { score: number; gloveConfidence: number }>()
+    new Map<
+      string,
+      { score: number; surface: HandSurface; gloveConfidence: number }
+    >()
   );
 
   const [isLoading, setIsLoading] = useState(false);
@@ -662,9 +675,7 @@ export function useHandTracking(
 
       const createHands = () =>
         new HandsClass({
-          locateFile: (file: string) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`;
-          },
+          locateFile: (file: string) => `${MEDIAPIPE_HANDS_ASSET_ROOT}/${file}`,
         });
 
       const primaryHands = createHands();
@@ -702,7 +713,7 @@ export function useHandTracking(
           localRoiHands = roiHands;
           roiHands.setOptions({
             maxNumHands: 1,
-            modelComplexity: 0,
+            modelComplexity: 1,
             minDetectionConfidence: Math.min(minDetectionConfidence, 0.4),
             minTrackingConfidence: Math.min(
               0.75,
@@ -795,7 +806,7 @@ export function useHandTracking(
         const handedness = stableFrame.handedness;
         const trackingIds = stableFrame.trackingIds;
         const classifications = frame
-          ? classifyVisibleHands(frame, landmarks)
+          ? classifyVisibleHands(frame, landmarks, handedness)
           : null;
         const surfaces: HandSurface[] = [];
         const surfaceConfidences: number[] = [];
@@ -806,36 +817,38 @@ export function useHandTracking(
         stableCandidates.forEach((candidate, index) => {
           const key = trackingIds[index];
           const previous = surfaceTracksRef.current.get(key);
-          let score = previous?.score ?? 0;
           let gloveConfidence =
             previous?.gloveConfidence ??
             (candidate.source === "glove-roi" ? 0.6 : 0);
           const classification = classifications?.[index];
+          const { score, surface } = stabilizeHandSurface(
+            previous,
+            classification?.surface,
+            classification?.confidence ?? 0
+          );
           if (classification) {
-            const materialRatio =
-              classification.darkRatio + classification.silverRatio;
+            const materialRatio = clamp01(
+              classification.darkRatio +
+                classification.silverRatio +
+                classification.lightRatio
+            );
             const measuredGloveConfidence = classification.isGlove
               ? clamp01(0.5 + (materialRatio - 0.35) * 0.9)
               : clamp01((materialRatio - 0.2) * 0.8);
-            const evidence =
-              classification.surface === "palm"
-                ? classification.confidence
-                : classification.surface === "back"
-                  ? -classification.confidence
-                  : 0;
-            score = previous
-              ? previous.score * 0.68 + evidence * 0.32
-              : evidence;
             gloveConfidence = previous
               ? previous.gloveConfidence * 0.55 + measuredGloveConfidence * 0.45
               : measuredGloveConfidence;
           }
-          surfaceTracksRef.current.set(key, { score, gloveConfidence });
+          surfaceTracksRef.current.set(key, {
+            score,
+            surface,
+            gloveConfidence,
+          });
 
-          surfaces.push(
-            score > 0.16 ? "palm" : score < -0.16 ? "back" : "unknown"
+          surfaces.push(surface);
+          surfaceConfidences.push(
+            surface === "unknown" ? 0 : Math.max(Math.abs(score), 0.35)
           );
-          surfaceConfidences.push(Math.abs(score));
           gloveConfidences.push(gloveConfidence);
           if (
             gloveEnhancement &&

@@ -11,13 +11,13 @@
  */
 import { useCallback } from "react";
 import { useGloveSerial } from "./useGloveSerial";
-import type { GloveFrame } from "@/lib/gloveProtocol";
+import type { GloveFrame, GloveType2Length } from "@/lib/gloveProtocol";
 
 export interface DualGloveOptions {
   baudRate?: number;
   targetFps?: number;
-  /** type-2 数据段长度：168=带加速度(默认)，144=旧手套 */
-  type2Len?: number;
+  /** 固定 type-2 数据段长度；不设置时自动识别 144/168。 */
+  type2Len?: GloveType2Length;
   onLeftFrame?: (frame: GloveFrame) => void;
   onRightFrame?: (frame: GloveFrame) => void;
 }
@@ -34,14 +34,19 @@ export interface UseDualGloveSerialReturn {
   /** 两只手都已连接 */
   bothConnected: boolean;
   /** 断开两只手 */
-  disconnectAll: () => void;
+  disconnectAll: () => Promise<void>;
 }
 
 export function useDualGloveSerial(
   options: DualGloveOptions = {}
 ): UseDualGloveSerialReturn {
-  const { baudRate = 921600, targetFps = 30, type2Len, onLeftFrame, onRightFrame } =
-    options;
+  const {
+    baudRate = 921600,
+    targetFps = 30,
+    type2Len,
+    onLeftFrame,
+    onRightFrame,
+  } = options;
 
   const left = useGloveSerial({
     baudRate,
@@ -59,10 +64,11 @@ export function useDualGloveSerial(
     onFrame: onRightFrame,
   });
 
-  const disconnectAll = useCallback(() => {
-    left.disconnect();
-    right.disconnect();
-  }, [left, right]);
+  const disconnectLeft = left.disconnect;
+  const disconnectRight = right.disconnect;
+  const disconnectAll = useCallback(async () => {
+    await Promise.allSettled([disconnectLeft(), disconnectRight()]);
+  }, [disconnectLeft, disconnectRight]);
 
   return {
     left,

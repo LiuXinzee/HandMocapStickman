@@ -38,6 +38,7 @@ export interface GloveSurfaceClassification {
   silverRatio: number;
   darkRatio: number;
   confidence: number;
+  lightRatio: number;
 }
 
 const MAX_COMPONENTS = 2;
@@ -60,6 +61,7 @@ const UNKNOWN_SURFACE: GloveSurfaceClassification = {
   silverRatio: 0,
   darkRatio: 0,
   confidence: 0,
+  lightRatio: 0,
 };
 
 function validateFrame(
@@ -231,6 +233,42 @@ function bridgeSinglePixelLightGaps(
 
   for (let pixel = 0; pixel < labels.length; pixel++) {
     if (additions[pixel] !== 0) labels[pixel] = -1;
+  }
+}
+
+function closeLightMaskGaps(
+  labels: Int32Array,
+  width: number,
+  height: number,
+  passes = 2
+): void {
+  if (width < 3 || height < 3) return;
+
+  const additions = new Uint8Array(labels.length);
+  for (let pass = 0; pass < passes; pass++) {
+    additions.fill(0);
+    for (let y = 1; y + 1 < height; y++) {
+      let pixel = y * width + 1;
+      for (let x = 1; x + 1 < width; x++, pixel++) {
+        if (labels[pixel] === -1) continue;
+        let foregroundNeighbors = 0;
+        for (let neighborY = y - 1; neighborY <= y + 1; neighborY++) {
+          let neighbor = neighborY * width + x - 1;
+          for (
+            let neighborX = x - 1;
+            neighborX <= x + 1;
+            neighborX++, neighbor++
+          ) {
+            if (neighborX === x && neighborY === y) continue;
+            if (labels[neighbor] === -1) foregroundNeighbors++;
+          }
+        }
+        if (foregroundNeighbors >= 5) additions[pixel] = 1;
+      }
+    }
+    for (let pixel = 0; pixel < labels.length; pixel++) {
+      if (additions[pixel] !== 0) labels[pixel] = -1;
+    }
   }
 }
 
@@ -1075,8 +1113,8 @@ function enhanceHintRegions(
           lightAt(pixel - width) -
           lightAt(pixel + width);
         const delta = Math.round(
-          clamp(laplacian * 0.2, -20, 20) +
-            clamp((center - meanLight) * 0.12, -8, 8)
+          clamp(laplacian * 0.28, -26, 26) +
+            clamp((center - meanLight) * 0.16, -10, 10)
         );
         const offset = pixel * 4;
         output[offset] = clamp(data[offset] + delta, 0, 255);
@@ -1144,6 +1182,7 @@ export function enhanceLightGloveFrame(
     }
   }
   bridgeSinglePixelLightGaps(labels, width, height);
+  closeLightMaskGaps(labels, width, height);
 
   const queue = new Int32Array(pixelCount);
   const selectedIds = new Int32Array(requestedComponents);
@@ -1401,8 +1440,8 @@ export function enhanceLightGloveFrame(
     const bottom = pixel + width < pixelCount ? lightAt(pixel + width) : center;
     const laplacian = center * 4 - left - right - top - bottom;
     const detail = Math.round(
-      clamp((center - threshold) * 0.12, -12, 18) +
-        clamp(laplacian * 0.2, -22, 22)
+      clamp((center - threshold) * 0.15, -14, 22) +
+        clamp(laplacian * 0.28, -28, 28)
     );
     const offset = pixel * 4;
     output[offset] = clamp(SKIN_R + detail, 0, 255);
@@ -1594,6 +1633,99 @@ function unknownSurface(): GloveSurfaceClassification {
   return { ...UNKNOWN_SURFACE };
 }
 
+function classifySurfaceGeometry(
+  pointsX: Float32Array,
+  pointsY: Float32Array,
+  handedness: string
+): { surface: GloveSurface; confidence: number } {
+  const normalizedHandedness = handedness.trim().toLowerCase();
+  if (normalizedHandedness !== "left" && normalizedHandedness !== "right") {
+    return { surface: "unknown", confidence: 0 };
+  }
+
+  const indexX = pointsX[5] - pointsX[0];
+  const indexY = pointsY[5] - pointsY[0];
+  const pinkyX = pointsX[17] - pointsX[0];
+  const pinkyY = pointsY[17] - pointsY[0];
+  const vectorScale = Math.hypot(indexX, indexY) * Math.hypot(pinkyX, pinkyY);
+  if (!Number.isFinite(vectorScale) || vectorScale < 1e-4) {
+    return { surface: "unknown", confidence: 0 };
+  }
+
+  const normalizedCross = (indexX * pinkyY - indexY * pinkyX) / vectorScale;
+  const facingScore =
+    normalizedHandedness === "left" ? normalizedCross : -normalizedCross;
+  const orientationStrength = Math.abs(facingScore);
+  if (orientationStrength < 0.16) {
+    return { surface: "unknown", confidence: 0 };
+  }
+
+  return {
+    surface: facingScore > 0 ? "palm" : "back",
+    confidence: clamp(
+      0.52 + ((orientationStrength - 0.16) / 0.7) * 0.36,
+      0.52,
+      0.9
+    ),
+  };
+}
+
+function measureSurfaceRoughness(
+  data: Uint8ClampedArray,
+  width: number,
+  height: number,
+  sampleMask: Uint8Array,
+  lightDeviation: number
+): number {
+  let sampleCount = 0;
+  let gradientSum = 0;
+  let laplacianSum = 0;
+  let edgeCount = 0;
+  const lightAt = (pixel: number) => {
+    const offset = pixel * 4;
+    return luminance(data[offset], data[offset + 1], data[offset + 2]);
+  };
+
+  for (let y = 1; y + 1 < height; y++) {
+    let pixel = y * width + 1;
+    for (let x = 1; x + 1 < width; x++, pixel++) {
+      if (
+        sampleMask[pixel] === 0 ||
+        sampleMask[pixel - 1] === 0 ||
+        sampleMask[pixel + 1] === 0 ||
+        sampleMask[pixel - width] === 0 ||
+        sampleMask[pixel + width] === 0
+      ) {
+        continue;
+      }
+      const center = lightAt(pixel);
+      const left = lightAt(pixel - 1);
+      const right = lightAt(pixel + 1);
+      const top = lightAt(pixel - width);
+      const bottom = lightAt(pixel + width);
+      const gradient = Math.hypot((right - left) * 0.5, (bottom - top) * 0.5);
+      const laplacian = Math.abs(center * 4 - left - right - top - bottom);
+      gradientSum += Math.min(gradient, 64);
+      laplacianSum += Math.min(laplacian, 96);
+      if (gradient >= 9 || laplacian >= 15) edgeCount++;
+      sampleCount++;
+    }
+  }
+
+  if (sampleCount < 12) return 0.32;
+  const meanGradient = gradientSum / sampleCount;
+  const meanLaplacian = laplacianSum / sampleCount;
+  const edgeDensity = edgeCount / sampleCount;
+  return clamp(
+    clamp((meanGradient - 2.5) / 10, 0, 1) * 0.34 +
+      clamp((meanLaplacian - 3.5) / 18, 0, 1) * 0.34 +
+      clamp((edgeDensity - 0.04) / 0.26, 0, 1) * 0.2 +
+      clamp((lightDeviation - 2) / 15, 0, 1) * 0.12,
+    0,
+    1
+  );
+}
+
 /**
  * Classifies the visible glove face by sampling a narrow band around the
  * MediaPipe skeleton. Silver inserts indicate the palm; a predominantly dark
@@ -1603,7 +1735,8 @@ export function classifyGloveSurface(
   data: Uint8ClampedArray,
   width: number,
   height: number,
-  landmarks: ReadonlyArray<GloveVisionLandmark>
+  landmarks: ReadonlyArray<GloveVisionLandmark>,
+  handedness = "Unknown"
 ): GloveSurfaceClassification {
   const pixelCount = validateFrame(data, width, height);
   if (!Array.isArray(landmarks) || landmarks.length !== 21) {
@@ -1701,6 +1834,8 @@ export function classifyGloveSurface(
   let sampleCount = 0;
   let darkCount = 0;
   let darkLightSum = 0;
+  let sampleLightSum = 0;
+  let sampleLightSquaredSum = 0;
   for (let pixel = 0, offset = 0; pixel < pixelCount; pixel++, offset += 4) {
     if (sampleMask[pixel] === 0 || data[offset + 3] < 16) continue;
     sampleCount++;
@@ -1708,6 +1843,8 @@ export function classifyGloveSurface(
     const g = data[offset + 1];
     const b = data[offset + 2];
     const light = luminance(r, g, b);
+    sampleLightSum += light;
+    sampleLightSquaredSum += light * light;
 
     if (isLowChromaDark(r, g, b, 105)) {
       darkCount++;
@@ -1720,6 +1857,7 @@ export function classifyGloveSurface(
   const darkMean = darkCount > 0 ? darkLightSum / darkCount : 70;
   const silverThreshold = clamp(Math.round(darkMean + 60), 110, 145);
   let silverCount = 0;
+  let lightCount = 0;
   for (let pixel = 0, offset = 0; pixel < pixelCount; pixel++, offset += 4) {
     if (sampleMask[pixel] === 0 || data[offset + 3] < 16) continue;
     const r = data[offset];
@@ -1730,27 +1868,55 @@ export function classifyGloveSurface(
     const chroma = max - min;
     const light = luminance(r, g, b);
     if (light >= silverThreshold && min >= 82 && chroma <= 58) silverCount++;
+    if (isLowChromaLight(r, g, b, 165)) lightCount++;
   }
 
   const silverRatio = silverCount / sampleCount;
   const darkRatio = darkCount / sampleCount;
+  const lightRatio = lightCount / sampleCount;
   const materialRatio = silverRatio + darkRatio;
-  const isGlove =
+  const sampleLightMean = sampleLightSum / sampleCount;
+  const sampleLightVariance = Math.max(
+    0,
+    sampleLightSquaredSum / sampleCount - sampleLightMean * sampleLightMean
+  );
+  const sampleLightDeviation = Math.sqrt(sampleLightVariance);
+
+  const ringPadding = Math.max(3, Math.round(handSpan * 0.07));
+  const ringMinX = Math.max(0, Math.floor(minX - ringPadding));
+  const ringMaxX = Math.min(width - 1, Math.ceil(maxX + ringPadding));
+  const ringMinY = Math.max(0, Math.floor(minY - ringPadding));
+  const ringMaxY = Math.min(height - 1, Math.ceil(maxY + ringPadding));
+  let surroundingLightSum = 0;
+  let surroundingCount = 0;
+  for (let y = ringMinY; y <= ringMaxY; y++) {
+    let pixel = y * width + ringMinX;
+    for (let x = ringMinX; x <= ringMaxX; x++, pixel++) {
+      if (x >= minX && x <= maxX && y >= minY && y <= maxY) continue;
+      const offset = pixel * 4;
+      if (data[offset + 3] < 16) continue;
+      surroundingLightSum += luminance(
+        data[offset],
+        data[offset + 1],
+        data[offset + 2]
+      );
+      surroundingCount++;
+    }
+  }
+  const surroundingLightMean =
+    surroundingCount > 0
+      ? surroundingLightSum / surroundingCount
+      : sampleLightMean;
+  const lightContrast = sampleLightMean - surroundingLightMean;
+  const isLightGlove =
+    lightRatio >= 0.58 && (lightContrast >= 5 || sampleLightDeviation >= 4);
+  const isMaterialGlove =
     darkRatio >= 0.42 ||
     (darkRatio >= 0.2 && silverRatio >= 0.09 && materialRatio >= 0.5);
-
-  if (!isGlove) {
-    return {
-      surface: "unknown",
-      isGlove: false,
-      silverRatio,
-      darkRatio,
-      confidence: 0,
-    };
-  }
+  const isGlove = isMaterialGlove || isLightGlove;
 
   const silverShare = silverRatio / Math.max(materialRatio, 1e-6);
-  if (silverRatio >= 0.085 && silverShare >= 0.1) {
+  if (isMaterialGlove && silverRatio >= 0.085 && silverShare >= 0.1) {
     const silverEvidence = clamp((silverRatio - 0.06) / 0.28, 0, 1);
     const materialEvidence = clamp((materialRatio - 0.4) / 0.5, 0, 1);
     return {
@@ -1758,6 +1924,7 @@ export function classifyGloveSurface(
       isGlove: true,
       silverRatio,
       darkRatio,
+      lightRatio,
       confidence: clamp(
         0.52 + silverEvidence * 0.3 + materialEvidence * 0.16,
         0,
@@ -1774,6 +1941,7 @@ export function classifyGloveSurface(
       isGlove: true,
       silverRatio,
       darkRatio,
+      lightRatio,
       confidence: clamp(
         0.55 + darknessEvidence * 0.3 + purityEvidence * 0.12,
         0,
@@ -1782,11 +1950,48 @@ export function classifyGloveSurface(
     };
   }
 
+  const geometry = classifySurfaceGeometry(pointsX, pointsY, handedness);
+  if (geometry.surface !== "unknown") {
+    const geometryScore =
+      geometry.surface === "palm" ? geometry.confidence : -geometry.confidence;
+    const roughness = measureSurfaceRoughness(
+      data,
+      width,
+      height,
+      sampleMask,
+      sampleLightDeviation
+    );
+    const textureScore = clamp((roughness - 0.1) / 0.16, -1, 1);
+    const combinedScore =
+      lightRatio >= 0.35
+        ? geometryScore * 0.25 + textureScore * 0.75
+        : geometryScore;
+    if (Math.abs(combinedScore) < 0.2) {
+      return {
+        surface: "unknown",
+        isGlove,
+        silverRatio,
+        darkRatio,
+        lightRatio,
+        confidence: 0,
+      };
+    }
+    return {
+      surface: combinedScore > 0 ? "palm" : "back",
+      isGlove,
+      silverRatio,
+      darkRatio,
+      lightRatio,
+      confidence: clamp(0.5 + Math.abs(combinedScore) * 0.45, 0.5, 0.95),
+    };
+  }
+
   return {
     surface: "unknown",
-    isGlove: true,
+    isGlove,
     silverRatio,
     darkRatio,
+    lightRatio,
     confidence: 0,
   };
 }

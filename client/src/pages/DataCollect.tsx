@@ -166,6 +166,15 @@ export default function DataCollect() {
     refreshStats();
   }, [refreshStats]);
 
+  useEffect(() => {
+    return () => {
+      if (collectTimerRef.current) {
+        clearInterval(collectTimerRef.current);
+        collectTimerRef.current = null;
+      }
+    };
+  }, []);
+
   // 开始采集
   const startCollecting = useCallback(() => {
     if (!selectedWord || !bothReady) {
@@ -334,7 +343,7 @@ export default function DataCollect() {
       style={{ backgroundColor: "#0a0e1a" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="min-h-12 flex flex-wrap items-center justify-between gap-2 px-4 py-2 border-b border-[#00f0ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -357,6 +366,24 @@ export default function DataCollect() {
             VISION + TACTILE SYNC
           </span>
         </div>
+        <nav
+          className="flex items-center border border-[#00f0ff]/20 rounded-sm p-0.5 font-mono text-[10px]"
+          aria-label="采集模式"
+        >
+          <Link
+            href="/collect"
+            aria-current="page"
+            className="px-3 py-1 bg-[#00f0ff]/10 text-[#00f0ff] border border-[#00f0ff]/30 rounded-sm"
+          >
+            静态快照
+          </Link>
+          <Link
+            href="/collect-dynamic"
+            className="px-3 py-1 text-[#667788] hover:text-[#00f0ff] transition-colors"
+          >
+            动态片段
+          </Link>
+        </nav>
         <div className="flex items-center gap-4 text-[10px] font-mono">
           {/* 摄像头状态 */}
           {cameraRunning ? (
