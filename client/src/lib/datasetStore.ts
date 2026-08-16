@@ -16,12 +16,15 @@
  * - 通过知识蒸馏让触觉分支学习视觉分支的表征
  */
 
+import type { ImuHealthReport } from "./imuHealth";
+
 const DB_NAME = "hand_mocap_dataset";
-const DB_VERSION = 5; // v5: 样本升级为双手结构（left/right），旧单手样本不兼容，升级时清空
+const DB_VERSION = 6; // v6: 新增 sequences store（时序样本）；旧 samples 保持不动，供合成迁移读取
 const STORE_SAMPLES = "samples";
 const STORE_MODELS = "models";
 const STORE_SKELETON_MODELS = "skeleton_models";
 const STORE_SKELETON_SAMPLES = "skeleton_samples"; // 骨架姿态采集样本（独立于手语样本）
+const STORE_SEQUENCES = "sequences"; // 时序样本（动态手语词）
 
 export interface HandLandmarkPoint {
   x: number;
@@ -72,13 +75,104 @@ export interface SavedModel {
   labels: string[]; // 支持的词汇 ID 列表
   modelJson: string; // TF.js model topology JSON
   weightsData: ArrayBuffer; // 模型权重
-  modelType: "fused" | "tactile"; // 模型类型标记
+  /**
+   * 模型类型标记。
+   * - fused/tactile: 单帧静态 MLP（signLanguageModel.ts）
+   * - seq_fused/seq_tactile: 时序模型（sequenceModel.ts）
+   */
+  modelType: "fused" | "tactile" | "seq_fused" | "seq_tactile";
+  // ↓ 仅时序模型有值。推理时必须用与训练一致的 T / frameDim，否则输入形状对不上
+  seqLen?: number; // 定长重采样帧数 T
+  frameDim?: number; // 每帧特征维度
+  backbone?: string; // "tcn" | "tcn_bigru"
+}
+
+/** 是否为时序模型 */
+export function isSequenceModel(m: SavedModel): boolean {
+  return m.modelType === "seq_fused" || m.modelType === "seq_tactile";
 }
 
 export interface DatasetStats {
   totalSamples: number;
   labelCounts: Record<string, number>;
   labels: string[];
+}
+
+// ===== 时序样本（动态手语词） =====
+
+/**
+ * 序列中一个词的边界。孤立词训练时每条样本只有一个 segment 覆盖整段；
+ * 句子级（连续手语）时同一 schema 直接装多个 segment，无需数据库迁移。
+ */
+export interface SequenceSegment {
+  label: string;
+  startFrame: number; // inclusive
+  endFrame: number; // exclusive
+}
+
+/**
+ * 一条时序样本 —— 列存（SoA）+ TypedArray。
+ *
+ * 为什么不用 `number[]`：一条 1.5s@100Hz 的双手序列用 JS number 存约 700KB，
+ * 30 词 × 20 条就是 420MB，IndexedDB 会撑爆。Uint8（传感器本就是 0-255）
+ * + Float32 + 50Hz 栅格后约 64KB/条。TypedArray 走 structured clone，
+ * IndexedDB 原生支持，不需要额外序列化。
+ *
+ * 视觉缺失帧填 NaN 而非 0：0 是合法的关键点坐标，填 0 会与真实数据混淆，
+ * NaN 让预处理阶段能自由选择填充策略（插值 / 置零 + mask）。
+ */
+export interface SequenceSample {
+  id?: number;
+  segments: SequenceSegment[];
+  primaryLabel: string; // = segments[0].label，冗余字段供 IndexedDB index 使用
+  frameCount: number; // T
+  timestamps: Float32Array; // [T] 相对录制起点 ms
+  leftSensor: Uint8Array | null; // [T*137] 0-255
+  rightSensor: Uint8Array | null;
+  leftImu: Float32Array | null; // [T*10] = quat(w,x,y,z) + acc(x,y,z) + att(yaw,roll,pitch)
+  rightImu: Float32Array | null;
+  leftLandmarks: Float32Array | null; // [T*63]，视觉缺失帧填 NaN
+  rightLandmarks: Float32Array | null;
+  durationMs: number;
+  sourceFps: number; // 重采样栅格频率
+  origin: "recorded" | "synthesized";
+  timestamp: number; // 采集时间戳
+  /**
+   * 录制当时的 IMU 健康度（陀螺漂移检测结果），左右手各一份。
+   * 旧样本与合成样本为 undefined —— 这属于**可选字段，不需要升 DB_VERSION**：
+   * IndexedDB 存的是 structured clone 的对象，给已有 store 的对象加可选属性
+   * 不涉及 schema 迁移，而 `sequences` 现有索引只有 primaryLabel/timestamp/origin，
+   * 没有一个落在这个字段上。谁以后看到这里别以为漏了迁移。
+   *
+   * 存量样本也不必重录：报告能由 leftImu/rightImu 用 analyzeSequenceImu 事后重算。
+   */
+  imuHealth?: { left: ImuHealthReport | null; right: ImuHealthReport | null };
+}
+
+/** 每手每帧的传感点数 / IMU 维度 / 关键点维度 —— 与 sensorMapping、gloveProtocol 对齐 */
+export const SEQ_SENSOR_N = 137;
+export const SEQ_IMU_N = 10; // quat4 + acc3 + att3
+export const SEQ_LANDMARK_N = 63; // 21 点 × 3
+
+export interface SequenceStats {
+  totalSequences: number;
+  recordedCount: number;
+  synthesizedCount: number;
+  /** 每个标签下 [真实, 合成] 条数 */
+  labelCounts: Record<string, { recorded: number; synthesized: number }>;
+  labels: string[];
+  avgDurationMs: number;
+  estimatedBytes: number;
+  /**
+   * 按**戴了哪只手套**分的条数。
+   *
+   * 为什么单列：特征层给两只手各留一段独立槽位（缺手那段全 0），且 137 维指序左右相反，
+   * 所以「全部用右手采」训出来的模型在左手输入上**从没见过任何信号**，输出会塌到
+   * 某一个固定的词上。这件事在页面上一直看不见 —— 总条数、每词条数、覆盖率都正常，
+   * 只有分手别计数能暴露它。推理端已有镜像归一化兜底（`handMirror.ts`），
+   * 但那只救单手词；双手词只能靠这里发现数据偏了再补采。
+   */
+  handCounts: { leftOnly: number; rightOnly: number; both: number; neither: number };
 }
 
 function openDB(): Promise<IDBDatabase> {
@@ -122,6 +216,16 @@ function openDB(): Promise<IDBDatabase> {
         });
         skStore.createIndex("gesture", "gesture", { unique: false });
         skStore.createIndex("timestamp", "timestamp", { unique: false });
+      }
+      // v6: 时序样本 store（动态手语词）
+      if (!db.objectStoreNames.contains(STORE_SEQUENCES)) {
+        const seqStore = db.createObjectStore(STORE_SEQUENCES, {
+          keyPath: "id",
+          autoIncrement: true,
+        });
+        seqStore.createIndex("primaryLabel", "primaryLabel", { unique: false });
+        seqStore.createIndex("timestamp", "timestamp", { unique: false });
+        seqStore.createIndex("origin", "origin", { unique: false });
       }
     };
     request.onsuccess = () => {
@@ -240,6 +344,184 @@ export async function getSampleCount(): Promise<number> {
   });
 }
 
+// ===== 时序样本操作 =====
+
+export async function addSequence(seq: SequenceSample): Promise<number> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readwrite");
+    const request = tx.objectStore(STORE_SEQUENCES).add(seq);
+    request.onsuccess = () => resolve(request.result as number);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function addSequences(seqs: SequenceSample[]): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readwrite");
+    const store = tx.objectStore(STORE_SEQUENCES);
+    for (const s of seqs) store.add(s);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function getAllSequences(): Promise<SequenceSample[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readonly");
+    const request = tx.objectStore(STORE_SEQUENCES).getAll();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function getSequencesByLabel(
+  label: string
+): Promise<SequenceSample[]> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readonly");
+    const index = tx.objectStore(STORE_SEQUENCES).index("primaryLabel");
+    const request = index.getAll(label);
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+/**
+ * 删除单条序列。序列样本比静态样本贵得多（录一条要摆位+做动作），
+ * 录废了必须能单独剔掉而不是整个标签重录。
+ */
+export async function deleteSequence(id: number): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readwrite");
+    const request = tx.objectStore(STORE_SEQUENCES).delete(id);
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+export async function deleteSequencesByLabel(label: string): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readwrite");
+    const index = tx.objectStore(STORE_SEQUENCES).index("primaryLabel");
+    const request = index.openCursor(label);
+    request.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
+      if (cursor) {
+        cursor.delete();
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+/** 只删合成样本（重录真实静态词序列后做校准替换时用） */
+export async function deleteSynthesizedSequences(): Promise<number> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    let deleted = 0;
+    const tx = db.transaction(STORE_SEQUENCES, "readwrite");
+    const index = tx.objectStore(STORE_SEQUENCES).index("origin");
+    const request = index.openCursor("synthesized");
+    request.onsuccess = (event) => {
+      const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
+      if (cursor) {
+        cursor.delete();
+        deleted++;
+        cursor.continue();
+      }
+    };
+    tx.oncomplete = () => resolve(deleted);
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
+export async function clearAllSequences(): Promise<void> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readwrite");
+    const request = tx.objectStore(STORE_SEQUENCES).clear();
+    request.onsuccess = () => resolve();
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function sequenceByteSize(s: SequenceSample): number {
+  const arrays = [
+    s.timestamps,
+    s.leftSensor,
+    s.rightSensor,
+    s.leftImu,
+    s.rightImu,
+    s.leftLandmarks,
+    s.rightLandmarks,
+  ];
+  let total = 0;
+  for (const a of arrays) if (a) total += a.byteLength;
+  return total;
+}
+
+export async function getSequenceStats(): Promise<SequenceStats> {
+  const seqs = await getAllSequences();
+  const labelCounts: SequenceStats["labelCounts"] = {};
+  let recordedCount = 0;
+  let synthesizedCount = 0;
+  let totalDuration = 0;
+  let estimatedBytes = 0;
+  const handCounts = { leftOnly: 0, rightOnly: 0, both: 0, neither: 0 };
+
+  for (const s of seqs) {
+    // 判据用 sensor/imu 是否为 null，与特征层"缺手那段保持全 0"完全同一口径
+    const hasL = !!(s.leftSensor || s.leftImu);
+    const hasR = !!(s.rightSensor || s.rightImu);
+    if (hasL && hasR) handCounts.both++;
+    else if (hasL) handCounts.leftOnly++;
+    else if (hasR) handCounts.rightOnly++;
+    else handCounts.neither++;
+    const entry = (labelCounts[s.primaryLabel] ??= {
+      recorded: 0,
+      synthesized: 0,
+    });
+    if (s.origin === "synthesized") {
+      entry.synthesized++;
+      synthesizedCount++;
+    } else {
+      entry.recorded++;
+      recordedCount++;
+    }
+    totalDuration += s.durationMs;
+    estimatedBytes += sequenceByteSize(s);
+  }
+
+  return {
+    totalSequences: seqs.length,
+    recordedCount,
+    synthesizedCount,
+    labelCounts,
+    labels: Object.keys(labelCounts),
+    avgDurationMs: seqs.length ? totalDuration / seqs.length : 0,
+    estimatedBytes,
+    handCounts,
+  };
+}
+
+export async function getSequenceCount(): Promise<number> {
+  const db = await openDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(STORE_SEQUENCES, "readonly");
+    const request = tx.objectStore(STORE_SEQUENCES).count();
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
 // ===== 模型操作 =====
 
 export async function saveModel(model: SavedModel): Promise<number> {
@@ -265,7 +547,10 @@ export async function getAllModels(): Promise<SavedModel[]> {
 }
 
 export async function getLatestModel(): Promise<SavedModel | null> {
-  const models = await getAllModels();
+  // 语义不变：只返回单帧静态模型，供 Translate 的旧路径使用。
+  // v6 起同一个 store 里也存时序模型，这里必须把它们排除掉，
+  // 否则回退分支会把序列模型喂给静态推理路径（输入形状对不上）。
+  const models = (await getAllModels()).filter((m) => !isSequenceModel(m));
   // 优先返回 tactile 类型的模型（用于推理）
   const tactileModels = models.filter((m) => m.modelType === "tactile");
   if (tactileModels.length > 0) {
@@ -274,6 +559,25 @@ export async function getLatestModel(): Promise<SavedModel | null> {
   // 兼容旧模型
   if (models.length === 0) return null;
   return models.sort((a, b) => b.createdAt - a.createdAt)[0];
+}
+
+/** 最新的时序模型：优先 seq_tactile（部署用学生），无则退回 seq_fused */
+export async function getLatestSequenceModel(): Promise<SavedModel | null> {
+  const models = await getAllModels();
+  const students = models.filter((m) => m.modelType === "seq_tactile");
+  if (students.length > 0) {
+    return students.sort((a, b) => b.createdAt - a.createdAt)[0];
+  }
+  const teachers = models.filter((m) => m.modelType === "seq_fused");
+  if (teachers.length === 0) return null;
+  return teachers.sort((a, b) => b.createdAt - a.createdAt)[0];
+}
+
+export async function getAllSequenceModels(): Promise<SavedModel[]> {
+  const models = await getAllModels();
+  return models
+    .filter(isSequenceModel)
+    .sort((a, b) => b.createdAt - a.createdAt);
 }
 
 export async function deleteModel(id: number): Promise<void> {
@@ -311,6 +615,184 @@ export async function importDatasetJSON(jsonStr: string): Promise<number> {
   }
   await addSamples(data.samples);
   return data.samples.length;
+}
+
+// ===== 序列数据集导出（给 Python 训练用） =====
+
+/** manifest 里一个 TypedArray 的定位信息 */
+export interface SeqArrayRef {
+  offset: number; // 字节偏移（相对 dataset.bin 起点）
+  length: number; // 元素个数（不是字节数）
+  dtype: "uint8" | "float32";
+}
+
+export interface SeqManifestEntry {
+  segments: SequenceSegment[];
+  primaryLabel: string;
+  frameCount: number;
+  durationMs: number;
+  sourceFps: number;
+  origin: "recorded" | "synthesized";
+  timestamp: number;
+  arrays: Record<string, SeqArrayRef | null>;
+}
+
+export interface SeqManifest {
+  version: string;
+  exportedAt: string;
+  totalSequences: number;
+  sensorN: number;
+  imuN: number;
+  landmarkN: number;
+  labels: string[];
+  /** 各数组的 per-frame 宽度，Python 侧 reshape 用 */
+  arrayLayout: Record<string, { perFrame: number; dtype: string }>;
+  sequences: SeqManifestEntry[];
+}
+
+const SEQ_ARRAY_KEYS = [
+  "timestamps",
+  "leftSensor",
+  "rightSensor",
+  "leftImu",
+  "rightImu",
+  "leftLandmarks",
+  "rightLandmarks",
+] as const;
+
+type SeqArrayKey = (typeof SEQ_ARRAY_KEYS)[number];
+
+const SEQ_ARRAY_LAYOUT: Record<
+  SeqArrayKey,
+  { perFrame: number; dtype: "uint8" | "float32" }
+> = {
+  timestamps: { perFrame: 1, dtype: "float32" },
+  leftSensor: { perFrame: SEQ_SENSOR_N, dtype: "uint8" },
+  rightSensor: { perFrame: SEQ_SENSOR_N, dtype: "uint8" },
+  leftImu: { perFrame: SEQ_IMU_N, dtype: "float32" },
+  rightImu: { perFrame: SEQ_IMU_N, dtype: "float32" },
+  leftLandmarks: { perFrame: SEQ_LANDMARK_N, dtype: "float32" },
+  rightLandmarks: { perFrame: SEQ_LANDMARK_N, dtype: "float32" },
+};
+
+/**
+ * 导出为 dataset.bin + dataset.json 两个文件。
+ *
+ * 不导出成纯 JSON 数组：600 条 × 64KB 二进制展开成 JSON 文本约 150MB，
+ * 生成和解析都不可用。Python 侧 np.frombuffer(buf, dtype, count, offset)
+ * 按 offset 切片即可，零拷贝。
+ *
+ * Float32 段按 4 字节对齐（在 uint8 段之后补 padding），
+ * 否则 numpy 在部分平台上 frombuffer 会因未对齐而报错。
+ */
+export async function exportSequencesBinary(): Promise<{
+  bin: ArrayBuffer;
+  manifest: SeqManifest;
+}> {
+  return encodeSequencesBinary(await getAllSequences());
+}
+
+/** exportSequencesBinary 的纯函数内核（不碰 IndexedDB，可单测 round-trip） */
+export function encodeSequencesBinary(seqs: SequenceSample[]): {
+  bin: ArrayBuffer;
+  manifest: SeqManifest;
+} {
+  // 第一遍：算偏移与总长
+  let cursor = 0;
+  const entries: SeqManifestEntry[] = [];
+  const plan: Array<Array<{ offset: number; array: ArrayBufferView }>> = [];
+
+  for (const s of seqs) {
+    const arrays: Record<string, SeqArrayRef | null> = {};
+    const items: Array<{ offset: number; array: ArrayBufferView }> = [];
+    for (const key of SEQ_ARRAY_KEYS) {
+      const arr = s[key] as Uint8Array | Float32Array | null;
+      if (!arr) {
+        arrays[key] = null;
+        continue;
+      }
+      const dtype = SEQ_ARRAY_LAYOUT[key].dtype;
+      if (dtype === "float32" && cursor % 4 !== 0) {
+        cursor += 4 - (cursor % 4); // 对齐 padding
+      }
+      arrays[key] = { offset: cursor, length: arr.length, dtype };
+      items.push({ offset: cursor, array: arr });
+      cursor += arr.byteLength;
+    }
+    plan.push(items);
+    entries.push({
+      segments: s.segments,
+      primaryLabel: s.primaryLabel,
+      frameCount: s.frameCount,
+      durationMs: s.durationMs,
+      sourceFps: s.sourceFps,
+      origin: s.origin,
+      timestamp: s.timestamp,
+      arrays,
+    });
+  }
+
+  // 第二遍：实际写入
+  const bin = new ArrayBuffer(cursor);
+  const view = new Uint8Array(bin);
+  for (const items of plan) {
+    for (const { offset, array } of items) {
+      view.set(
+        new Uint8Array(array.buffer, array.byteOffset, array.byteLength),
+        offset
+      );
+    }
+  }
+
+  const labels = Array.from(new Set(seqs.map((s) => s.primaryLabel))).sort();
+
+  return {
+    bin,
+    manifest: {
+      version: "seq-1.0",
+      exportedAt: new Date().toISOString(),
+      totalSequences: seqs.length,
+      sensorN: SEQ_SENSOR_N,
+      imuN: SEQ_IMU_N,
+      landmarkN: SEQ_LANDMARK_N,
+      labels,
+      arrayLayout: SEQ_ARRAY_LAYOUT,
+      sequences: entries,
+    },
+  };
+}
+
+/** 二进制导出的逆操作，用于 round-trip 校验与跨机器迁移 */
+export function decodeSequencesBinary(
+  bin: ArrayBuffer,
+  manifest: SeqManifest
+): SequenceSample[] {
+  return manifest.sequences.map((e) => {
+    const read = (key: SeqArrayKey) => {
+      const ref = e.arrays[key];
+      if (!ref) return null;
+      // slice 而非视图：IndexedDB structured clone 会连带整个大 buffer
+      return ref.dtype === "uint8"
+        ? new Uint8Array(bin.slice(ref.offset, ref.offset + ref.length))
+        : new Float32Array(bin.slice(ref.offset, ref.offset + ref.length * 4));
+    };
+    return {
+      segments: e.segments,
+      primaryLabel: e.primaryLabel,
+      frameCount: e.frameCount,
+      timestamps: read("timestamps") as Float32Array,
+      leftSensor: read("leftSensor") as Uint8Array | null,
+      rightSensor: read("rightSensor") as Uint8Array | null,
+      leftImu: read("leftImu") as Float32Array | null,
+      rightImu: read("rightImu") as Float32Array | null,
+      leftLandmarks: read("leftLandmarks") as Float32Array | null,
+      rightLandmarks: read("rightLandmarks") as Float32Array | null,
+      durationMs: e.durationMs,
+      sourceFps: e.sourceFps,
+      origin: e.origin,
+      timestamp: e.timestamp,
+    };
+  });
 }
 
 // ===== 骨架回归模型操作 =====

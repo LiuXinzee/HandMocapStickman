@@ -276,7 +276,7 @@ export default function TrainSkeleton() {
               href="/collect"
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
             >
-              ← 采集数据
+              ← 静态采集
             </Link>
             <Link
               href="/mocap"

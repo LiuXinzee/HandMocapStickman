@@ -1,0 +1,14 @@
+# 本机全局 Python 是共享科研环境,不要往里装。先建独立 venv:
+#   cd python_train
+#   python -m venv .venv
+#   .venv\Scripts\activate          (Windows)  /  source .venv/bin/activate  (macOS/Linux)
+#   pip install -r requirements.txt
+#
+# 项目根的 .venv/ 是 glove_bridge 的,别混用。
+
+# tensorflowjs 对 tensorflow 版本很挑,不配套时转换会报 "Unknown layer"。
+# 这两行的版本要一起改,不要只升一个。
+tensorflow==2.16.2
+tensorflowjs==4.22.0
+
+numpy>=1.26,<2.0        # tensorflow 2.16 还没完全兼容 numpy 2.x

@@ -9,8 +9,10 @@
 协议:
     手套帧格式: 帧头 AA 55 03 99 + 包序号(1B) + 传感器类型(1B) + 数据
     包1: 128字节数据
-    包2: 144字节数据（128字节传感器 + 16字节IMU四元数）
-    拼合后: 256字节传感器 + 16字节IMU = 272字节
+    包2: 144 或 168 字节，逐包自动探测（见 PACKET2_DATA_LENS）
+         144 = 128字节传感器 + 16字节IMU四元数        -> 拼合 272 字节
+         168 = 再加 12字节加速度 + 12字节姿态角        -> 拼合 296 字节
+    拼合后: [0:256]传感器 [256:272]四元数 [272:284]加速度 [284:296]姿态角
 
 WebSocket 推送 JSON:
     {
@@ -54,6 +56,14 @@ HEADER = bytes([0xAA, 0x55, 0x03, 0x99])
 HEADER_LEN = len(HEADER)
 PACKET_TYPE_1 = 0x01
 PACKET_TYPE_2 = 0x02
+
+# 包体长度（不含帧头和2字节包头）
+PACKET1_DATA_LEN = 128
+# 包2有两种固件：144 = 128传感器尾段+16四元数（拼合272B）；
+#                168 = 再加12字节加速度+12字节姿态角（拼合296B）。
+# 写死成不匹配的那个会多吃/少吃字节、啃穿下一个包1的帧头，结果一帧都拼不出来，
+# 所以按"哪个长度之后正好接着下一个帧头"逐包探测。
+PACKET2_DATA_LENS = (144, 168)
 
 
 class GloveSerialReader:
@@ -126,53 +136,69 @@ class GloveSerialReader:
 
         print("[Bridge] 串口读取线程退出")
 
+    def _packet2_data_len(self, header_pos):
+        """探测这个包2的数据段是 144 还是 168：看哪个长度之后正好接着下一个帧头。
+        返回 None 表示后面字节还不够判断，应当等下一块数据再解析。"""
+        body = header_pos + HEADER_LEN + 2
+        for candidate in PACKET2_DATA_LENS:
+            end = body + candidate
+            if len(self.buffer) < end + HEADER_LEN:
+                return None
+            if bytes(self.buffer[end:end + HEADER_LEN]) == HEADER:
+                return candidate
+        # 两个都对不上（丢字节等），按短的走，下一轮靠找帧头重新对齐
+        return PACKET2_DATA_LENS[0]
+
     def _parse_buffer(self):
-        """从缓冲区中解析完整的数据帧"""
-        while len(self.buffer) >= HEADER_LEN:
-            # 查找帧头
-            header_pos = -1
-            for i in range(len(self.buffer) - HEADER_LEN + 1):
-                if bytes(self.buffer[i:i + HEADER_LEN]) == HEADER:
-                    header_pos = i
-                    break
+        """从缓冲区中解析完整的数据帧。
+        用游标 + bytes.find 推进，不再逐字节比对、也不再每个包都重切一次缓冲区。"""
+        offset = 0
 
+        while len(self.buffer) - offset >= HEADER_LEN:
+            header_pos = self.buffer.find(HEADER, offset)
             if header_pos == -1:
-                # 没找到帧头，保留最后几个字节
-                self.buffer = self.buffer[max(0, len(self.buffer) - HEADER_LEN + 1):]
+                # 没找到帧头，只留末尾可能是半个帧头的几个字节
+                offset = max(offset, len(self.buffer) - (HEADER_LEN - 1))
                 break
-
-            # 丢弃帧头之前的数据
-            if header_pos > 0:
-                self.buffer = self.buffer[header_pos:]
 
             # 检查是否有足够的数据读取包序号和传感器类型
-            if len(self.buffer) < HEADER_LEN + 2:
+            if len(self.buffer) - header_pos < HEADER_LEN + 2:
+                offset = header_pos
                 break
 
-            packet_order = self.buffer[HEADER_LEN]
-            sensor_type = self.buffer[HEADER_LEN + 1]
+            packet_order = self.buffer[header_pos + HEADER_LEN]
+            sensor_type = self.buffer[header_pos + HEADER_LEN + 1]
 
             # 确定数据长度
             if packet_order == PACKET_TYPE_1:
-                data_len = 128
+                data_len = PACKET1_DATA_LEN
             elif packet_order == PACKET_TYPE_2:
-                data_len = 144
+                data_len = self._packet2_data_len(header_pos)
+                if data_len is None:
+                    offset = header_pos  # 还判不出长度，等更多数据
+                    break
             else:
-                # 无效包序号，跳过帧头
-                self.buffer = self.buffer[HEADER_LEN:]
+                # 无效包序号，跳过帧头继续找
+                offset = header_pos + HEADER_LEN
                 self.error_count += 1
                 continue
 
             total_len = HEADER_LEN + 2 + data_len
-            if len(self.buffer) < total_len:
+            if len(self.buffer) - header_pos < total_len:
+                offset = header_pos
                 break  # 数据不完整，等待更多数据
 
             # 提取数据
-            packet_data = bytes(self.buffer[HEADER_LEN + 2:total_len])
-            self.buffer = self.buffer[total_len:]
+            packet_data = bytes(
+                self.buffer[header_pos + HEADER_LEN + 2:header_pos + total_len]
+            )
+            offset = header_pos + total_len
 
             # 处理包
             self._process_packet(packet_order, sensor_type, packet_data)
+
+        if offset > 0:
+            del self.buffer[:offset]
 
     def _process_packet(self, packet_order, sensor_type, data):
         """处理解析出的数据包"""
@@ -187,22 +213,35 @@ class GloveSerialReader:
             if sensor_type in self.packet1_cache:
                 packet1_data, packet1_time = self.packet1_cache.pop(sensor_type)
 
-                # 拼合数据: 包1(128B) + 包2(144B) = 272B
+                # 拼合数据: 包1(128B) + 包2(144B/168B) = 272B/296B
                 combined_data = packet1_data + data
 
                 # 解析传感器值（前256字节）
                 sensor_values = list(combined_data[:256])
 
-                # 解析四元数（最后16字节）
+                # 解析四元数 [256:272]。不能用 [-16:]：296B 帧的最后16字节是姿态角尾段
                 quaternion = None
                 if len(combined_data) >= 272:
                     try:
-                        imu_bytes = bytes(combined_data[-16:])
-                        q = struct.unpack('<4f', imu_bytes)
+                        q = struct.unpack('<4f', bytes(combined_data[256:272]))
                         # 检查有效性
                         magnitude = sum(v * v for v in q) ** 0.5
                         if 0.5 < magnitude < 2.0 and all(abs(v) < 10 for v in q):
                             quaternion = list(q)
+                    except Exception:
+                        pass
+
+                # 加速度 [272:284] + 姿态角 [284:296]，仅 296B 帧有；144固件为 None
+                acceleration = None
+                attitude = None
+                if len(combined_data) >= 296:
+                    try:
+                        acc = struct.unpack('<3f', bytes(combined_data[272:284]))
+                        att = struct.unpack('<3f', bytes(combined_data[284:296]))
+                        if all(abs(v) < 1e6 for v in acc):
+                            acceleration = list(acc)
+                        if all(abs(v) < 1e6 for v in att):
+                            attitude = list(att)
                     except Exception:
                         pass
 
@@ -214,6 +253,8 @@ class GloveSerialReader:
                     "hand": sensor_type,
                     "sensor_data": sensor_values,
                     "quaternion": quaternion or [1.0, 0.0, 0.0, 0.0],
+                    "acceleration": acceleration,
+                    "attitude": attitude,
                     "frame_id": self.frame_count
                 }
 
@@ -367,6 +408,31 @@ class GloveWebSocketBridge:
             )
 
 
+def pick_glove_port():
+    """挑一个最像手套的串口。手套走 CH343 USB 转串口，而机器上通常还挂着一堆
+    蓝牙虚拟串口（COM5/6/16/17 之类），按枚举顺序取第一个几乎必然选中蓝牙。"""
+    try:
+        import serial.tools.list_ports
+        ports = list(serial.tools.list_ports.comports())
+    except Exception:
+        return None
+    if not ports:
+        return None
+
+    def score(p):
+        text = f"{p.description} {p.manufacturer or ''} {p.hwid or ''}".lower()
+        if "bluetooth" in text or "蓝牙" in text:
+            return -1
+        if "ch343" in text or "ch34" in text:
+            return 2
+        if "usb" in text:
+            return 1
+        return 0
+
+    best = max(ports, key=score)
+    return best.device if score(best) >= 0 else None
+
+
 def list_serial_ports():
     """列出可用的串口"""
     try:
@@ -419,12 +485,12 @@ def main():
         return
 
     if not args.port:
-        ports = list_serial_ports()
-        if ports:
-            args.port = ports[0]
-            print(f"\n自动选择串口: {args.port}")
+        list_serial_ports()
+        args.port = pick_glove_port()
+        if args.port:
+            print(f"\n自动选择串口: {args.port}（如果不对请用 --port 指定）")
         else:
-            print("\n请使用 --port 参数指定串口")
+            print("\n没找到像手套的串口（只有蓝牙口或没有串口），请用 --port 参数指定")
             return
 
     # 创建串口读取器

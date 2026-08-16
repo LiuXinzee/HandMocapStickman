@@ -29,7 +29,9 @@ export const HEADER_LEN = 4;
 export const PACKET_TYPE_1 = 0x01;
 export const PACKET_TYPE_2 = 0x02;
 
-/** 带加速度手套的 type-2 数据段长度（默认）；旧手套为 144 */
+/** 包1数据段长度（固定） */
+export const PACKET1_LEN = 128;
+/** 带加速度手套的 type-2 数据段长度；旧手套为 144。不指定时按帧头位置自动探测 */
 export const TYPE2_LEN_WITH_ACC = 168;
 export const TYPE2_LEN_LEGACY = 144;
 
@@ -68,7 +70,9 @@ export interface GloveParserOptions {
   /** 指定该数据流对应的手别（0x01=左/0x02=右）。设置后驱动 remap 与 handLabel，
    *  不再依赖固件的 sensor_type 字节（双口场景更稳健）。不设则用帧内 sensor_type。 */
   handType?: number;
-  /** type-2 数据段长度：168=带加速度(默认)，144=旧手套 */
+  /** type-2 数据段长度：168=带加速度，144=旧手套。
+   *  不填则每个包按"哪个长度之后正好接着下一个帧头"自动探测——写死成不匹配的长度会
+   *  多吃/少吃字节、啃穿下一个包1的帧头，结果是包1全被跳过、包2全配不上对，一帧都出不来。 */
   type2Len?: number;
   /** 每解析出一帧回调 */
   onFrame: (frame: GloveFrame) => void;
@@ -90,10 +94,11 @@ export class GloveParser {
   private buffer = new Uint8Array(0);
   private packet1Cache = new Map<number, Uint8Array>();
   private frameCount = 0;
-  private readonly type2Len: number;
+  /** 显式指定的 type-2 长度；undefined 表示自动探测 */
+  private readonly type2LenOverride?: number;
 
   constructor(private opts: GloveParserOptions) {
-    this.type2Len = opts.type2Len ?? TYPE2_LEN_WITH_ACC;
+    this.type2LenOverride = opts.type2Len;
   }
 
   /** 重置解析状态（重新连接时调用） */
@@ -117,58 +122,90 @@ export class GloveParser {
     this.parseBuffer();
   }
 
-  private findHeader(buf: Uint8Array): number {
-    for (let i = 0; i <= buf.length - HEADER_LEN; i++) {
-      if (
-        buf[i] === HEADER[0] &&
-        buf[i + 1] === HEADER[1] &&
-        buf[i + 2] === HEADER[2] &&
-        buf[i + 3] === HEADER[3]
-      ) {
-        return i;
-      }
+  private matchHeader(buf: Uint8Array, pos: number): boolean {
+    return (
+      buf[pos] === HEADER[0] &&
+      buf[pos + 1] === HEADER[1] &&
+      buf[pos + 2] === HEADER[2] &&
+      buf[pos + 3] === HEADER[3]
+    );
+  }
+
+  /** 从 from 开始找帧头，返回下标；没有返回 -1。带起点是为了不每次从 0 重扫 */
+  private findHeader(buf: Uint8Array, from: number): number {
+    for (let i = from; i <= buf.length - HEADER_LEN; i++) {
+      if (this.matchHeader(buf, i)) return i;
     }
     return -1;
   }
 
-  private parseBuffer() {
-    let buf = this.buffer;
+  /**
+   * 探测这个包2的数据段是 144 还是 168：看哪个长度之后正好接着下一个帧头。
+   * 返回 null 表示后面的字节还不够判断，应当等下一块数据再解析。
+   */
+  private probeType2Len(buf: Uint8Array, headerPos: number): number | null {
+    if (this.type2LenOverride !== undefined) return this.type2LenOverride;
+    const body = headerPos + HEADER_LEN + 2;
+    for (const candidate of [TYPE2_LEN_LEGACY, TYPE2_LEN_WITH_ACC]) {
+      const end = body + candidate;
+      if (buf.length < end + HEADER_LEN) return null;
+      if (this.matchHeader(buf, end)) return candidate;
+    }
+    // 两个都对不上（丢字节等），按短的走，下一轮靠找帧头重新对齐
+    return TYPE2_LEN_LEGACY;
+  }
 
-    while (buf.length >= HEADER_LEN) {
-      const headerPos = this.findHeader(buf);
+  private parseBuffer() {
+    const buf = this.buffer;
+    let offset = 0;
+
+    while (buf.length - offset >= HEADER_LEN) {
+      const headerPos = this.findHeader(buf, offset);
       if (headerPos === -1) {
-        // 没找到帧头，保留末尾可能的部分帧头
-        buf = buf.slice(Math.max(0, buf.length - HEADER_LEN + 1));
+        // 没找到帧头，只留末尾可能是半个帧头的几字节
+        offset = Math.max(offset, buf.length - (HEADER_LEN - 1));
         break;
       }
-      if (headerPos > 0) buf = buf.slice(headerPos);
+      if (buf.length - headerPos < HEADER_LEN + 2) {
+        offset = headerPos;
+        break;
+      }
 
-      if (buf.length < HEADER_LEN + 2) break;
-
-      const packetOrder = buf[HEADER_LEN];
-      const sensorType = buf[HEADER_LEN + 1];
+      const packetOrder = buf[headerPos + HEADER_LEN];
+      const sensorType = buf[headerPos + HEADER_LEN + 1];
 
       let dataLen: number;
       if (packetOrder === PACKET_TYPE_1) {
-        dataLen = 128;
+        dataLen = PACKET1_LEN;
       } else if (packetOrder === PACKET_TYPE_2) {
-        dataLen = this.type2Len;
+        const probed = this.probeType2Len(buf, headerPos);
+        if (probed === null) {
+          offset = headerPos; // 还判不出长度，等更多数据
+          break;
+        }
+        dataLen = probed;
       } else {
         // 无效包序号，跳过该帧头继续找
-        buf = buf.slice(HEADER_LEN);
+        offset = headerPos + HEADER_LEN;
         continue;
       }
 
       const totalLen = HEADER_LEN + 2 + dataLen;
-      if (buf.length < totalLen) break; // 数据不完整，等待更多
+      if (buf.length - headerPos < totalLen) {
+        offset = headerPos; // 数据不完整，等待更多
+        break;
+      }
 
-      const packetData = buf.slice(HEADER_LEN + 2, totalLen);
-      buf = buf.slice(totalLen);
+      const packetData = buf.slice(
+        headerPos + HEADER_LEN + 2,
+        headerPos + totalLen
+      );
+      offset = headerPos + totalLen;
 
       this.processPacket(packetOrder, sensorType, packetData);
     }
 
-    this.buffer = buf;
+    if (offset > 0) this.buffer = buf.slice(offset);
   }
 
   private processPacket(

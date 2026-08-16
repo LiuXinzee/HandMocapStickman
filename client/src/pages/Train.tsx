@@ -6,7 +6,7 @@
  * 1. 显示数据集统计
  * 2. 配置训练参数（含蒸馏温度和权重）
  * 3. 浏览器端 TensorFlow.js 双阶段训练
- *    - Phase 1: 教师模型（视觉63D + 触觉141D = 204D）
+ *    - Phase 1: 教师模型（双手融合 408D = 触觉 2×141 + 视觉 2×63）
  *    - Phase 2: 学生模型（仅触觉141D，知识蒸馏）
  * 4. 保存/加载模型（保存学生模型用于推理）
  */
@@ -29,6 +29,8 @@ import {
   type TrainingProgress,
 } from "@/lib/signLanguageModel";
 import { getWordById } from "@/lib/signLanguageVocab";
+import StepNav from "@/components/StepNav";
+import TfBackendBadge from "@/components/TfBackendBadge";
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "wouter";
 import {
@@ -206,19 +208,25 @@ export default function Train() {
           </Link>
           <div className="w-px h-5 bg-[#00f0ff]/20" />
           <span className="text-xs font-bold tracking-widest text-[#00f0ff] font-mono">
-            MODEL TRAINING
+            STATIC TRAINING
           </span>
+          {/* 标题必须自带"静态"：另一条链路的训练页长得几乎一样（/train-seq），
+              光看 MODEL TRAINING 分不出自己在训哪个模型 */}
           <span className="text-[9px] text-[#556677] font-mono ml-2">
-            DUAL-BRANCH DISTILLATION
+            静态单帧 · MLP · DUAL-BRANCH DISTILLATION
           </span>
+          <TfBackendBadge />
         </div>
-        <div className="flex items-center gap-3 text-[10px] font-mono">
-          {activeModelLoaded && (
-            <span className="text-[#00e5a0] flex items-center gap-1">
-              <Brain className="w-3 h-3" />
-              STUDENT MODEL ACTIVE
-            </span>
-          )}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-3 text-[10px] font-mono">
+            {activeModelLoaded && (
+              <span className="text-[#00e5a0] flex items-center gap-1">
+                <Brain className="w-3 h-3" />
+                STUDENT MODEL ACTIVE
+              </span>
+            )}
+          </div>
+          <StepNav />
         </div>
       </header>
 
@@ -239,7 +247,7 @@ export default function Train() {
             />
             <DataRow
               label="FEATURES"
-              value="204D (63V+141T)"
+              value="408D (2×141T + 2×63V)"
               color="#da77f2"
             />
             {stats && stats.labels.length > 0 && (
@@ -356,7 +364,7 @@ export default function Train() {
               href="/collect"
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
             >
-              ← 采集数据
+              ← 静态采集
             </Link>
             <Link
               href="/translate"
@@ -531,7 +539,7 @@ export default function Train() {
           <Section title="ARCHITECTURE">
             <div className="text-[8px] font-mono text-[#556677] space-y-0.5">
               <p className="text-[#da77f2]">— 教师 (融合) —</p>
-              <p>Input: 204D (63V + 141T)</p>
+              <p>Input: 408D (2×141T + 2×63V)</p>
               <p>Dense(256) → BN → Drop(0.3)</p>
               <p>Dense(128) → BN → Drop(0.2)</p>
               <p>Dense(64) → Drop(0.1)</p>

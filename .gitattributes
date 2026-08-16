@@ -1,0 +1,7 @@
+# 本机 core.autocrlf=true，会在检出时把文本文件的 LF 换成 CRLF。
+# MediaPipe 的官方发布件必须逐字节保持原样：
+#   - 4 个 .js 被 CRLF 化虽然还能跑，但校验和就对不上 CDN 了，
+#     以后要核"这份资源有没有被人动过"就没有基准可比（已核过：现在 11 个文件与
+#     cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240 逐字节一致）
+#   - .wasm / .tflite / .data 靠 git 自动嗅探当二进制，本来也不该冒这个风险
+client/public/vendor/mediapipe-hands/** -text

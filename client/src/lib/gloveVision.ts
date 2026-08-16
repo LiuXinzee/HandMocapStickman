@@ -37,6 +37,12 @@ export interface GloveSurfaceClassification {
   isGlove: boolean;
   silverRatio: number;
   darkRatio: number;
+  /**
+   * 低彩度**亮**像素占比。实物手套是白色的（规格书写"黑色面料"是错的），
+   * 而 silverRatio/darkRatio 三条判据每一条都要暗像素，白手套一律判成"不是手套"，
+   * 于是 `useHandTracking` 的手套 ROI 恢复回路对白手套永远不启动。这一路是补那个洞的。
+   */
+  lightRatio: number;
   confidence: number;
 }
 
@@ -59,6 +65,7 @@ const UNKNOWN_SURFACE: GloveSurfaceClassification = {
   isGlove: false,
   silverRatio: 0,
   darkRatio: 0,
+  lightRatio: 0,
   confidence: 0,
 };
 
@@ -1701,6 +1708,8 @@ export function classifyGloveSurface(
   let sampleCount = 0;
   let darkCount = 0;
   let darkLightSum = 0;
+  let sampleLightSum = 0;
+  let sampleLightSquaredSum = 0;
   for (let pixel = 0, offset = 0; pixel < pixelCount; pixel++, offset += 4) {
     if (sampleMask[pixel] === 0 || data[offset + 3] < 16) continue;
     sampleCount++;
@@ -1708,6 +1717,8 @@ export function classifyGloveSurface(
     const g = data[offset + 1];
     const b = data[offset + 2];
     const light = luminance(r, g, b);
+    sampleLightSum += light;
+    sampleLightSquaredSum += light * light;
 
     if (isLowChromaDark(r, g, b, 105)) {
       darkCount++;
@@ -1720,6 +1731,7 @@ export function classifyGloveSurface(
   const darkMean = darkCount > 0 ? darkLightSum / darkCount : 70;
   const silverThreshold = clamp(Math.round(darkMean + 60), 110, 145);
   let silverCount = 0;
+  let lightCount = 0;
   for (let pixel = 0, offset = 0; pixel < pixelCount; pixel++, offset += 4) {
     if (sampleMask[pixel] === 0 || data[offset + 3] < 16) continue;
     const r = data[offset];
@@ -1730,14 +1742,61 @@ export function classifyGloveSurface(
     const chroma = max - min;
     const light = luminance(r, g, b);
     if (light >= silverThreshold && min >= 82 && chroma <= 58) silverCount++;
+    // isLowChromaLight 已排除暖色皮肤调（见其定义），所以裸手不会被算成白手套
+    if (isLowChromaLight(r, g, b, 165)) lightCount++;
   }
 
   const silverRatio = silverCount / sampleCount;
   const darkRatio = darkCount / sampleCount;
+  const lightRatio = lightCount / sampleCount;
   const materialRatio = silverRatio + darkRatio;
-  const isGlove =
+
+  const sampleLightMean = sampleLightSum / sampleCount;
+  const sampleLightVariance = Math.max(
+    0,
+    sampleLightSquaredSum / sampleCount - sampleLightMean * sampleLightMean
+  );
+  const sampleLightDeviation = Math.sqrt(sampleLightVariance);
+
+  // 手部包围盒外一圈的亮度，用来区分"白手套"和"手前面是一片白墙/白袖子"：
+  // 光是"亮"不够——白背景同样亮。要么手比周围更亮（lightContrast），
+  // 要么手上有织物纹理带来的亮度起伏（sampleLightDeviation）。
+  // 环带取包围盒外扩 ringPadding、挖掉包围盒本身，不做形态学膨胀，够用且是 O(周长)。
+  const ringPadding = Math.max(3, Math.round(handSpan * 0.07));
+  const ringMinX = Math.max(0, Math.floor(minX - ringPadding));
+  const ringMaxX = Math.min(width - 1, Math.ceil(maxX + ringPadding));
+  const ringMinY = Math.max(0, Math.floor(minY - ringPadding));
+  const ringMaxY = Math.min(height - 1, Math.ceil(maxY + ringPadding));
+  let surroundingLightSum = 0;
+  let surroundingCount = 0;
+  for (let y = ringMinY; y <= ringMaxY; y++) {
+    let pixel = y * width + ringMinX;
+    for (let x = ringMinX; x <= ringMaxX; x++, pixel++) {
+      if (x >= minX && x <= maxX && y >= minY && y <= maxY) continue;
+      const offset = pixel * 4;
+      if (data[offset + 3] < 16) continue;
+      surroundingLightSum += luminance(
+        data[offset],
+        data[offset + 1],
+        data[offset + 2]
+      );
+      surroundingCount++;
+    }
+  }
+  // 手贴着画面边缘时环带可能是空的；此时退成 0 对比度（只能靠纹理判）
+  const surroundingLightMean =
+    surroundingCount > 0
+      ? surroundingLightSum / surroundingCount
+      : sampleLightMean;
+  const lightContrast = sampleLightMean - surroundingLightMean;
+
+  const isLightGlove =
+    lightRatio >= 0.58 && (lightContrast >= 5 || sampleLightDeviation >= 4);
+  // 原有的黑/银判据一个数都没动：白手套只是多了一条**或**分支，黑手套行为完全不变
+  const isMaterialGlove =
     darkRatio >= 0.42 ||
     (darkRatio >= 0.2 && silverRatio >= 0.09 && materialRatio >= 0.5);
+  const isGlove = isMaterialGlove || isLightGlove;
 
   if (!isGlove) {
     return {
@@ -1745,12 +1804,16 @@ export function classifyGloveSurface(
       isGlove: false,
       silverRatio,
       darkRatio,
+      lightRatio,
       confidence: 0,
     };
   }
 
+  // 银点是**黑手套掌面**的反光标记；白手套整只都是高亮低彩度，走这条只会瞎猜手心，
+  // 所以两条手心/手背分支都锁在 isMaterialGlove 之内，白手套一律 surface="unknown"。
+  // 朝向本来就走 IMU，surface 只进 HUD 显示与录制元数据，判不出来不影响任何数据。
   const silverShare = silverRatio / Math.max(materialRatio, 1e-6);
-  if (silverRatio >= 0.085 && silverShare >= 0.1) {
+  if (isMaterialGlove && silverRatio >= 0.085 && silverShare >= 0.1) {
     const silverEvidence = clamp((silverRatio - 0.06) / 0.28, 0, 1);
     const materialEvidence = clamp((materialRatio - 0.4) / 0.5, 0, 1);
     return {
@@ -1758,6 +1821,7 @@ export function classifyGloveSurface(
       isGlove: true,
       silverRatio,
       darkRatio,
+      lightRatio,
       confidence: clamp(
         0.52 + silverEvidence * 0.3 + materialEvidence * 0.16,
         0,
@@ -1774,6 +1838,7 @@ export function classifyGloveSurface(
       isGlove: true,
       silverRatio,
       darkRatio,
+      lightRatio,
       confidence: clamp(
         0.55 + darknessEvidence * 0.3 + purityEvidence * 0.12,
         0,
@@ -1784,9 +1849,10 @@ export function classifyGloveSurface(
 
   return {
     surface: "unknown",
-    isGlove: true,
+    isGlove,
     silverRatio,
     darkRatio,
+    lightRatio,
     confidence: 0,
   };
 }

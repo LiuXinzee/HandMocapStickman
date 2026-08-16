@@ -12,7 +12,7 @@ import GlovePanel from "@/components/GlovePanel";
 import HandCanvas from "@/components/HandCanvas";
 import HUDPanel from "@/components/HUDPanel";
 import RecordPanel from "@/components/RecordPanel";
-import { useDualGloveSerial } from "@/hooks/useDualGloveSerial";
+import { useGloveFrames, useGloves } from "@/contexts/GloveContext";
 import { useHandTracking } from "@/hooks/useHandTracking";
 import { useSyncRecorder } from "@/hooks/useSyncRecorder";
 import {
@@ -29,6 +29,8 @@ import {
   MessageSquare,
   Bone,
   Hand,
+  Video,
+  Waves,
 } from "lucide-react";
 import { Link } from "wouter";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -55,16 +57,18 @@ export default function Home() {
   // ===== 同步录制 =====
   const recorder = useSyncRecorder();
 
-  // ===== 手套双手连接 (Web Serial API 直连，296B 带加速度) =====
+  // ===== 手套双手连接 =====
+  // 连接住在 GloveProvider 里（全应用唯一），首页与四个流程页共享同一个串口。
+  // 首页仍保留连接按钮：它不是编号步骤，是"随手看一眼原始数据"的入口。
   const {
     left: gloveLeft,
     right: gloveRight,
     anyConnected: gloveConnected,
-  } = useDualGloveSerial({
-    baudRate: 921600,
-    onLeftFrame: (frame) => recorder.recordGloveFrame(frame),
-    onRightFrame: (frame) => recorder.recordGloveFrame(frame),
-  });
+  } = useGloves();
+  useGloveFrames(
+    (frame) => recorder.recordGloveFrame(frame),
+    (frame) => recorder.recordGloveFrame(frame)
+  );
   // 双手总帧率（用于顶栏概览）
   const gloveFps = gloveLeft.gloveFps + gloveRight.gloveFps;
 
@@ -155,7 +159,7 @@ export default function Home() {
           }}
         />
 
-        <div className="relative z-10 flex flex-col items-center gap-8 max-w-2xl px-6">
+        <div className="relative z-10 flex flex-col items-center gap-8 max-w-3xl px-6">
           {/* Logo */}
           <div className="flex flex-col items-center gap-5">
             <div className="w-32 h-32 rounded-full border border-[#00f0ff]/30 flex items-center justify-center relative overflow-hidden group">
@@ -258,36 +262,92 @@ export default function Home() {
             </div>
           )}
 
-          {/* 手语识别系统导航 */}
-          <div className="w-full max-w-xl">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider text-center mb-2">
-              Sign Language Recognition System
+          {/* 手语识别系统导航 —— 按实际操作顺序排成递进流程，而不是按模块罗列。
+              静态词与动态词是两条平行支线：②里选哪个采，③就用对应的那个训。
+              /train-skeleton 不在这条链路上（它只驱动 /mocap 的火柴人），单列为旁支。 */}
+          <div className="w-full">
+            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider text-center mb-3">
+              Sign Language Recognition System · 按顺序操作
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              <Link href="/collect" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#00f0ff]/50 transition-all duration-200 block">
-                <Database className="w-5 h-5 mx-auto text-[#00f0ff] mb-1" />
-                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">数据采集</div>
-              </Link>
-              <Link href="/train" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#00e5a0]/50 transition-all duration-200 block">
-                <Brain className="w-5 h-5 mx-auto text-[#00e5a0] mb-1" />
-                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">手语训练</div>
-              </Link>
-              <Link href="/translate" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#ff2d7b]/50 transition-all duration-200 block">
-                <MessageSquare className="w-5 h-5 mx-auto text-[#ff2d7b] mb-1" />
-                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">手语翻译</div>
-              </Link>
+
+            <div className="flex flex-col md:flex-row md:items-stretch gap-1.5">
+              <FlowStep n="1" title="准备" hint="先插手套">
+                <StepLink
+                  href="/mocap"
+                  icon={<Hand className="w-3.5 h-3.5 text-[#da77f2] shrink-0" />}
+                  label="手套体检"
+                  sub="IMU 自检 · 弯折标定"
+                  hoverCls="hover:border-[#da77f2]/60"
+                />
+              </FlowStep>
+
+              <FlowArrow />
+
+              <FlowStep n="2" title="采集数据" hint="手套 + 摄像头">
+                <StepLink
+                  href="/collect"
+                  icon={<Database className="w-3.5 h-3.5 text-[#00f0ff] shrink-0" />}
+                  label="静态采集"
+                  sub="单帧手型"
+                  hoverCls="hover:border-[#00f0ff]/60"
+                />
+                <StepLink
+                  href="/collect-seq"
+                  icon={<Video className="w-3.5 h-3.5 text-[#00f0ff] shrink-0" />}
+                  label="时序采集"
+                  sub="动态词 · 开始/结束"
+                  hoverCls="hover:border-[#00f0ff]/60"
+                />
+              </FlowStep>
+
+              <FlowArrow />
+
+              <FlowStep n="3" title="训练模型" hint="离线，可拔手套">
+                <StepLink
+                  href="/train"
+                  icon={<Brain className="w-3.5 h-3.5 text-[#00e5a0] shrink-0" />}
+                  label="静态训练"
+                  sub="配静态采集 · 单帧 MLP"
+                  hoverCls="hover:border-[#00e5a0]/60"
+                />
+                <StepLink
+                  href="/train-seq"
+                  icon={<Waves className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  label="时序训练"
+                  sub="配时序采集 · TCN 含蒸馏"
+                  hoverCls="hover:border-[#a855f7]/60"
+                />
+              </FlowStep>
+
+              <FlowArrow />
+
+              <FlowStep n="4" title="使用" hint="只要手套">
+                <StepLink
+                  href="/translate"
+                  icon={<MessageSquare className="w-3.5 h-3.5 text-[#ff2d7b] shrink-0" />}
+                  label="手语翻译"
+                  sub="纯触觉推理，不开摄像头"
+                  hoverCls="hover:border-[#ff2d7b]/60"
+                />
+              </FlowStep>
             </div>
-            <div className="grid grid-cols-2 gap-2 mt-2">
-              <Link href="/train-skeleton" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#f59e0b]/50 transition-all duration-200 block">
-                <Bone className="w-5 h-5 mx-auto text-[#f59e0b] mb-1" />
-                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">骨架训练</div>
-                <div className="text-[8px] text-[#334455]">触觉→骨架回归</div>
+
+            {/* 旁支：不在识别链路上，放在流程外面免得被当成必经步骤 */}
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-[8px] font-mono text-[#334455] uppercase tracking-wider shrink-0">
+                旁支
+              </span>
+              <div className="h-px flex-1 bg-[#00f0ff]/10" />
+              <Link
+                href="/train-skeleton"
+                className="rounded-sm border border-[#f59e0b]/20 hover:border-[#f59e0b]/60 px-2 py-1 flex items-center gap-1.5 transition-colors shrink-0"
+              >
+                <Bone className="w-3.5 h-3.5 text-[#f59e0b] shrink-0" />
+                <span className="text-[10px] text-[#8899aa]">骨架训练</span>
               </Link>
-              <Link href="/mocap" className="cyber-panel p-3 rounded-sm text-center group hover:border-[#da77f2]/50 transition-all duration-200 block">
-                <Hand className="w-5 h-5 mx-auto text-[#da77f2] mb-1" />
-                <div className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors">虚拟动捕</div>
-                <div className="text-[8px] text-[#334455]">仅手套驱动火柴人</div>
-              </Link>
+              <span className="text-[8px] text-[#334455] hidden sm:inline">
+                触觉→骨架回归，只驱动手套体检页的火柴人，不参与识别
+              </span>
             </div>
           </div>
 
@@ -606,6 +666,80 @@ export default function Home() {
 }
 
 // ===== 辅助组件 =====
+
+/** 启动页流程图的一个步骤格子：序号 + 标题 + 一句前提 + 若干个可点的模块 */
+function FlowStep({
+  n,
+  title,
+  hint,
+  children,
+}: {
+  n: string;
+  title: string;
+  hint: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="flex-1 cyber-panel rounded-sm p-2 flex flex-col gap-1.5 min-w-0">
+      <div className="flex items-center gap-1.5">
+        <span
+          className="w-4 h-4 rounded-full border border-[#00f0ff]/40 text-[#00f0ff] flex items-center justify-center shrink-0 text-[9px]"
+          style={{ fontFamily: "'JetBrains Mono', monospace" }}
+        >
+          {n}
+        </span>
+        <span className="text-[11px] text-[#ccd6e0] truncate">{title}</span>
+      </div>
+      <div className="text-[8px] text-[#445566] pl-[22px] -mt-1">{hint}</div>
+      <div className="flex flex-col gap-1">{children}</div>
+    </div>
+  );
+}
+
+/** 步骤之间的箭头：窄屏竖排朝下，宽屏横排朝右 */
+function FlowArrow() {
+  return (
+    <div className="flex items-center justify-center text-[#00f0ff]/25 shrink-0 text-[10px] leading-none">
+      <span className="md:hidden">▼</span>
+      <span className="hidden md:inline">▶</span>
+    </div>
+  );
+}
+
+/**
+ * 流程里可点击的模块入口。
+ * hoverCls 必须传字面量类名——Tailwind 是静态扫描的，拼出来的类名不会被生成。
+ */
+function StepLink({
+  href,
+  icon,
+  label,
+  sub,
+  hoverCls,
+}: {
+  href: string;
+  icon: React.ReactNode;
+  label: string;
+  sub: string;
+  hoverCls: string;
+}) {
+  return (
+    <Link
+      href={href}
+      className={`rounded-sm border border-[#00f0ff]/10 bg-[#00f0ff]/[0.02] px-2 py-1.5 block transition-colors group ${hoverCls}`}
+    >
+      <div className="flex items-center gap-1.5 min-w-0">
+        {icon}
+        <span className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors truncate">
+          {label}
+        </span>
+      </div>
+      <div className="text-[8px] text-[#334455] pl-[20px] leading-tight">
+        {sub}
+      </div>
+    </Link>
+  );
+}
 
 function ControlButton({
   icon,

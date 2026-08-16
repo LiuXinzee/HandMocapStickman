@@ -62,7 +62,21 @@ interface MatchedDetection<TSource extends string> {
 }
 
 const PALM_INDICES = [0, 5, 9, 13, 17] as const;
+/**
+ * 单条 track（画面里只有一只手）允许自行翻转手别所需的连续矛盾帧数。
+ * 双手同时在画面里时**不走这条路**，见 `updateTrack` 的 allowSwitch 与下面的成对互换。
+ */
 const HANDEDNESS_SWITCH_FRAMES = 9;
+/**
+ * 两条 track **同时**都在说"我是对方"时，互换双方手别所需的连续帧数。
+ *
+ * 为什么要单独一条而不是复用 HANDEDNESS_SWITCH_FRAMES：双手在画面里时单条 track 的翻转
+ * 一定会被 `ensureUniqueHandednessPair` 按 age 驳回（老的赢、新的被改回去），所以光把阈值
+ * 提高毫无作用 —— 真正的手别交换必须**成对**发生。门限取得比单手那条高很多（30 帧 ≈ 1s），
+ * 因为代价不对称：误判一次交换会把整条录制的 leftLandmarks/rightLandmarks 掉个个，
+ * 而真交叉多等半秒只是 HUD 上晚半秒改字。
+ */
+const PAIR_SWAP_FRAMES = 30;
 
 function clamp(value: number, min: number, max: number): number {
   return value < min ? min : value > max ? max : value;
@@ -127,6 +141,30 @@ function makeDetectionFeature<TSource extends string>(
     centerY,
     scale,
   };
+}
+
+/**
+ * 冷启动时按空间位置定左右，不信 MediaPipe 的标签。
+ *
+ * 只在"这一帧有两只手，但两个标签凑不出一 Left 一 Right"时介入 —— 那说明 MediaPipe 至少错了
+ * 一个（两只手同时在画面里，物理上必然是一左一右），此时空间顺序比标签可靠。
+ *
+ * **送进检测的帧没有镜像**（`useHandTracking` 里是 `drawImage(video, …)` 原样绘制，镜像只发生
+ * 在 HandCanvas 的显示层 `ctx.scale(-1, 1)`），所以图像左侧那只是用户的**右手**。
+ * 这个前提一变，下面两行就反了，改采集帧的人务必回来看这里。
+ */
+function assignColdStartHandedness<TSource extends string>(
+  detections: Array<DetectionFeature<TSource>>
+): void {
+  if (detections.length !== 2) return;
+  const labels = new Set(detections.map(detection => detection.handedness));
+  if (labels.has("Left") && labels.has("Right")) return;
+
+  const spatialOrder = [...detections].sort(
+    (first, second) => first.centerX - second.centerX
+  );
+  spatialOrder[0].handedness = "Right";
+  spatialOrder[1].handedness = "Left";
 }
 
 function normalizedShapeDistance<TSource extends string>(
@@ -200,9 +238,15 @@ function matchCost<TSource extends string>(
   );
 }
 
+/**
+ * @param allowSwitch 是否允许这条 track 单独翻转手别。双手都在画面里时传 false ——
+ *   单条翻转会让两条 track 同时声称同一只手，把 leftLandmarks/rightLandmarks 串线。
+ *   注意即便 false，下面的 pending 计数**照常累加**，成对互换判据要用它。
+ */
 function updateHandednessEvidence(
   track: HandTrack,
-  observedHandedness: string
+  observedHandedness: string,
+  allowSwitch: boolean
 ): void {
   track.leftEvidence *= 0.9;
   track.rightEvidence *= 0.9;
@@ -234,13 +278,119 @@ function updateHandednessEvidence(
     track.pendingHandednessFrames = 1;
   }
 
-  if (track.pendingHandednessFrames >= HANDEDNESS_SWITCH_FRAMES) {
-    track.stableHandedness = observedHandedness;
-    track.pendingHandedness = "Unknown";
-    track.pendingHandednessFrames = 0;
-    track.leftEvidence = observedHandedness === "Left" ? 2.5 : 0;
-    track.rightEvidence = observedHandedness === "Right" ? 2.5 : 0;
+  if (allowSwitch && track.pendingHandednessFrames >= HANDEDNESS_SWITCH_FRAMES) {
+    setStableHandedness(track, observedHandedness);
   }
+}
+
+function setStableHandedness(track: HandTrack, handedness: string): void {
+  track.stableHandedness = handedness;
+  track.pendingHandedness = "Unknown";
+  track.pendingHandednessFrames = 0;
+  track.leftEvidence = handedness === "Left" ? 2.5 : 0;
+  track.rightEvidence = handedness === "Right" ? 2.5 : 0;
+}
+
+function oppositeHandedness(handedness: string): string {
+  return handedness === "Left" ? "Right" : "Left";
+}
+
+/**
+ * 两条 track 必须一左一右 —— 这是物理约束，不是启发式。
+ *
+ * 原来每条 track 各自独立判手别，两只手同时在画面里时完全可以判出两个 "Left"，
+ * 于是 `useSyncRecorder` 往 leftLandmarks 里写了两只手、rightLandmarks 全是 NaN，
+ * 而且**训练不报错**、能量曲线也正常，只表现为某几个词学不好。这里把约束显式加上。
+ *
+ * 冲突裁决：一方 Unknown 就取对方的反面；都判成同一只手时**老的赢**（age 大的那条积累的
+ * 证据多），新的被改成反面；age 也相同（同一帧一起建的）才退到空间顺序。
+ */
+function ensureUniqueHandednessPair(tracks: HandTrack[]): void {
+  if (tracks.length !== 2) return;
+  const [first, second] = tracks;
+  if (
+    first.stableHandedness !== "Unknown" &&
+    second.stableHandedness !== "Unknown" &&
+    first.stableHandedness !== second.stableHandedness
+  ) {
+    return;
+  }
+
+  if (
+    first.stableHandedness === "Unknown" &&
+    second.stableHandedness !== "Unknown"
+  ) {
+    setStableHandedness(first, oppositeHandedness(second.stableHandedness));
+    return;
+  }
+  if (
+    second.stableHandedness === "Unknown" &&
+    first.stableHandedness !== "Unknown"
+  ) {
+    setStableHandedness(second, oppositeHandedness(first.stableHandedness));
+    return;
+  }
+
+  if (
+    first.stableHandedness === second.stableHandedness &&
+    first.age !== second.age
+  ) {
+    const established = first.age > second.age ? first : second;
+    const newer = established === first ? second : first;
+    const establishedSide =
+      established.stableHandedness === "Unknown"
+        ? established.centerX < newer.centerX
+          ? "Right"
+          : "Left"
+        : established.stableHandedness;
+    setStableHandedness(established, establishedSide);
+    setStableHandedness(newer, oppositeHandedness(establishedSide));
+    return;
+  }
+
+  const spatialOrder = [...tracks].sort(
+    (leftmost, rightmost) => leftmost.centerX - rightmost.centerX
+  );
+  setStableHandedness(spatialOrder[0], "Right");
+  setStableHandedness(spatialOrder[1], "Left");
+}
+
+/**
+ * 真的左右交叉了（手语里双手换位很常见）时把两条 track 的手别**同时**互换。
+ *
+ * 没有这一条，上面的互斥约束就退化成"第一次判定即永久冻结"：双手都在画面里时单条 track
+ * 的翻转被 allowSwitch=false 挡住，即便放开也会被 ensureUniqueHandednessPair 按 age 驳回。
+ * 判据要求两条 track **各自**连续 PAIR_SWAP_FRAMES 帧都在说"我是对方"，
+ * 并且两条这一帧都真的匹配上了检测（missedFrames === 0）—— 丢检期间 pending 计数是冻结的，
+ * 拿冻结的计数去换手别等于用过期证据下结论。
+ */
+function tryPairHandednessSwap(tracks: HandTrack[]): void {
+  if (tracks.length !== 2) return;
+  const [first, second] = tracks;
+  if (first.missedFrames !== 0 || second.missedFrames !== 0) return;
+  if (
+    first.stableHandedness === "Unknown" ||
+    second.stableHandedness === "Unknown" ||
+    first.stableHandedness === second.stableHandedness
+  ) {
+    return;
+  }
+  if (
+    first.pendingHandedness !== second.stableHandedness ||
+    second.pendingHandedness !== first.stableHandedness
+  ) {
+    return;
+  }
+  if (
+    first.pendingHandednessFrames < PAIR_SWAP_FRAMES ||
+    second.pendingHandednessFrames < PAIR_SWAP_FRAMES
+  ) {
+    return;
+  }
+
+  const firstSide = first.stableHandedness;
+  setStableHandedness(first, second.stableHandedness);
+  setStableHandedness(second, firstSide);
 }
 
 /**
@@ -290,6 +440,10 @@ export class HandIdentityTracker<TSource extends string = string> {
       if (feature) features.push(feature);
     }
 
+    // 冷启动只在一条 track 都没有时做：已有 track 时手别由时序证据接管，
+    // 这时再按空间顺序改标签会在双手交叉的瞬间把两条 track 一起搞反。
+    if (this.tracks.length === 0) assignColdStartHandedness(features);
+
     const assignment = this.findBestAssignment(features);
     const matched: Array<MatchedDetection<TSource>> = [];
     const usedDetections = new Uint8Array(features.length);
@@ -306,7 +460,7 @@ export class HandIdentityTracker<TSource extends string = string> {
 
       const detection = features[detectionIndex];
       usedDetections[detectionIndex] = 1;
-      this.updateTrack(track, detection);
+      this.updateTrack(track, detection, this.tracks.length < 2);
       matched.push({ track, detection });
     }
 
@@ -331,6 +485,11 @@ export class HandIdentityTracker<TSource extends string = string> {
         matched.push({ track, detection });
       }
     }
+
+    // 先给真交叉一个成对互换的机会，再用互斥约束收尾（互换后两边仍然不同，
+    // ensureUniqueHandednessPair 会直接返回，不会把刚换好的又改回去）
+    tryPairHandednessSwap(this.tracks);
+    ensureUniqueHandednessPair(this.tracks);
 
     matched.sort((first, second) => first.track.order - second.track.order);
     return {
@@ -417,7 +576,8 @@ export class HandIdentityTracker<TSource extends string = string> {
 
   private updateTrack(
     track: HandTrack,
-    detection: DetectionFeature<TSource>
+    detection: DetectionFeature<TSource>,
+    allowHandednessSwitch: boolean
   ): void {
     const elapsedFrames = track.missedFrames + 1;
     const observedVelocityX =
@@ -432,6 +592,10 @@ export class HandIdentityTracker<TSource extends string = string> {
     track.landmarks = detection.landmarks;
     track.missedFrames = 0;
     track.age++;
-    updateHandednessEvidence(track, detection.handedness);
+    updateHandednessEvidence(
+      track,
+      detection.handedness,
+      allowHandednessSwitch
+    );
   }
 }

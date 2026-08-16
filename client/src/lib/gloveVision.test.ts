@@ -303,6 +303,154 @@ describe("classifyGloveSurface", () => {
   });
 });
 
+// ===== 白手套 =====
+//
+// 实物手套是白色的（规格书写"黑色面料"是错的）。原来三条判据每一条都要暗像素，
+// 白手套一律 isGlove=false → gloveConfidence 衰减到 0 → 过不了 useHandTracking 里
+// `gloveConfidence >= 0.25` 那个闸门 → 手套 ROI 恢复回路对白手套永远不启动。
+// 这一组测试锁的是"白手套能认出来"，同时锁住"白墙不能被当成白手套"。
+
+/** 手涂成 handColor、背景涂成 bgColor；textureAmplitude>0 时给手加上织物纹理般的亮度起伏 */
+function makeWhiteHandFrame(
+  handColor: Rgb,
+  bgColor: Rgb,
+  textureAmplitude = 0
+): Uint8ClampedArray {
+  const frame = makeFrame(bgColor);
+  paintRect(frame, 48, 52, 83, 83, handColor);
+  for (const [from, to] of CONNECTIONS) {
+    paintSegment(frame, POINTS[from], POINTS[to], 6, handColor);
+  }
+  if (textureAmplitude > 0) {
+    // 只在手的包围盒内加起伏，别动背景 —— 否则环带也跟着起伏，测的就不是纹理了
+    for (let y = 8; y <= 84; y++) {
+      for (let x = 23; x <= 94; x++) {
+        const offset = (y * WIDTH + x) * 4;
+        if (frame[offset] !== handColor[0]) continue;
+        const wobble = ((x + y) % 3 === 0 ? 1 : -1) * textureAmplitude;
+        frame[offset] = handColor[0] + wobble;
+        frame[offset + 1] = handColor[1] + wobble;
+        frame[offset + 2] = handColor[2] + wobble;
+      }
+    }
+  }
+  return frame;
+}
+
+/**
+ * useHandTracking 里 measuredGloveConfidence 的公式（那边是 :815 附近）。
+ * 这里复刻一份是为了把"分类结果能不能过 0.25 闸门"变成可断言的数 ——
+ * isGlove 认对了但置信度过不了闸门，ROI 恢复回路照样是死的，
+ * 而那个后果在单测里看不见，只能靠这条锁。
+ */
+function measuredGloveConfidence(result: {
+  isGlove: boolean;
+  darkRatio: number;
+  silverRatio: number;
+  lightRatio: number;
+}): number {
+  const opaque = result.darkRatio + result.silverRatio;
+  return result.isGlove
+    ? Math.min(
+        1,
+        Math.max(0, 0.5 + (Math.max(opaque, result.lightRatio) - 0.35) * 0.9)
+      )
+    : Math.min(1, Math.max(0, (result.darkRatio - 0.2) * 0.8));
+}
+
+describe("classifyGloveSurface —— 白手套", () => {
+  it("比背景亮的白手套判成手套，且置信度能过 0.25 闸门", () => {
+    const frame = makeWhiteHandFrame([236, 238, 240], [96, 100, 104]);
+    const result = classifyGloveSurface(frame, WIDTH, HEIGHT, LANDMARKS);
+
+    expect(result.isGlove).toBe(true);
+    expect(result.lightRatio).toBeGreaterThan(0.58);
+    expect(result.darkRatio).toBeLessThan(0.05);
+    expect(measuredGloveConfidence(result)).toBeGreaterThan(0.25);
+  });
+
+  it("白手套不猜手心/手背 —— 银点是黑手套的标记，白手套走那条只会瞎猜", () => {
+    const frame = makeWhiteHandFrame([236, 238, 240], [96, 100, 104]);
+    const result = classifyGloveSurface(frame, WIDTH, HEIGHT, LANDMARKS);
+
+    expect(result.surface).toBe("unknown");
+    expect(result.confidence).toBe(0);
+  });
+
+  it("和背景一样亮但有织物纹理起伏时，靠 deviation 也能认出来", () => {
+    // 手与背景同色 → lightContrast ≈ 0，唯一可用的证据是手上的亮度起伏
+    const frame = makeWhiteHandFrame([232, 235, 238], [232, 235, 238], 9);
+    const result = classifyGloveSurface(frame, WIDTH, HEIGHT, LANDMARKS);
+
+    expect(result.isGlove).toBe(true);
+    expect(result.lightRatio).toBeGreaterThan(0.58);
+  });
+
+  it("一整片均匀的白（白墙 / 白袖子，没戴手套）不算手套", () => {
+    // 这条是 isLightGlove 里 lightContrast/deviation 两个附加条件的存在理由：
+    // 光"亮 + 低彩度"是不够的，白墙完全满足
+    for (const wall of [
+      [238, 238, 238],
+      [212, 216, 220],
+      [250, 250, 248],
+    ] as const) {
+      const frame = makeFrame(wall);
+      const result = classifyGloveSurface(frame, WIDTH, HEIGHT, LANDMARKS);
+      expect(result.isGlove).toBe(false);
+      expect(result.surface).toBe("unknown");
+      expect(measuredGloveConfidence(result)).toBeLessThan(0.25);
+    }
+  });
+
+  it("黑手套的判定完全不变，置信度也与改动前逐位相同（回归锁）", () => {
+    const palm = classifyGloveSurface(
+      makeHandFrame([23, 27, 31], true),
+      WIDTH,
+      HEIGHT,
+      LANDMARKS
+    );
+    const back = classifyGloveSurface(
+      makeHandFrame([21, 24, 29], false),
+      WIDTH,
+      HEIGHT,
+      LANDMARKS
+    );
+
+    expect(palm.surface).toBe("palm");
+    expect(back.surface).toBe("back");
+    // 纯黑面料没有亮像素
+    expect(back.lightRatio).toBeLessThan(0.02);
+    // 掌面的银色反光标记本身就是"亮且低彩度"，所以它同时计入 silverRatio 和 lightRatio。
+    // 这正是 measuredGloveConfidence 取 max 而不是求和的原因 —— 求和会把这批像素数两遍。
+    expect(palm.lightRatio).toBeCloseTo(palm.silverRatio, 2);
+    // 但远低于 0.58，isLightGlove 不会介入，黑手套走的还是原来那条路
+    expect(palm.lightRatio).toBeLessThan(0.58);
+    // 取 max 之后置信度 = 0.5 + (dark+silver − 0.35)×0.9，与改动前的公式逐位相同
+    expect(measuredGloveConfidence(palm)).toBeCloseTo(
+      Math.min(1, 0.5 + (palm.darkRatio + palm.silverRatio - 0.35) * 0.9),
+      10
+    );
+    expect(measuredGloveConfidence(back)).toBeCloseTo(
+      Math.min(1, 0.5 + (back.darkRatio + back.silverRatio - 0.35) * 0.9),
+      10
+    );
+  });
+
+  it("裸手（暖色皮肤调）不会被当成白手套", () => {
+    // isLowChromaLight 的 warmSkinTone 分支负责这件事；亮肤色是最危险的输入
+    for (const skin of [
+      [232, 196, 170],
+      [214, 178, 152],
+      [205, 146, 112],
+    ] as const) {
+      const frame = makeWhiteHandFrame(skin, [96, 100, 104]);
+      const result = classifyGloveSurface(frame, WIDTH, HEIGHT, LANDMARKS);
+      expect(result.isGlove).toBe(false);
+      expect(result.lightRatio).toBeLessThan(0.58);
+    }
+  });
+});
+
 describe("enhanceDarkGloveFrame", () => {
   it("finds and recolors a connected dark hand while preserving the input", () => {
     const frame = makeHandFrame([23, 27, 31], true);

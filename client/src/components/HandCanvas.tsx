@@ -78,14 +78,33 @@ export default function HandCanvas({
       }
       lastRenderAt = timestamp;
       const time = timestamp / 1000;
+
+      // 画布尺寸跟随真实视频尺寸。摄像头实际拿到的是 16:9（useHandTracking 申请
+      // 1280×720），调用方传进来的宽高只是拿不到 metadata 之前的占位值；沿用一个
+      // 4:3 的占位值会把画面横向压掉 25%，人看着又瘦又长。
+      //
+      // 不能改成留黑边（letterbox）来解决：关键点是相对**视频帧**归一化的，
+      // 画面缩进去留边而骨架仍按整块画布铺开，两者立刻错位。让画布本身等于视频
+      // 宽高，drawImage 和关键点就共用同一套坐标。
+      const video = videoRef?.current;
+      if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+        if (
+          canvas.width !== video.videoWidth ||
+          canvas.height !== video.videoHeight
+        ) {
+          canvas.width = video.videoWidth;
+          canvas.height = video.videoHeight;
+        }
+      }
+
       ctx.clearRect(0, 0, canvas.width, canvas.height);
 
       // 绘制视频帧
-      if (showVideo && videoRef?.current && videoRef.current.readyState >= 2) {
+      if (showVideo && video && video.readyState >= 2) {
         ctx.save();
         ctx.translate(canvas.width, 0);
         ctx.scale(-1, 1);
-        ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         ctx.restore();
         ctx.fillStyle = "rgba(10, 14, 26, 0.4)";
         ctx.fillRect(0, 0, canvas.width, canvas.height);

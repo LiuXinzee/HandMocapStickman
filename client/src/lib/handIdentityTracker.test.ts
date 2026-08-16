@@ -233,6 +233,159 @@ describe("HandIdentityTracker", () => {
     expect(restored.detectionSources).toEqual(["glove-enhanced", "standard"]);
   });
 
+  // ===== 左右手互斥约束 =====
+  //
+  // 两只手同时在画面里，物理上必然是一左一右。原来每条 track 各自独立判手别，
+  // 可以判出两个 "Left"，于是 useSyncRecorder 往 leftLandmarks 里写两只手、
+  // rightLandmarks 全是 NaN —— 训练不报错、能量曲线正常，只表现为某几个词学不好。
+
+  /** 送进检测的帧没有镜像，所以图像左侧那只是用户的**右手** */
+  function handednessAtLargerX(
+    frame: StableHandIdentityFrame<DetectionSource>
+  ): string {
+    const firstIsRightmost =
+      centerX(frame.landmarks[0]) > centerX(frame.landmarks[1]);
+    return firstIsRightmost ? frame.handedness[0] : frame.handedness[1];
+  }
+
+  it("冷启动时两个标签凑不出一左一右，就按空间位置定（图像左侧 = 用户右手）", () => {
+    for (const labels of [
+      ["Left", "Left"],
+      ["Right", "Right"],
+      ["Unknown", "Unknown"],
+      ["Left", "Unknown"],
+    ]) {
+      const tracker = new HandIdentityTracker<DetectionSource>();
+      const frame = update(tracker, [
+        { x: 0.3, label: labels[0] },
+        { x: 0.7, label: labels[1] },
+      ]);
+      expect([...frame.handedness].sort()).toEqual(["Left", "Right"]);
+      // 帧未镜像：x 大的那只（图像右侧）是用户的左手
+      expect(handednessAtLargerX(frame)).toBe("Left");
+    }
+  });
+
+  it("双手都在画面里时，单条 track 连续被报成对方也不会翻（否则会出现两个 Left）", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    const first = update(tracker, [
+      { x: 0.3, label: "Left" },
+      { x: 0.7, label: "Right" },
+    ]);
+
+    // 只有左边那只被持续报错，右边那只始终说自己是 Right。
+    // 改动前 9 帧就会把左边那条翻成 Right，输出变成 ["Right","Right"]。
+    for (let frame = 0; frame < 20; frame++) {
+      const result = update(tracker, [
+        { x: 0.3, label: "Right" },
+        { x: 0.7, label: "Right" },
+      ]);
+      expect(result.trackingIds).toEqual(first.trackingIds);
+      expect(result.handedness).toEqual(["Left", "Right"]);
+      expect(new Set(result.handedness).size).toBe(2);
+    }
+  });
+
+  it("两条 track 同时互报对方，满 30 帧后成对互换（真交叉能恢复）", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    const first = update(tracker, [
+      { x: 0.3, label: "Left" },
+      { x: 0.7, label: "Right" },
+    ]);
+
+    // PAIR_SWAP_FRAMES = 30（模块私有常量，这里写死并锁住行为）
+    for (let frame = 0; frame < 29; frame++) {
+      const result = update(tracker, [
+        { x: 0.3, label: "Right" },
+        { x: 0.7, label: "Left" },
+      ]);
+      expect(result.handedness).toEqual(["Left", "Right"]);
+    }
+
+    const swapped = update(tracker, [
+      { x: 0.3, label: "Right" },
+      { x: 0.7, label: "Left" },
+    ]);
+    // track 身份（顺序、id）不变，只有手别标签换了个位
+    expect(swapped.trackingIds).toEqual(first.trackingIds);
+    expect(swapped.handedness).toEqual(["Right", "Left"]);
+
+    // 换完计数清零，不会下一帧又换回去
+    const after = update(tracker, [
+      { x: 0.3, label: "Right" },
+      { x: 0.7, label: "Left" },
+    ]);
+    expect(after.handedness).toEqual(["Right", "Left"]);
+  });
+
+  it("只有一条 track 在报矛盾时永远不互换", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    update(tracker, [
+      { x: 0.3, label: "Left" },
+      { x: 0.7, label: "Right" },
+    ]);
+    for (let frame = 0; frame < 60; frame++) {
+      const result = update(tracker, [
+        { x: 0.3, label: "Right" },
+        { x: 0.7, label: "Right" },
+      ]);
+      expect(result.handedness).toEqual(["Left", "Right"]);
+    }
+  });
+
+  it("丢检那一帧不互换 —— pending 计数是冻结的，不能拿过期证据下结论", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>({
+      maxMissedFrames: 4,
+    });
+    update(tracker, [
+      { x: 0.3, label: "Left" },
+      { x: 0.7, label: "Right" },
+    ]);
+    for (let frame = 0; frame < 29; frame++) {
+      update(tracker, [
+        { x: 0.3, label: "Right" },
+        { x: 0.7, label: "Left" },
+      ]);
+    }
+
+    // 右手这一帧丢了：左边那条的计数会到 30，但右边那条停在 29
+    const partial = update(tracker, [{ x: 0.3, label: "Right" }]);
+    expect(partial.handedness).toEqual(["Left"]);
+
+    // 两只都回来之后才允许换
+    const resumed = update(tracker, [
+      { x: 0.3, label: "Right" },
+      { x: 0.7, label: "Left" },
+    ]);
+    expect(resumed.handedness).toEqual(["Right", "Left"]);
+  });
+
+  it("第二只手带着 Unknown 标签出现时，取已确立那只的反面", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    const single = update(tracker, [{ x: 0.3, label: "Left" }]);
+    expect(single.handedness).toEqual(["Left"]);
+
+    const paired = update(tracker, [
+      { x: 0.3, label: "Left" },
+      { x: 0.7, label: "Unknown" },
+    ]);
+    expect([...paired.handedness].sort()).toEqual(["Left", "Right"]);
+    expect(new Set(paired.handedness).size).toBe(2);
+  });
+
+  it("单手时仍然允许 9 帧后自行纠正手别（画面里只有一只手，没有互斥约束可用）", () => {
+    const tracker = new HandIdentityTracker<DetectionSource>();
+    update(tracker, [{ x: 0.35, label: "Left" }]);
+    for (let frame = 0; frame < 8; frame++) {
+      expect(update(tracker, [{ x: 0.35, label: "Right" }]).handedness).toEqual([
+        "Left",
+      ]);
+    }
+    expect(update(tracker, [{ x: 0.35, label: "Right" }]).handedness).toEqual([
+      "Right",
+    ]);
+  });
+
   it("drops invalid landmark sets and validates configuration", () => {
     expect(() => new HandIdentityTracker({ maxMissedFrames: -1 })).toThrow(
       RangeError

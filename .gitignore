@@ -115,3 +115,11 @@ client/public/__manus__/version.json
 .manus-logs/
 hand_mocap_stickman/
 .project-config.json
+
+# Python 本地虚拟环境与字节码（python_train / glove_bridge 用）
+.venv/
+__pycache__/
+*.pyc
+
+# 手工备份文件，不入库
+*.bak-*

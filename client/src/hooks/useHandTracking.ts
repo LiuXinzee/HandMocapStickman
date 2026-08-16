@@ -159,6 +159,20 @@ interface UseHandTrackingReturn {
   stopTracking: () => void;
 }
 
+/**
+ * MediaPipe Hands 的模型与 wasm 资源根目录 —— **本地**，不是 CDN。
+ *
+ * 原来 `hands.js` 和 `locateFile` 都写死 cdn.jsdelivr.net，于是每次打开摄像头页面都要去公网拉
+ * 约 24 MB（hand_landmark_full.tflite 5.5 MB + simd wasm 6 MB + packed assets 4.3 MB + …）。
+ * 断网、公司网络挡 CDN、或者拿去客户现场演示，整条视觉链路直接起不来，
+ * 而且失败长得像"摄像头没权限"，极难查。现在 11 个文件在
+ * `client/public/vendor/mediapipe-hands/`，已核对与官方发布逐字节一致（`.gitattributes` 里有说明）。
+ *
+ * 其中 `hands_solution_simd_wasm_bin.data` **是 0 字节**——官方 CDN 上就是 0，不是拷坏了，
+ * 别"修"它，也别因为它是空的就删掉：`hands.js` 会去请求它，404 会中断初始化。
+ */
+const MEDIAPIPE_HANDS_ASSET_ROOT = "/vendor/mediapipe-hands";
+
 // 通过 script 标签加载 MediaPipe
 function loadMediaPipeScript(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -178,16 +192,18 @@ function loadMediaPipeScript(): Promise<void> {
       return;
     }
     const script = document.createElement("script");
-    script.src =
-      "https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/hands.js";
+    script.src = `${MEDIAPIPE_HANDS_ASSET_ROOT}/hands.js`;
     script.setAttribute("data-mediapipe-hands", "true");
-    script.crossOrigin = "anonymous";
     script.onload = () => {
       console.log("[HandMocap] MediaPipe script loaded");
       resolve();
     };
     script.onerror = () => {
-      reject(new Error("Failed to load MediaPipe Hands script from CDN"));
+      reject(
+        new Error(
+          `Failed to load MediaPipe Hands script from ${MEDIAPIPE_HANDS_ASSET_ROOT}`
+        )
+      );
     };
     document.head.appendChild(script);
   });
@@ -349,6 +365,7 @@ function classifyVisibleHands(
       isGlove: false,
       silverRatio: 0,
       darkRatio: 0,
+      lightRatio: 0,
       confidence: 0,
     }));
   }
@@ -663,7 +680,7 @@ export function useHandTracking(
       const createHands = () =>
         new HandsClass({
           locateFile: (file: string) => {
-            return `https://cdn.jsdelivr.net/npm/@mediapipe/hands@0.4.1675469240/${file}`;
+            return `${MEDIAPIPE_HANDS_ASSET_ROOT}/${file}`;
           },
         });
 
@@ -812,11 +829,36 @@ export function useHandTracking(
             (candidate.source === "glove-roi" ? 0.6 : 0);
           const classification = classifications?.[index];
           if (classification) {
-            const materialRatio =
+            // lightRatio 必须算进来，否则白手套的 isGlove 修了也没用：
+            // 白手套 darkRatio≈0.05、silverRatio≈0，只有这两项时
+            // 0.5 + (0.05 − 0.35)×0.9 = 0.23，仍然过不了下面那个 0.25 闸门，
+            // 手套 ROI 恢复回路照样起不来。
+            //
+            // 但**只在 isGlove 成立时**算，且取 max 不是求和：
+            // - 不进 else 分支：那条是"没认出手套，按材质像素占比给点部分分"。
+            //   暗/银像素是手套特有的，"亮且低彩度"不是 —— 一面白墙就 100% 满足，
+            //   求和会让白墙拿到 (1.0−0.2)×0.8 = 0.64 直接过闸门，闸门就白设了。
+            // - 取 max 是因为三者会重叠：黑手套掌面的银色反光标记本身就是"亮且低彩度"，
+            //   求和会把同一批像素数两遍、凭空抬高置信度。取 max 则让黑手套的取值
+            //   与改动前**完全一致**（黑手套 lightRatio 必然小于 dark+silver）。
+            const opaqueMaterialRatio =
               classification.darkRatio + classification.silverRatio;
             const measuredGloveConfidence = classification.isGlove
-              ? clamp01(0.5 + (materialRatio - 0.35) * 0.9)
-              : clamp01((materialRatio - 0.2) * 0.8);
+              ? clamp01(
+                  0.5 +
+                    (Math.max(opaqueMaterialRatio, classification.lightRatio) -
+                      0.35) *
+                      0.9
+                )
+              : // 没认出手套时只给 darkRatio 的部分分，**不算 silverRatio**。
+                // 这里原来是 (dark + silver − 0.2)×0.8，是个一直存在的误判源：
+                // gloveVision 的"银色"判据只要求「亮 + min≥82 + 低彩度」，一面白墙、
+                // 一张白桌面、任何过曝区域都 100% 命中，于是 silverRatio=1、
+                // 分数 = (1−0.2)×0.8 = 0.64，直接过下面的 0.25 闸门 ——
+                // 手套 ROI 恢复回路会拿白墙当手套区域去反复重找手。
+                // 算过：isGlove=false 且 dark+silver > 0.51 只可能是"银多暗少"的亮面
+                //（暗的多就已经 isGlove=true 了），所以去掉 silver 不会误伤任何真手套。
+                clamp01((classification.darkRatio - 0.2) * 0.8);
             const evidence =
               classification.surface === "palm"
                 ? classification.confidence

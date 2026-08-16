@@ -13,9 +13,10 @@
  * - setInterval 内 async 异常被静默吞掉
  * - 添加详细 console.log 调试日志
  */
-import { useDualGloveSerial } from "@/hooks/useDualGloveSerial";
+import { useGloves } from "@/contexts/GloveContext";
 import { useHandTracking } from "@/hooks/useHandTracking";
 import HandCanvas from "@/components/HandCanvas";
+import StepNav from "@/components/StepNav";
 import {
   SIGN_VOCABULARY,
   SIGN_CATEGORIES,
@@ -44,17 +45,13 @@ import {
 import HandSkeletonAnim from "@/components/HandSkeletonAnim";
 
 export default function DataCollect() {
-  // 手套双手连接
+  // 手套连接在第 1 步（/mocap）建立、住在 GloveProvider 里，本页只读状态
   const {
     left: gloveLeft,
     right: gloveRight,
-    isSupported: gloveSupported,
     anyConnected: gloveConnected,
-    disconnectAll,
-  } = useDualGloveSerial({ baudRate: 921600 });
-  const gloveConnecting = gloveLeft.isConnecting || gloveRight.isConnecting;
+  } = useGloves();
   const gloveError = gloveLeft.error || gloveRight.error;
-  const gloveFps = gloveLeft.gloveFps + gloveRight.gloveFps;
   // 预览用（优先展示右手，其次左手）
   const latestFrame = gloveRight.latestFrame ?? gloveLeft.latestFrame;
 
@@ -351,7 +348,11 @@ export default function DataCollect() {
               color: "#00f0ff",
             }}
           >
-            DATA COLLECTION
+            STATIC COLLECTION
+          </span>
+          {/* 标题带上"静态"：/collect-seq 是另一条链路的采集页，两页布局相近 */}
+          <span className="text-[9px] text-[#556677] font-mono ml-2">
+            静态单帧
           </span>
           <span className="text-[9px] text-[#556677] font-mono ml-2">
             VISION + TACTILE SYNC
@@ -370,19 +371,12 @@ export default function DataCollect() {
               CAM OFF
             </span>
           )}
-          {/* 手套状态 */}
-          {gloveConnected ? (
-            <span className="text-[#00e5a0] flex items-center gap-1">
-              <div className="w-1.5 h-1.5 rounded-full bg-[#00e5a0] animate-pulse" />
-              GLOVE {gloveFps}Hz
-            </span>
-          ) : (
-            <span className="text-[#556677]">GLOVE OFF</span>
-          )}
           <span className="text-[#556677]">
             SAMPLES:{" "}
             <span className="text-[#00f0ff]">{stats?.totalSamples ?? 0}</span>
           </span>
+          {/* 手套状态（左右手分开）+ 下一步 */}
+          <StepNav />
         </div>
       </header>
 
@@ -538,50 +532,47 @@ export default function DataCollect() {
                   <div className="text-[11px] font-mono text-[#8899aa]">
                     触觉手套 (左/右手)
                   </div>
-                  {!gloveSupported && (
-                    <div className="text-[9px] text-[#ff2d7b]">
-                      请使用 Chrome/Edge
-                    </div>
-                  )}
                   {gloveError && (
                     <div className="text-[9px] text-[#ff2d7b]">
                       {gloveError}
                     </div>
                   )}
-                  <div className="flex flex-col gap-2">
-                    <button
-                      onClick={
-                        gloveLeft.isConnected
-                          ? gloveLeft.disconnect
-                          : gloveLeft.connect
-                      }
-                      disabled={gloveLeft.isConnecting || !gloveSupported}
-                      className="cyber-btn px-4 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
+                  {/* 连接入口只在第 1 步。这里只报状态 + 给回去的路 */}
+                  <div className="text-[10px] font-mono space-y-1">
+                    <div
+                      style={{
+                        color: gloveLeft.isConnected ? "#00e5a0" : "#556677",
+                      }}
                     >
-                      <Zap className="w-3 h-3" />
+                      左手{" "}
                       {gloveLeft.isConnected
-                        ? `左手 ✓ ${gloveLeft.gloveFps}Hz (断开)`
+                        ? `✓ ${gloveLeft.gloveFps}Hz`
                         : gloveLeft.isConnecting
                           ? "连接中..."
-                          : "连接左手"}
-                    </button>
-                    <button
-                      onClick={
-                        gloveRight.isConnected
-                          ? gloveRight.disconnect
-                          : gloveRight.connect
-                      }
-                      disabled={gloveRight.isConnecting || !gloveSupported}
+                          : "未连接"}
+                    </div>
+                    <div
+                      style={{
+                        color: gloveRight.isConnected ? "#00e5a0" : "#556677",
+                      }}
+                    >
+                      右手{" "}
+                      {gloveRight.isConnected
+                        ? `✓ ${gloveRight.gloveFps}Hz`
+                        : gloveRight.isConnecting
+                          ? "连接中..."
+                          : "未连接"}
+                    </div>
+                  </div>
+                  {!gloveConnected && (
+                    <Link
+                      href="/mocap"
                       className="cyber-btn px-4 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
                     >
                       <Zap className="w-3 h-3" />
-                      {gloveRight.isConnected
-                        ? `右手 ✓ ${gloveRight.gloveFps}Hz (断开)`
-                        : gloveRight.isConnecting
-                          ? "连接中..."
-                          : "连接右手"}
-                    </button>
-                  </div>
+                      去第 1 步连接手套
+                    </Link>
+                  )}
                 </div>
               </div>
             </div>
@@ -804,62 +795,45 @@ export default function DataCollect() {
                   </div>
                 )}
 
-                {/* 双手连接/断开 */}
+                {/* 手套连接入口只有第 1 步（/mocap）一处：一个 COM 口同一时刻只能被
+                    一个持有者打开，各页各连会把第 1 步做好的标定作废 */}
                 <div className="pt-2 border-t border-[#00f0ff]/10 space-y-2">
-                  <div className="flex gap-2">
-                    <button
-                      onClick={
-                        gloveLeft.isConnected
-                          ? gloveLeft.disconnect
-                          : gloveLeft.connect
-                      }
-                      disabled={gloveLeft.isConnecting || !gloveSupported}
-                      className="flex-1 text-[9px] font-mono py-1 border rounded-sm transition-colors"
+                  <div className="flex items-center justify-between text-[9px] font-mono">
+                    <span
                       style={{
                         color: gloveLeft.isConnected ? "#00e5a0" : "#556677",
-                        borderColor: gloveLeft.isConnected
-                          ? "#00e5a040"
-                          : "#55667733",
                       }}
                     >
+                      左手{" "}
                       {gloveLeft.isConnected
-                        ? `左手✓${gloveLeft.gloveFps}Hz`
-                        : "连接左手"}
-                    </button>
-                    <button
-                      onClick={
-                        gloveRight.isConnected
-                          ? gloveRight.disconnect
-                          : gloveRight.connect
-                      }
-                      disabled={gloveRight.isConnecting || !gloveSupported}
-                      className="flex-1 text-[9px] font-mono py-1 border rounded-sm transition-colors"
+                        ? `✓ ${gloveLeft.gloveFps}Hz`
+                        : "未连接"}
+                    </span>
+                    <span
                       style={{
                         color: gloveRight.isConnected ? "#00e5a0" : "#556677",
-                        borderColor: gloveRight.isConnected
-                          ? "#00e5a040"
-                          : "#55667733",
                       }}
                     >
+                      右手{" "}
                       {gloveRight.isConnected
-                        ? `右手✓${gloveRight.gloveFps}Hz`
-                        : "连接右手"}
-                    </button>
+                        ? `✓ ${gloveRight.gloveFps}Hz`
+                        : "未连接"}
+                    </span>
                   </div>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={stopTracking}
-                      className="flex-1 text-[9px] text-[#556677] hover:text-[#ff2d7b] transition-colors font-mono py-1 border border-[#556677]/20 rounded-sm"
+                  {!gloveConnected && (
+                    <Link
+                      href="/mocap"
+                      className="block text-center text-[9px] font-mono py-1 border border-[#f59e0b]/40 text-[#f59e0b] rounded-sm hover:bg-[#f59e0b]/10 transition-colors"
                     >
-                      关闭摄像头
-                    </button>
-                    <button
-                      onClick={disconnectAll}
-                      className="flex-1 text-[9px] text-[#556677] hover:text-[#ff2d7b] transition-colors font-mono py-1 border border-[#556677]/20 rounded-sm"
-                    >
-                      断开手套
-                    </button>
-                  </div>
+                      去第 1 步连接手套
+                    </Link>
+                  )}
+                  <button
+                    onClick={stopTracking}
+                    className="w-full text-[9px] text-[#556677] hover:text-[#ff2d7b] transition-colors font-mono py-1 border border-[#556677]/20 rounded-sm"
+                  >
+                    关闭摄像头
+                  </button>
                 </div>
               </div>
             </div>
@@ -961,7 +935,7 @@ export default function DataCollect() {
               href="/train"
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
             >
-              前往训练 →
+              前往静态训练 →
             </Link>
             <Link
               href="/translate"
