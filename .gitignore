@@ -123,3 +123,16 @@ __pycache__/
 
 # 手工备份文件，不入库
 *.bak-*
+
+# 训练数据集导出（从浏览器 IndexedDB 导出的 dataset.bin/json，44MB+）与 keras 模型产物。
+# 都是构建输入/输出，不是源码。
+#
+# ⚠ dataset.bin 是 IndexedDB 的**唯一备份**，忽略它意味着这份备份只存在于本机磁盘上。
+# 要异地留一份的话手工拷走，不要靠 git —— 几十 MB 的二进制进版本库以后每次
+# clone 都要拖，而且它会随采集不断变大。
+python_train/data/
+python_train/out/
+
+# 例外：句子模型的**权重**要随代码部署（浏览器运行时从 /models/ 读），必须入库。
+# 只有 623KB，是 export_weights.py 从 out/ 里抽出来的推理所需部分
+!client/public/models/

@@ -13,7 +13,8 @@ softmax + tf.nn.ctc_loss,backbone 完全复用,训完用 export_to_tfjs.py 转�
 用法:
     python train_seq.py --data data --epochs 80                  # 孤立词
     python train_seq.py --backbone tcn_bigru --distill           # 视觉教师蒸馏
-    python train_seq.py --ctc                                    # 句子级(需要多 segment 数据)
+    python train_seq.py --ctc                                    # 句子级(真实句子 + 合成句子)
+    python train_seq.py --ctc --no-synth                          # 只用真实句子录制
 
 环境:本机全局 Python 是共享科研环境,务必先建独立 venv:
     python -m venv .venv && .venv\\Scripts\\activate && pip install -r requirements.txt
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +31,8 @@ import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
+from ctc_decode import greedy_decode, word_error_rate
+from label_merge import merge_label_list, merged_class_table
 from load_dataset import (
     FUSED_FRAME_DIM,
     IDLE_LABEL,
@@ -256,22 +260,32 @@ def split_by_sequence(
     return [seqs[i] for i in train_idx], [seqs[i] for i in val_idx]
 
 
-# ===== 句子级 CTC(骨架) =====
+# ===== 句子级 CTC =====
+
+# 句子模型的时间长度。**不能沿用孤立词的 32。**
+# tcn_backbone 池化两次(见上面),输出长度是 T/4:T=32 只剩 8 个输出帧,而 CTC 要求
+# 输出帧数 ≥ 标签数(相邻重复类还要 ≥2L−1),8 帧连 4 个词都编不稳。一句 6 词约 9s,
+# 取 128 → 32 个输出帧 ≈ 5 帧/词。
+# 想要更高分辨率的正确做法是加长 T,**不是**去掉池化 —— 池化结构必须和
+# sequenceModel.ts 一一对应(tfjs 反向不支持空洞卷积,这个结构就是为此妥协出来的)。
+SENT_SEQ_LEN = 128
 
 
-def ctc_loss_fn(y_true_sparse, y_pred, input_lengths, label_lengths):
+def ctc_loss_fn(labels_dense, y_pred, input_lengths, label_lengths):
     """
-    tf.nn.ctc_loss 的薄封装。y_pred 是逐帧 softmax (B, T', C+1),blank 在末位。
+    tf.nn.ctc_loss 的薄封装。y_pred 是逐帧 **softmax** (B, T', C+1),blank 在末位。
 
-    未完成:句子级训练需要的是多 segment 数据(一条序列里有多个词),当前采集页
-    只产出单 segment 的孤立词。等真的开始录连续手语句子后,这里要补:
-      1. 变长 batch 的 padding 与 input_lengths 计算
-      2. 解码(greedy / beam)与 WER 评估
-      3. 与孤立词模型的联合初始化(用孤立词权重初始化 backbone 收敛快得多)
-    数据 schema(segments 词边界列表)已经准备好了,不需要重新采集。
+    为什么传 log(softmax) 而不是原始 logits:head 那层已经带了 softmax 激活
+    (frame_wise_head),拿不到 logits。而 tf.nn.ctc_loss 内部会再做一次 log_softmax ——
+    对 log(p) 再 log_softmax 是**恒等**的:log_softmax(log p)ᵢ = log pᵢ − logsumexp(log p)
+    = log pᵢ − log(Σp) = log pᵢ,因为 softmax 输出恰好 Σp = 1。所以这么写在数值上
+    就是正确的 CTC,别把它"修"成别的形式。
+
+    blank_index=-1 = 末位,与 frame_wise_head 的 num_classes+1 布局一致。
+    **浏览器端 ctcDecode 也必须把 blank 当末位** —— 这个约定错一处,整句全错。
     """
     return tf.nn.ctc_loss(
-        labels=y_true_sparse,
+        labels=labels_dense,
         logits=tf.math.log(tf.maximum(y_pred, 1e-12)),
         label_length=label_lengths,
         logit_length=input_lengths,
@@ -280,10 +294,256 @@ def ctc_loss_fn(y_true_sparse, y_pred, input_lengths, label_lengths):
     )
 
 
+def build_ctc_xy(
+    seqs: list[Sequence],
+    classes: list[str],
+    seq_len: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    句子序列 → X (N,T,294) + 补齐的标签 (N,Lmax) int32 + 真实标签长度 (N,)。
+
+    标签用 merge_label 重映射(我/你/他 → merged_pron_sg 等,理由见 label_merge.py)。
+    padding 位填 0 —— tf.nn.ctc_loss 只看 label_length,超出的位置根本不读,所以
+    填什么都行;填 0 而不是 -1 是因为 dense labels 要求非负。
+
+    **句子样本不做起手段裁剪。** 词间停顿正是 CTC 用 blank 去建模的东西,裁掉就
+    等于把要学的东西删了。build_features 本身不裁剪(裁剪在浏览器侧的 sequenceTrim),
+    这里只是把这件事写下来,免得以后有人"顺手"加上。
+    """
+    cls_to_idx = {c: i for i, c in enumerate(classes)}
+    targets: list[list[int]] = []
+    rows: list[np.ndarray] = []
+    unknown: set[str] = set()
+    for s in seqs:
+        mapped = merge_label_list(s.label_sequence)
+        # _idle 段(如果有人在句子里标了停顿)是有意丢掉的:它不是词,不进 CTC 目标。
+        # 其他丢掉的都是**异常**,必须报出来 —— 静默少一个词会让参考序列和实际手势
+        # 对不上,模型学到的对齐从此是错的,而 WER 看着只是"稍微高一点"
+        unknown |= {c for c in mapped if c not in cls_to_idx and c != IDLE_LABEL}
+        ids = [cls_to_idx[c] for c in mapped if c in cls_to_idx]
+        if not ids:
+            continue
+        targets.append(ids)
+        rows.append(build_features(s, seq_len, include_vision=False))
+
+    if unknown:
+        print(f"⚠️  句子里出现了类别表外的标签,已从目标序列中丢弃:{sorted(unknown)}。"
+              f"参考序列因此与实际手势对不上,WER 不可信。")
+    if not rows:
+        raise SystemExit("句子样本的标签一个都不在类别表里 —— 检查 label_merge 与词表")
+    lmax = max(len(t) for t in targets)
+    # CTC 的硬性前提:输出帧数 ≥ 标签长度(相邻同类还要 ≥2L−1)。不满足时
+    # tf.nn.ctc_loss 返回 inf 而**不报错**,表现为"loss 一直是 inf,像是没学"
+    need = max(2 * len(t) - 1 for t in targets)
+    if seq_len // 4 < need:
+        raise SystemExit(
+            f"输出帧数 {seq_len // 4} 不够编码最长的标签序列(需要 {need})。"
+            f"把 --sent-seq-len 提到 {need * 4} 以上,不要去动骨干的池化。"
+        )
+    y = np.zeros((len(targets), lmax), np.int32)
+    ylen = np.zeros(len(targets), np.int32)
+    for i, t in enumerate(targets):
+        y[i, : len(t)] = t
+        ylen[i] = len(t)
+    return np.stack(rows), y, ylen
+
+
+def transfer_backbone(dst: keras.Model, src_path: Path) -> int:
+    """
+    用孤立词学生的权重初始化句子模型的骨干(按层名 + 形状匹配)。
+
+    **这一步决定收不收敛,不是可选优化。** CTC 的梯度信号比分类稀疏得多(它要
+    同时学"是什么词"和"在哪一段"),从随机初始化起跑,几百条合成句子基本训不动。
+    骨干层(conv/bn)与孤立词模型同名同形,直接搬;只有 `*_out` 那层维度不同
+    (C vs C+1),跳过。
+
+    卷积和 BN 都与输入长度无关,所以 T=32 训出来的权重能直接用在 T=128 上。
+    """
+    if not src_path.exists():
+        print(f"⚠️  找不到 {src_path},骨干从随机初始化起跑 —— 合成句子这么少大概率训不动。"
+              f"先跑一次孤立词训练(不带 --ctc)。")
+        return 0
+    src = keras.models.load_model(src_path, compile=False)
+    by_name = {l.name: l for l in src.layers}
+    moved = 0
+    for layer in dst.layers:
+        s = by_name.get(layer.name)
+        if s is None or not layer.weights:
+            continue
+        if [tuple(w.shape) for w in s.weights] != [tuple(w.shape) for w in layer.weights]:
+            continue
+        layer.set_weights(s.get_weights())
+        moved += 1
+    print(f"  骨干迁移: {moved} 层来自 {src_path.name}")
+    return moved
+
+
+def train_ctc(
+    sentence_seqs: list[Sequence],
+    word_seqs: list[Sequence],
+    labels: list[str],
+    args,
+    rng,
+) -> None:
+    """
+    句子级 CTC 训练。
+
+    数据来源两条,可叠加:
+      - 真实句子录制(多 segment 样本)。有协同发音,是最终能不能用的决定因素。
+      - 合成句子(孤立词首尾相接,见 synth_sentences.py)。只验证管道。
+    没有真实句子时也能跑,但报出来的 WER 只说明"管道通了"。
+    """
+    from synth_sentences import synthesize_sentences
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seq_len = args.sent_seq_len
+
+    # 类别表**不依赖**当前有哪些句型:从数据集全部标签推,合并后去掉 _idle 再排序。
+    # 依赖句型的话,今天多录一句就会让整张表移位,而表的下标就是 softmax 下标 ——
+    # 旧模型配新表 = 每个词都翻译成另一个词。_idle 不是词,不进 CTC 目标
+    classes = [c for c in merged_class_table(labels) if c != IDLE_LABEL]
+    blank = len(classes)
+    print(f"=== 句子级 CTC:{len(classes)} 类 + blank(下标 {blank}),T={seq_len} → "
+          f"{seq_len // 4} 输出帧 ===")
+
+    real_tr, real_va = split_by_sequence(sentence_seqs, args.val_split, rng) if sentence_seqs else ([], [])
+    if sentence_seqs:
+        print(f"真实句子 {len(sentence_seqs)} 条 → 训练 {len(real_tr)} / 验证 {len(real_va)}")
+
+    syn_tr: list[Sequence] = []
+    syn_va: list[Sequence] = []
+    if args.synth and word_seqs:
+        # **先划分录制池,再分别合成。** 反过来(先合成再划分句子)会让同一条孤立词
+        # 录制既进训练句又进验证句 —— 那是泄漏,验证 WER 虚低到没有参考价值
+        w_tr, w_va = split_by_sequence(word_seqs, args.val_split, rng)
+        print(f"合成训练句(录制池 {len(w_tr)} 条):")
+        syn_tr, used = synthesize_sentences(w_tr, args.synth_per_template, rng)
+        print(f"合成验证句(录制池 {len(w_va)} 条,与训练池不重叠):")
+        syn_va, _ = synthesize_sentences(
+            w_va, max(1, args.synth_per_template // 4), rng, templates=used
+        )
+
+    train_seqs = real_tr + syn_tr
+    val_seqs = real_va + syn_va
+    if len(train_seqs) < 10:
+        raise SystemExit(
+            "句子样本太少(合成也没凑够)。要么去 /collect-seq 录连续手语句子,"
+            "要么确认孤立词数据够 synth_sentences.py 的句型表用。"
+        )
+    print(f"合计: 训练 {len(train_seqs)} 条 / 验证 {len(val_seqs)} 条")
+
+    xt, yt, ylt = build_ctc_xy(train_seqs, classes, seq_len)
+    print(f"特征 {xt.shape},标签最长 {yt.shape[1]} 词")
+    xv = yv = ylv = None
+    if val_seqs:
+        xv, yv, ylv = build_ctc_xy(val_seqs, classes, seq_len)
+    else:
+        print("⚠️  验证集为空,下面的 WER 不可信")
+
+    model = build_student(len(classes), seq_len, args.backbone, ctc=True)
+    transfer_backbone(model, out_dir / "student.keras")
+    opt = keras.optimizers.Adam(args.lr * 0.5)
+
+    # 全 batch 同一个 input_length:X 是定长 seq_len 重采样出来的(短句被拉长、长句被
+    # 压缩),所以每条的有效输出帧数都是 seq_len//4。这是重采样带来的便利,不是近似 ——
+    # 真要做变长输入才需要逐条算
+    frames = seq_len // 4
+
+    @tf.function
+    def train_step(bx, by, byl):
+        with tf.GradientTape() as tape:
+            p = model(bx, training=True)
+            il = tf.fill([tf.shape(bx)[0]], frames)
+            loss = tf.reduce_mean(ctc_loss_fn(by, p, il, byl))
+        grads = tape.gradient(loss, model.trainable_variables)
+        opt.apply_gradients(zip(grads, model.trainable_variables))
+        return loss
+
+    def eval_wer(x, y, yl) -> tuple[float, list[tuple[list[int], list[int]]]]:
+        probs = model.predict(x, batch_size=args.batch, verbose=0)
+        hyps = [greedy_decode(probs[i], blank) for i in range(len(x))]
+        refs = [list(y[i, : yl[i]]) for i in range(len(x))]
+        return word_error_rate(refs, hyps), list(zip(refs, hyps))
+
+    n = len(xt)
+    best_wer = 1e9
+    for epoch in range(1, args.epochs + 1):
+        order = rng.permutation(n)
+        tot = 0.0
+        for b in range(0, n, args.batch):
+            idx = order[b : b + args.batch]
+            tot += float(train_step(xt[idx], yt[idx], ylt[idx])) * len(idx)
+        msg = f"epoch {epoch:>3}/{args.epochs}  loss {tot/n:.4f}"
+        if xv is not None:
+            wer, _ = eval_wer(xv, yv, ylv)
+            msg += f"  val WER {wer*100:.1f}%"
+            if wer < best_wer:
+                best_wer = wer
+                model.save(out_dir / "sentence_student.keras")
+                msg += "  ← 已保存"
+        print(msg)
+
+    if xv is None:
+        model.save(out_dir / "sentence_student.keras")
+        best_wer = None  # 不能写 nan:json.dumps 会输出裸 NaN,浏览器 JSON.parse 直接抛
+
+    # 抽几条看解码长什么样。WER 是个汇总数字,看不出"是漏词还是插词" ——
+    # 漏词多半是输出帧不够(加长 T),插词多半是词间停顿被学成了词
+    if xv is not None:
+        # **必须先把最佳权重读回来。** 训练结束时内存里是最后一个 epoch 的权重,
+        # 而盘上是 WER 最低的那个 checkpoint。不重载的话打印的抽样来自最后一个
+        # epoch,而 meta 里的 valWer 是最佳 epoch 的 —— 两个不同的模型并排报出来,
+        # 看着像"WER 5% 但解码错得离谱"
+        model = keras.models.load_model(out_dir / "sentence_student.keras", compile=False)
+        _, pairs = eval_wer(xv, yv, ylv)
+        # 错的排前面。全对的抽样看不出任何东西,而错例直接告诉你是漏词还是插词
+        pairs.sort(key=lambda p: p[0] == p[1])
+        n_bad = sum(1 for r, h in pairs if r != h)
+        print(f"\n验证集抽样(参考 → 解码),{n_bad}/{len(pairs)} 条整句不完全一致,错的排在前面:")
+        for ref, hyp in pairs[: min(6, len(pairs))]:
+            r = " ".join(classes[i] for i in ref)
+            h = " ".join(classes[i] for i in hyp) or "(空)"
+            print(f"  {r}\n  → {h}")
+
+    meta = {
+        "labels": classes,
+        "seqLen": seq_len,
+        "backbone": args.backbone,
+        "frameDim": TACTILE_FRAME_DIM,
+        "modelType": "seq_sentence",
+        "ctc": True,
+        # 浏览器端解码必须读这个,不要在 JS 里另算一遍 len(labels)
+        "blankIndex": blank,
+        "outputFrames": frames,
+        # 没有验证集时是 null,不是 0 —— 0 会被读成"完美",而真相是"没量过"
+        "valWer": None if best_wer is None else float(best_wer),
+        "numTrain": len(train_seqs),
+        "numVal": len(val_seqs),
+        "numReal": len(sentence_seqs),
+        "numSynth": len(syn_tr) + len(syn_va),
+        # 合成占比高的时候这个 WER 不能当真实表现看,写进 meta 免得以后拿它当结论
+        "synthOnly": len(sentence_seqs) == 0,
+    }
+    (out_dir / "sentence_student_meta.json").write_text(
+        json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    print(f"\n已保存 {out_dir}/sentence_student.keras + _meta.json")
+    if meta["synthOnly"]:
+        print("⚠️  全部是合成句子:这个 WER 只说明管道是通的,**不能**预测真实连续手语"
+              "的表现(合成数据里没有协同发音)。要真用得先录真实句子。")
+
+
 # ===== 主流程 =====
 
 
 def main():
+    # Windows 控制台默认 GBK,编不出 ⚠️(U+26A0),print 会直接抛 UnicodeEncodeError ——
+    # 训练跑到一半崩在一句警告上。errors="replace" 保证最坏情况只是显示成问号
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
     ap = argparse.ArgumentParser(description="时序手语模型训练(tf.keras)")
     ap.add_argument("--data", default="data", help="dataset.bin/json 所在目录")
     ap.add_argument("--out", default="out", help="模型输出目录")
@@ -300,26 +560,41 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5, help="soft/hard 标签混合比")
     ap.add_argument("--recorded-only", action="store_true", help="排除合成迁移的样本")
     ap.add_argument("--seed", type=int, default=42)
-    ap.add_argument("--ctc", action="store_true", help="句子级 CTC(骨架,见 ctc_loss_fn)")
+    ap.add_argument("--ctc", action="store_true", help="句子级连续手语(CTC)")
+    ap.add_argument("--sent-seq-len", type=int, default=SENT_SEQ_LEN,
+                    help=f"句子模型的时间长度,默认 {SENT_SEQ_LEN}(→ T/4 个输出帧)")
+    ap.add_argument("--no-synth", dest="synth", action="store_false", default=True,
+                    help="只用真实句子录制训练,不合成(默认会合成)")
+    ap.add_argument("--synth-per-template", type=int, default=24,
+                    help="每个句型合成多少条")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
     tf.random.set_seed(args.seed)
 
-    seqs, labels = load_dataset(args.data, recorded_only=args.recorded_only)
-    print(f"载入 {len(seqs)} 条序列,{len(labels)} 类")
-    if len(seqs) < 10:
-        raise SystemExit("样本太少,先去 /collect-seq 采集")
+    all_seqs, labels = load_dataset(args.data, recorded_only=args.recorded_only)
+    # 两条链路各要一半:孤立词训练只能吃单 segment,CTC 只能吃多 segment。
+    # 判据是 Sequence.is_sentence,与 TS 侧 isSentenceSample 同一条
+    word_seqs = [s for s in all_seqs if not s.is_sentence]
+    sentence_seqs = [s for s in all_seqs if s.is_sentence]
+    print(
+        f"载入 {len(all_seqs)} 条序列,{len(labels)} 类"
+        f"(孤立词 {len(word_seqs)} / 句子 {len(sentence_seqs)})"
+    )
     if IDLE_LABEL not in labels:
         print(f"⚠️  没有 {IDLE_LABEL} 类。滑窗推理必须有空闲伪类,否则线上会持续乱吐词。")
 
     if args.ctc:
-        multi = sum(1 for s in seqs if len(s.segments) > 1)
-        raise SystemExit(
-            f"--ctc 尚未实现完整训练流程(见 ctc_loss_fn 的说明)。"
-            f"当前数据集里多 segment 的序列有 {multi} 条,"
-            f"{'可以开始接' if multi else '还全是孤立词,先录连续手语句子'}。"
-        )
+        train_ctc(sentence_seqs, word_seqs, labels, args, rng)
+        return
+
+    # 以下是孤立词分支。句子样本在这里一条都不能进 —— 它的 primary_label 是第一个词,
+    # 混进去等于往那一类里掺另外几个词的特征
+    seqs = word_seqs
+    if sentence_seqs:
+        print(f"排除 {len(sentence_seqs)} 条句子样本(孤立词训练不吃多 segment)")
+    if len(seqs) < 10:
+        raise SystemExit("孤立词样本太少,先去 /collect-seq 采集")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)

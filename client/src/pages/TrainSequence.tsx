@@ -12,7 +12,18 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "wouter";
-import { ArrowLeft, Brain, Download, Play, Trash2, Upload, Wand2 } from "lucide-react";
+import {
+  ArrowLeft,
+  Brain,
+  ClipboardCopy,
+  Download,
+  Play,
+  Stethoscope,
+  Trash2,
+  Upload,
+  Wand2,
+  X,
+} from "lucide-react";
 import {
   getAllSamples,
   getAllSequences,
@@ -28,6 +39,13 @@ import {
   type SequenceSample,
 } from "@/lib/datasetStore";
 import { analyzeSequenceImu, isImuSuspect } from "@/lib/imuHealth";
+import { loadBendRange } from "@/lib/bendRange";
+import {
+  summarizeHandedness,
+  describeHandedness,
+  type BendRanges,
+  type HandednessStats,
+} from "@/lib/dominantHand";
 import StepNav from "@/components/StepNav";
 import TfBackendBadge from "@/components/TfBackendBadge";
 import type { TrimStats } from "@/lib/sequenceTrim";
@@ -46,6 +64,9 @@ import {
   DEFAULT_SYNTHESIZE,
   DEFAULT_AUGMENT,
 } from "@/lib/sequenceFeatures";
+import { auditDataset, formatAuditReport } from "@/lib/datasetAudit";
+import { probeYawReference, formatYawProbe } from "@/lib/yawDrift";
+import { classesRemovedBy } from "@/lib/labelMerge";
 import { getDisplayLabel, IDLE_LABEL } from "@/lib/signLanguageVocab";
 
 /**
@@ -115,6 +136,61 @@ function describeTrim(t: TrimStats): string {
   );
 }
 
+/**
+ * 两只手的弯折两点标定。主手判定要按各自量程归一化（实测左右量程差 40~176），
+ * 而标定只存在 `localStorage` 里 —— 库里读不到，只能页面读了往下传。
+ * 没标定不会让判定失效，两只手一起走兜底量程，会在归一化汇总里报出来。
+ */
+function currentBendRanges(): BendRanges {
+  return { LH: loadBendRange("LH"), RH: loadBendRange("RH") };
+}
+
+/**
+ * 训练时排除哪些词。**过滤，不删数据** —— 库里一条不动，取消排除就原样训回来。
+ *
+ * 存进 localStorage 而不是每次重置：排除是用来做对照实验的（"去掉这几个词，
+ * 剩下的会不会准"），一轮实验要跑训练 → 去 /translate 试 → 回来看，中间刷新页面
+ * 很正常。重置会让人在不知情的情况下训出一个全类别模型、却以为是排除过的，
+ * 那就把整个实验读反了。
+ *
+ * 代价是它会一直生效，所以要有两道明显的出口：非空时界面上有红色横幅 +
+ * 一键取消，且模型名带 `_ex{n}` 后缀（保存列表里那一行的"N 类"也会跟着变）。
+ */
+const EXCLUDED_KEY = "seq_train_excluded";
+
+function loadExcluded(): Set<string> {
+  try {
+    const raw = localStorage.getItem(EXCLUDED_KEY);
+    const arr = raw ? JSON.parse(raw) : [];
+    return new Set(
+      Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []
+    );
+  } catch {
+    return new Set();
+  }
+}
+
+function saveExcluded(s: Set<string>): void {
+  try {
+    localStorage.setItem(EXCLUDED_KEY, JSON.stringify(Array.from(s)));
+  } catch {
+    // 隐私模式/配额满时写不进去。实验照样能跑完，只是刷新后要重新勾
+  }
+}
+
+/**
+ * 会话开头总是先蹦出来的那三个词。
+ *
+ * 它们不是随机的：滑窗要攒满一整个窗口（2000ms）才出第一个预测，所以会话里
+ * 第一个窗口装的是「准备时的静止 + 第一个词刚起手的一小截」—— 这个形状恰好
+ * 等于一条静止头段很长的训练样本。这三个词就是头段最长的那几个，模型输出
+ * 它们其实是照它学到的东西正确作答。
+ *
+ * 做成一键预设而不是让人点三行，是因为漏点一行的后果不对称：训出来的是个
+ * 全类别模型，却会被当成排除过的那版去读 —— 那是把实验结论读反，比没做更糟。
+ */
+const PHANTOM_TRIO = ["hello", "name", "happy"];
+
 export default function TrainSequence() {
   const [stats, setStats] = useState<SequenceStats | null>(null);
   const [models, setModels] = useState<SavedModel[]>([]);
@@ -126,7 +202,10 @@ export default function TrainSequence() {
   const [visionRatio, setVisionRatio] = useState(0);
   const [imuSuspect, setImuSuspect] = useState(0);
   const [recordedTotal, setRecordedTotal] = useState(0);
+  const [handedness, setHandedness] = useState<HandednessStats | null>(null);
+  const [auditText, setAuditText] = useState("");
   const [modelLoaded, setModelLoaded] = useState(isSequenceModelLoaded());
+  const [excluded, setExcluded] = useState<Set<string>>(loadExcluded);
 
   // 训练参数
   const [seqLen, setSeqLen] = useState(DEFAULT_SEQ_CONFIG.seqLen);
@@ -156,11 +235,47 @@ export default function TrainSequence() {
     setVisionRatio(sequenceVisionRatio(seqs));
     setImuSuspect(countImuSuspect(seqs));
     setRecordedTotal(seqs.filter((s) => s.origin === "recorded").length);
+    setHandedness(summarizeHandedness(seqs, currentBendRanges()));
   }, []);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const toggleExcluded = useCallback((label: string) => {
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      if (next.has(label)) next.delete(label);
+      else next.add(label);
+      saveExcluded(next);
+      return next;
+    });
+  }, []);
+
+  const clearExcluded = useCallback(() => {
+    setExcluded(new Set());
+    saveExcluded(new Set());
+  }, []);
+
+  /**
+   * 一键排除/恢复幽灵三词。
+   *
+   * `words` 只传库里真有的那几个 —— 传了不存在的标签，过滤时一条也匹配不到，
+   * 但 `excluded.size` 会虚高、模型名上的 `_ex{n}` 跟着虚高，下次看保存列表
+   * 就对不上号了
+   */
+  const toggleTrio = useCallback((words: string[]) => {
+    setExcluded((prev) => {
+      const next = new Set(prev);
+      const allOff = words.every((w) => next.has(w));
+      for (const w of words) {
+        if (allOff) next.delete(w);
+        else next.add(w);
+      }
+      saveExcluded(next);
+      return next;
+    });
+  }, []);
 
   // ===== 从静态样本合成序列 =====
 
@@ -205,9 +320,29 @@ export default function TrainSequence() {
     setProgress(null);
     setMessage("正在加载序列数据集...");
     try {
-      const seqs = await getAllSequences();
+      const all = await getAllSequences();
+      // 排除是**过滤不是删除**：库里一条不动。类别表是从传进去的样本里现推的
+      // （sequenceModel.ts 的 `labels`），所以过滤完类别数、softmax 宽度、
+      // 验证集划分会自动跟着缩，这里不需要再动模型侧任何东西
+      const seqs = excluded.size
+        ? all.filter((s) => !excluded.has(s.primaryLabel))
+        : all;
+      const droppedRows = all.length - seqs.length;
+      const remainingLabels = new Set(seqs.map((s) => s.primaryLabel)).size;
+
       if (seqs.length < 10) {
-        setMessage(`序列样本只有 ${seqs.length} 条，太少了，先去 /collect-seq 采集`);
+        setMessage(
+          `可用序列只有 ${seqs.length} 条，太少了` +
+            (droppedRows > 0
+              ? `（已被排除 ${droppedRows} 条 —— 去左栏 PER LABEL 点一下取消）`
+              : "，先去 /collect-seq 采集")
+        );
+        return;
+      }
+      if (remainingLabels < 2) {
+        setMessage(
+          `排除之后只剩 ${remainingLabels} 个词，至少要 2 个才能训。去左栏 PER LABEL 取消几个排除。`
+        );
         return;
       }
 
@@ -223,6 +358,7 @@ export default function TrainSequence() {
           backbone,
           augmentCopies,
           augment: { ...DEFAULT_AUGMENT, timeWarp },
+          bendRanges: currentBendRanges(),
         },
         (p) => {
           setProgress(p);
@@ -232,6 +368,9 @@ export default function TrainSequence() {
 
       setMessage("训练完成，正在保存模型...");
       const ts = new Date().toISOString().slice(0, 16).replace("T", " ");
+      // 名字里带上排除数：保存列表里两个模型只差几个类别时，光看时间戳分不出
+      // 哪个是对照实验那一版，而选错了会把结论读反
+      const tag = excluded.size ? `_ex${excluded.size}` : "";
 
       if (result.teacherModel) {
         await saveModel(
@@ -239,7 +378,7 @@ export default function TrainSequence() {
             result.teacherModel,
             result.labels,
             result.teacherAccuracy,
-            `seq_teacher_${ts}`,
+            `seq_teacher_${ts}${tag}`,
             "seq_fused",
             seqLen,
             backbone
@@ -250,7 +389,7 @@ export default function TrainSequence() {
         result.studentModel,
         result.labels,
         result.studentAccuracy,
-        `seq_student_${ts}`,
+        `seq_student_${ts}${tag}`,
         "seq_tactile",
         seqLen,
         backbone
@@ -268,7 +407,33 @@ export default function TrainSequence() {
           (result.teacherModel
             ? ""
             : " — 视觉覆盖不足 80%，本次跳过了教师与蒸馏") +
-          describeTrim(result.trim)
+          describeTrim(result.trim) +
+          (result.handedness
+            ? ` — 主手归一化：${describeHandedness(result.handedness)}`
+            : "") +
+          // 合并同样会减类别数，所以和排除一样必须紧贴着准确率出现。
+          // 这里说的是**为什么**合并，不是"合并了"—— 光说合并了，下次看到的人
+          // 只会想着把它关掉
+          (result.merge.merged > 0
+            ? ` — 已合并 ${result.merge.groups
+                .map((g) => g.display)
+                .join("、")}（共 ${result.merge.merged} 条）：这几个词只差指向，` +
+              `六轴 IMU 测不到绝对 yaw，实测漂移已盖过类间距，分不开是硬件限制而非训练不足。`
+            : "") +
+          // 句子样本被挡掉了这件事必须说 —— 采集页里它们是实实在在录进去的条数，
+          // 这里不说的话会被当成"数据丢了"
+          (result.sentencesExcluded > 0
+            ? ` — 另有 ${result.sentencesExcluded} 条句子级样本未参与（多个词连着打的连续手语，` +
+              `孤立词模型吃不了；句子模型走 python_train/train_seq.py --ctc）。`
+            : "") +
+          // 类别数变了，准确率就不可比 —— 24 类天生比 27 类容易。这句话必须紧贴着
+          // 那个百分数出现，否则很容易把"数字变高了"读成"排除起作用了"
+          (excluded.size
+            ? ` — ⚠ 本次排除了 ${excluded.size} 个词（${Array.from(excluded)
+                .map(getDisplayLabel)
+                .join("、")}）共 ${droppedRows} 条，模型只有 ${remainingLabels} 类。` +
+              `类别越少准确率天生越高，这个百分数不能和全类别那次直接比 —— 要比就去 /translate 看实际输出。`
+            : "")
       );
       await refresh();
     } catch (e) {
@@ -287,6 +452,7 @@ export default function TrainSequence() {
     backbone,
     augmentCopies,
     timeWarp,
+    excluded,
     refresh,
   ]);
 
@@ -312,6 +478,51 @@ export default function TrainSequence() {
     }
   }, []);
 
+  /**
+   * 数据体检。**只读** —— 不删、不改、不写库，跑完随时可以关掉。
+   *
+   * 之所以是一份文本报告而不是几个界面数字：左栏那些统计是全局聚合的，
+   * 而这批数据是分两次采的、两次的采集方式不一样，全局平均会把差异整个抹平。
+   * 要定"删哪些、阈值多少"必须先看到**按批次**和**按词**的分布。
+   */
+  const handleAudit = useCallback(async () => {
+    setIsBusy(true);
+    setMessage("正在体检...");
+    try {
+      const seqs = await getAllSequences();
+      if (seqs.length === 0) {
+        setMessage("没有序列样本");
+        return;
+      }
+      const report = auditDataset(seqs, currentBendRanges());
+      // YAW 参考系探针拼在同一份报告里：它也是全库只读扫描，单独给一个按钮
+      // 只会多一次点击、多一次复制，而这两份结论本来就要放在一起看
+      const yaw = probeYawReference(seqs, currentBendRanges());
+      setAuditText(
+        formatAuditReport(report) + "\n\n" + formatYawProbe(yaw)
+      );
+      setMessage(
+        `体检完成：${report.total} 条、${report.byDay.length} 个采集批次、${report.flags.length} 项待处理。` +
+          `YAW 参考系：${yaw.verdict === "viable" ? "可行" : yaw.verdict === "marginal" ? "勉强" : yaw.verdict === "dead" ? "不可行" : "数据不足"}。` +
+          `报告在右侧，复制给我。`
+      );
+    } catch (e) {
+      setMessage(`体检失败：${e}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }, []);
+
+  const handleCopyAudit = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(auditText);
+      setMessage("报告已复制到剪贴板");
+    } catch {
+      // 剪贴板 API 在非 https / 无权限时会拒绝；报告本身就在 <pre> 里，手选也能复制
+      setMessage("复制失败，手动选中右侧文本复制即可");
+    }
+  }, [auditText]);
+
   const handleLoadModel = useCallback(
     async (m: SavedModel) => {
       await loadSequenceModelFromSaved(m);
@@ -336,6 +547,38 @@ export default function TrainSequence() {
       )
     : [];
   const hasIdle = (stats?.labelCounts[IDLE_LABEL]?.recorded ?? 0) > 0;
+
+  /**
+   * 「这次点下去到底会训什么」—— 训练**之前**就摊开。
+   *
+   * 之前只有训完才能从模型名的 `_ex{n}` 后缀反推排除有没有生效，而那时候
+   * 结果已经出来了，人自然会拿它当排除过的那版去读
+   */
+  // 合并会减类别数，所以这里要按合并**之后**的口径报，否则训练前说 24 类、
+  // 训完变 20 类，那个读数就没用了
+  const mergedAway = classesRemovedBy(
+    labelRows.filter(([l]) => !excluded.has(l)).map(([l]) => l)
+  );
+  const plan = labelRows.reduce(
+    (a, [label, c]) => {
+      const n = c.recorded + c.synthesized;
+      if (excluded.has(label)) {
+        a.droppedLabels++;
+        a.droppedRows += n;
+      } else {
+        a.labels++;
+        a.rows += n;
+      }
+      return a;
+    },
+    { labels: 0, rows: 0, droppedLabels: 0, droppedRows: 0 }
+  );
+  plan.labels -= mergedAway;
+
+  // 只对库里真有的那几个词提供一键排除
+  const trioPresent = PHANTOM_TRIO.filter((w) => w in (stats?.labelCounts ?? {}));
+  const trioOff =
+    trioPresent.length > 0 && trioPresent.every((w) => excluded.has(w));
   const hc = stats?.handCounts ?? {
     leftOnly: 0,
     rightOnly: 0,
@@ -345,6 +588,13 @@ export default function TrainSequence() {
   // 只在**确实有单手样本、且全偏在一侧**时告警。两边都有、或全是双手样本都不算偏
   const handSkewed =
     hc.leftOnly + hc.rightOnly > 0 && (hc.leftOnly === 0 || hc.rightOnly === 0);
+  // 主手混采：左右都有一批。这不是问题，训练会自动镜像归一化 —— 这一行只是让
+  // 「我这批数据是混采的」这件事看得见（`handCounts` 那一行看不见，见 currentBendRanges 上面的注释）
+  const handMixed = !!handedness && handedness.left > 0 && handedness.right > 0;
+  const tieHeavy =
+    !!handedness &&
+    handedness.left + handedness.right > 0 &&
+    handedness.nearTie > (handedness.left + handedness.right) * 0.3;
 
   return (
     <div
@@ -408,6 +658,16 @@ export default function TrainSequence() {
                 value={String(stats?.synthesizedCount ?? 0)}
                 color="#f59e0b"
               />
+              {/* 只在真有句子样本时出现。它们不进下面的每词条数（primaryLabel 是第一个词，
+                  算进去会给那个词虚增），所以必须在这里单独有一行，否则"总数比每词之和多"
+                  这件事在页面上无处可查 */}
+              {(stats?.sentenceCount ?? 0) > 0 && (
+                <DataRow
+                  label="句子样本"
+                  value={`${stats?.sentenceCount} · 不参与孤立词`}
+                  color="#a855f7"
+                />
+              )}
               <DataRow
                 label="平均时长"
                 value={`${Math.round(stats?.avgDurationMs ?? 0)}ms`}
@@ -429,17 +689,48 @@ export default function TrainSequence() {
                 color={imuSuspect === 0 ? "#00e5a0" : "#f59e0b"}
               />
               <DataRow
-                label="手别分布"
+                label="手套连接"
                 value={`左 ${hc.leftOnly} · 右 ${hc.rightOnly} · 双 ${hc.both}`}
                 color={handSkewed ? "#f59e0b" : "#00e5a0"}
               />
+              <DataRow
+                label="主手分布"
+                value={
+                  handedness
+                    ? `左 ${handedness.left} · 右 ${handedness.right} · 静止 ${handedness.idle}`
+                    : "—"
+                }
+                color={handMixed ? "#a855f7" : "#00e5a0"}
+              />
             </div>
+            {handMixed && (
+              <div className="text-[9px] text-[#a855f7] font-mono leading-relaxed">
+                左右手混采（不是问题）：训练会把 {handedness!.left} 条左手样本整条镜像到
+                右手口径再喂模型，与 /translate 的推理口径一致。不做这一步的话，同一个词
+                的两半会落进两段零重叠的槽位，网络只能退回类先验 —— 表现就是"打什么都输出
+                同一个词"。
+              </div>
+            )}
+            {tieHeavy && (
+              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+                有 {handedness!.nearTie} 条样本左右手活动量接近，主手判定基本是掷硬币。
+                多为双手词（镜像与否影响本来就小）；如果里面有单手词，说明闲着那只手
+                动得太多，采集时让它自然垂下。
+              </div>
+            )}
+            {handedness && handedness.calibrated < handedness.total && (
+              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+                有 {handedness.total - handedness.calibrated} 条样本判定时没有两点标定可用，
+                走了兜底量程。左右手弯折量程实测差 40~176，不标定会系统性偏向量程大的那只手。
+                去第 1 步给两只手都做一次张开/握拳标定。
+              </div>
+            )}
             {handSkewed && (
               <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
-                单手样本全在{hc.leftOnly === 0 ? "右" : "左"}手 —— 模型在另一只手的槽位上
-                从没见过信号，直接戴另一只手套做同一个词会塌到某个固定的词上。
-                单手词已由 /translate 的镜像归一化兜住（只戴一只手套时生效）；
-                双手词兜不住，得真去补采。
+                只连了一只手套的样本全在{hc.leftOnly === 0 ? "右" : "左"}手 ——
+                这些样本的另一段槽位是**全 0**，而两只手套都戴着录的样本，闲着那只手
+                出的是静止基线、不是 0。两种输入长得不一样，混在一起训会多出一个
+                与词义无关的因子。要么统一戴两只，要么统一戴一只。
               </div>
             )}
             {imuSuspect > 0 && (
@@ -464,28 +755,112 @@ export default function TrainSequence() {
           </Section>
 
           <Section title="PER LABEL">
+            <div className="text-[9px] text-[#334455] font-mono">
+              点一个词把它从训练里排除（不删数据，再点一下恢复）
+            </div>
+            {trioPresent.length > 0 && (
+              <button
+                onClick={() => toggleTrio(trioPresent)}
+                disabled={isTraining}
+                title={
+                  trioOff
+                    ? "把这三个词放回训练"
+                    : "会话开头总是先输出这三个词 —— 一键把它们从训练里排除，验证它们是不是靠静止头段赢的"
+                }
+                className={
+                  "w-full px-2 py-1 rounded-sm text-[10px] font-mono border " +
+                  (trioOff
+                    ? "border-[#ff2d7b] text-[#ff2d7b]"
+                    : "border-[#334455] text-[#556677] hover:border-[#00f0ff] hover:text-[#00f0ff]")
+                }
+              >
+                {trioOff ? "✓ 已排除" : "排除"}开头那三个词（
+                {trioPresent.map(getDisplayLabel).join(" / ")}）
+              </button>
+            )}
+            {/* 训练前的口径。数字对不上就别点训练 —— 上一轮就是这么读反的 */}
+            <div className="text-[9px] font-mono">
+              <span className="text-[#334455]">本次将训练 </span>
+              <span className="text-[#00e5a0]">{plan.labels}</span>
+              <span className="text-[#334455]"> 类 / </span>
+              <span className="text-[#00e5a0]">{plan.rows}</span>
+              <span className="text-[#334455]"> 条</span>
+              {plan.droppedLabels > 0 && (
+                <span className="text-[#ff2d7b]">
+                  ，排除 {plan.droppedLabels} 类 / {plan.droppedRows} 条
+                </span>
+              )}
+              {mergedAway > 0 && (
+                <span className="text-[#a855f7]">（含合并省掉 {mergedAway} 类）</span>
+              )}
+            </div>
+            {mergedAway > 0 && (
+              <div className="text-[9px] text-[#a855f7] font-mono leading-relaxed">
+                我/你/他 与 我们/你们/他们 各自合并为一类：这几个词只差指向(yaw)，
+                六轴 IMU 无磁力计测不到绝对 yaw，实测漂移 P90 15.9°/s、10 秒累计 159°，
+                而类间距仅 45°。**库里的原始标签没动** —— 换九轴 IMU 后重测漂移即可退回。
+              </div>
+            )}
             <div className="space-y-0.5 max-h-48 overflow-y-auto">
-              {labelRows.map(([label, c]) => (
-                <div
-                  key={label}
-                  className="flex justify-between text-[10px] font-mono"
-                >
-                  <span className="text-[#556677]">
-                    {getDisplayLabel(label)}
-                  </span>
-                  <span>
-                    <span className="text-[#00e5a0]">{c.recorded}</span>
-                    <span className="text-[#334455]">/</span>
-                    <span className="text-[#f59e0b]">{c.synthesized}</span>
-                  </span>
-                </div>
-              ))}
+              {labelRows.map(([label, c]) => {
+                const off = excluded.has(label);
+                return (
+                  <button
+                    key={label}
+                    onClick={() => toggleExcluded(label)}
+                    disabled={isTraining}
+                    title={
+                      off
+                        ? "已排除：本次训练不含这个词，模型也不会输出它。点一下恢复"
+                        : "点一下把这个词从训练里排除（只是过滤，数据不删）"
+                    }
+                    className="w-full flex justify-between items-center text-[10px] font-mono px-1 py-0.5 rounded-sm hover:bg-[#00f0ff]/5"
+                  >
+                    <span
+                      className={
+                        off ? "text-[#ff2d7b] line-through" : "text-[#556677]"
+                      }
+                    >
+                      {getDisplayLabel(label)}
+                    </span>
+                    <span className={off ? "opacity-25" : ""}>
+                      <span className="text-[#00e5a0]">{c.recorded}</span>
+                      <span className="text-[#334455]">/</span>
+                      <span className="text-[#f59e0b]">{c.synthesized}</span>
+                    </span>
+                  </button>
+                );
+              })}
               {labelRows.length === 0 && (
                 <div className="text-[10px] text-[#334455] font-mono">
                   还没有序列样本
                 </div>
               )}
             </div>
+            {excluded.size > 0 && (
+              <>
+                <div className="text-[9px] text-[#ff2d7b] font-mono leading-relaxed">
+                  已排除 {excluded.size} 个词。这是**过滤不是删除** ——
+                  库里一条没动，但训出来的模型里没有这些类，/translate 永远不会输出它们。
+                  排除状态会一直保留（刷新页面也在），别忘了做完实验取消。
+                  另外类别数变了，准确率不能和之前那次比，类别越少本身就越容易。
+                </div>
+                {excluded.has(IDLE_LABEL) && (
+                  <div className="text-[9px] text-[#ff2d7b] font-mono leading-relaxed">
+                    你把 `_idle` 也排除了。没有空闲类，滑窗推理时手放松的窗口会被强行
+                    判成某个词 —— 这正是要查的那个症状，排除它会让实验结论没法读。
+                  </div>
+                )}
+                <button
+                  onClick={clearExcluded}
+                  disabled={isTraining}
+                  className="cyber-btn w-full px-2 py-1 rounded-sm text-[10px] flex items-center justify-center gap-1"
+                >
+                  <X className="w-3 h-3" />
+                  取消全部排除（{excluded.size}）
+                </button>
+              </>
+            )}
           </Section>
 
           <Section title="MIGRATION">
@@ -542,7 +917,19 @@ export default function TrainSequence() {
               className="cyber-btn w-full px-2 py-2 rounded-sm text-[11px] flex items-center justify-center gap-1"
             >
               <Play className="w-3 h-3" />
-              {isTraining ? "训练中..." : "开始训练"}
+              {isTraining
+                ? "训练中..."
+                : excluded.size
+                  ? `开始训练（排除 ${excluded.size} 词）`
+                  : "开始训练"}
+            </button>
+            <button
+              onClick={handleAudit}
+              disabled={isTraining || isBusy}
+              className="cyber-btn w-full px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1"
+            >
+              <Stethoscope className="w-3 h-3" />
+              数据体检（只读）
             </button>
             <button
               onClick={handleExport}
@@ -560,6 +947,35 @@ export default function TrainSequence() {
           {message && (
             <div className="cyber-panel p-2 rounded-sm text-[10px] font-mono text-[#00e5a0] leading-relaxed">
               {message}
+            </div>
+          )}
+
+          {auditText && (
+            <div className="cyber-panel p-3 rounded-sm">
+              <div className="flex items-center justify-between mb-2">
+                <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+                  Dataset Audit · 只读
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    onClick={handleCopyAudit}
+                    className="cyber-btn px-2 py-1 rounded-sm text-[10px] flex items-center gap-1"
+                  >
+                    <ClipboardCopy className="w-3 h-3" />
+                    复制
+                  </button>
+                  <button
+                    onClick={() => setAuditText("")}
+                    className="cyber-btn px-2 py-1 rounded-sm text-[10px] flex items-center gap-1"
+                  >
+                    <X className="w-3 h-3" />
+                    关闭
+                  </button>
+                </div>
+              </div>
+              <pre className="text-[10px] font-mono text-[#ccd6e0] leading-relaxed whitespace-pre-wrap max-h-[60vh] overflow-y-auto select-text">
+                {auditText}
+              </pre>
             </div>
           )}
 

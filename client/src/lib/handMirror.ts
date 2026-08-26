@@ -52,6 +52,7 @@
 import {
   SEQ_SENSOR_N,
   SEQ_IMU_N,
+  SEQ_LANDMARK_N,
   type SequenceSample,
 } from "@/lib/datasetStore";
 
@@ -155,6 +156,45 @@ export function mirrorImuSeries(
 }
 
 /**
+ * 整条 `[T*63]` 关键点序列的镜像：21 个点逐点 `x → 1 − x`，y / z 不动。
+ *
+ * 为什么是 `1 − x` 而不是 `−x`：MediaPipe 的关键点是**归一化图像坐标**，x ∈ [0,1]
+ * 且向右为正，所以"把画面左右翻过来"就是绕画面竖直中线反射，即 `1 − x`。
+ * z 是相对手腕的深度，绕竖直平面反射不改变它；y 同理。
+ *
+ * 与 `normalizeLandmarkFrame` 的配合是自动的：那里手腕点保留绝对坐标、其余 20 点取
+ * 相对手腕的差再除手长，而 `(1−x_p) − (1−x_w) = −(x_p − x_w)`，相对量正好跟着变号。
+ * 所以镜像放在**原始关键点**上就够了，不需要在特征层再补一次。
+ *
+ * 缺失帧是整帧 NaN（`datasetStore.ts` 的约定），`1 − NaN = NaN`，可见性判据
+ * （`sequenceTrim.ts` 的 `handVisibleAt`）不受影响。
+ *
+ * ⚠ **一个近似**：绕**画面**中线反射，不是绕人体中线。人站得偏离画面中心时，
+ * 这一步除了镜像还附带一个横向平移，而手腕绝对 x 是承载轨迹的特征之一
+ * （`sequenceFeatures.ts` 的注释 3），于是那一路会带上这个偏移。绕人体中线才是对的，
+ * 但手部关键点里没有躯干信息，单手录制更是连中线都估不出来。
+ * 触觉那 137+10 维完全不受这条影响；视觉只在教师（`FUSED_FRAME_DIM`）里用到，
+ * 视觉覆盖不足 80% 时教师根本不训（`trainSequenceModel` 的 `useDistillation`），
+ * 那时这个近似不参与任何计算。
+ */
+export function mirrorLandmarkSeries(
+  src: Float32Array,
+  frameCount: number
+): Float32Array {
+  const out = new Float32Array(frameCount * SEQ_LANDMARK_N);
+  for (let t = 0; t < frameCount; t++) {
+    const o = t * SEQ_LANDMARK_N;
+    if (o + SEQ_LANDMARK_N > src.length) break;
+    for (let p = 0; p < SEQ_LANDMARK_N; p += 3) {
+      out[o + p] = 1 - src[o + p];
+      out[o + p + 1] = src[o + p + 1];
+      out[o + p + 2] = src[o + p + 2];
+    }
+  }
+  return out;
+}
+
+/**
  * 单帧输入的镜像 —— 静态模型（`signLanguageModel.predict`）那条路用。
  *
  * 静态模型的输入是 `[...handTactile(left), ...handTactile(right)]`，
@@ -203,13 +243,17 @@ export function mirrorStaticInputs(
  *
  * 空的一路保持空，所以只连一只手套时它退化成"把那只手搬到对面槽位"。
  *
- * 视觉通道（`leftLandmarks` / `rightLandmarks`）**原样带过、不镜像不互换**：
- * 推理滑窗本来就是纯触觉、两路都是 null（`sequenceWindow.ts`）。真要给滑窗加视觉，
- * 关键点的镜像是另一套（图像 x 翻转 + 左右手标签互换），必须在这里补齐，
- * 否则触觉换了槽、视觉没换，两路就对不上了。
+ * 视觉通道（`leftLandmarks` / `rightLandmarks`）**一起镜像互换**。
+ * 推理滑窗那条路两边本来都是 null（`sequenceWindow.ts`），这一步是空操作；
+ * 但训练那条路的样本**是有视觉的**，教师模型吃的是 420 维触觉+视觉拼接
+ * （`sequenceFeatures.ts` 的 `FUSED_FRAME_DIM`）。只换触觉不换视觉的话，
+ * 左手那半段会变成"触觉是镜像后的右手、视觉是原封不动的左手"，
+ * 两路指的不是同一只手，教师直接被喂脏，蒸出来的学生跟着脏。
+ * `imuHealth` 也跟着互换 —— 特征层没用到它，但留着不换会是个以后踩的坑。
  */
 export function mirrorSample(sample: SequenceSample): SequenceSample {
   const T = sample.frameCount;
+  const health = sample.imuHealth;
   return {
     ...sample,
     leftSensor: sample.rightSensor
@@ -220,11 +264,27 @@ export function mirrorSample(sample: SequenceSample): SequenceSample {
       : null,
     leftImu: sample.rightImu ? mirrorImuSeries(sample.rightImu, T) : null,
     rightImu: sample.leftImu ? mirrorImuSeries(sample.leftImu, T) : null,
+    leftLandmarks: sample.rightLandmarks
+      ? mirrorLandmarkSeries(sample.rightLandmarks, T)
+      : null,
+    rightLandmarks: sample.leftLandmarks
+      ? mirrorLandmarkSeries(sample.leftLandmarks, T)
+      : null,
+    ...(health
+      ? { imuHealth: { left: health.right, right: health.left } }
+      : {}),
   };
 }
 
-/** 用户在界面上指定的主手（做手语的那只手）。`auto` = 由连了哪只手套推断 */
-export type DominantHand = "auto" | "left" | "right";
+/**
+ * **已判定**的主手（做手语的那只手）。`both` = 两只手活动量接近，按双手词处理。
+ *
+ * 这里刻意没有 `auto`：判定是 `dominantHand.ts` 的事，它从滑窗里量两只手的运动能量
+ * 得出结论，本模块只负责按结论做变换。以前这个类型带 `auto`、由用户在界面上手选，
+ * 理由是"闲着那只手也在出静止数据，分不出没戴和戴着不动"—— 那句话没错，但要判的
+ * 本来就不是哪只手戴了手套，而是哪只手在动，那是量得出来的。详见 `dominantHand.ts`。
+ */
+export type Dominance = "left" | "right" | "both";
 
 export interface NormalizeResult {
   sample: SequenceSample;
@@ -237,29 +297,27 @@ export interface NormalizeResult {
 /**
  * 推理前归一化到**右手口径**（模型是用右手采的数据训的）。
  *
- * - `dominant = "left"` → 无条件整体镜像。**两只手套都连着时必须走这条**：
- *   闲着那只手的槽位有静止数据，从数据上分不出"没戴"和"戴着不动"，
- *   所以 `auto` 在双手都有数据时判不了，只能由用户在界面上指定。
+ * - `dominant = "left"` → 整体镜像并互换槽位。单手词换手不改词义，
+ *   双手词整体镜像后也是同一个词由另一只手主导的版本。
  * - `dominant = "right"` → 本来就是训练口径，原样返回。
- * - `dominant = "auto"` → 只有左手时镜像；只有右手时不动；
- *   **两只手都有数据时不动**并给出 `both_hands`，界面应据此提示用户去选主手。
+ * - `dominant = "both"` → 双手词、两只手都在动，谁也不是"闲着的那只"，
+ *   镜像无从下手，原样返回并给出 `both_hands`。
+ *
+ * 注意 `both` 只在两只手都有数据时才有意义；只有一只手有数据却传了 `both`
+ * （判定器不会这么给）时按原样返回，宁可不变换也不要猜。
  */
 export function normalizeHandedness(
   sample: SequenceSample,
-  dominant: DominantHand = "auto"
+  dominant: Dominance
 ): NormalizeResult {
   const hasLeft = !!(sample.leftSensor || sample.leftImu);
   const hasRight = !!(sample.rightSensor || sample.rightImu);
   if (!hasLeft && !hasRight)
     return { sample, mirrored: false, reason: "no_hand" };
 
-  if (dominant === "right")
-    return { sample, mirrored: false, reason: "already_right" };
   if (dominant === "left")
     return { sample: mirrorSample(sample), mirrored: true, reason: "mirrored" };
-
-  if (hasLeft && hasRight)
-    return { sample, mirrored: false, reason: "both_hands" };
-  if (hasRight) return { sample, mirrored: false, reason: "already_right" };
-  return { sample: mirrorSample(sample), mirrored: true, reason: "mirrored" };
+  if (dominant === "right")
+    return { sample, mirrored: false, reason: "already_right" };
+  return { sample, mirrored: false, reason: "both_hands" };
 }

@@ -9,6 +9,8 @@
  * 采集页分组显示和提示用户该录多久。
  */
 
+import { getMergeGroup } from "./labelMerge";
+
 export interface SignWord {
   id: string;
   label: string;        // 中文词汇
@@ -133,5 +135,9 @@ export function getStaticWords(): SignWord[] {
 /** 显示名：空闲伪类不在词表里，单独处理 */
 export function getDisplayLabel(id: string): string {
   if (id === IDLE_LABEL) return IDLE_DISPLAY_LABEL;
+  // 合并类同样不在词表里。放在这里而不是各个界面各自判一次 —— 漏一处就会
+  // 在某个角落露出 `merged_pron_sg` 这种原始 id
+  const merged = getMergeGroup(id);
+  if (merged) return merged.display;
   return getWordById(id)?.label ?? id;
 }

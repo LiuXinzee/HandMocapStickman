@@ -111,6 +111,22 @@ export interface SequenceSegment {
 }
 
 /**
+ * 这条样本是不是**句子级**录制（一条录制里连着打了好几个词）。
+ *
+ * 判据就是 `segments.length > 1`。之所以要有这么一个函数、而不是各处各写一遍：
+ * 句子样本的 `primaryLabel` 等于**第一个词**（见下面 SequenceSample 的字段注释），
+ * 所以在任何"按 primaryLabel 数样本 / 推类别表"的地方，一条「我 名字 王」都会
+ * 冒充一条 `我` 的孤立词。孤立词训练、词频表、每词条数全都会被它污染，
+ * 而且污染的样子很像"数据没问题，就是某个词训不准"，极难追。
+ *
+ * 所以孤立词那条链路一律要用它把句子样本挡掉；句子（CTC）那条链路反过来只要
+ * 它为真的样本。两条链路共用同一个判据，才不会出现"一条样本两边都算 / 两边都不算"。
+ */
+export function isSentenceSample(s: { segments: SequenceSegment[] }): boolean {
+  return s.segments.length > 1;
+}
+
+/**
  * 一条时序样本 —— 列存（SoA）+ TypedArray。
  *
  * 为什么不用 `number[]`：一条 1.5s@100Hz 的双手序列用 JS number 存约 700KB，
@@ -158,7 +174,15 @@ export interface SequenceStats {
   totalSequences: number;
   recordedCount: number;
   synthesizedCount: number;
-  /** 每个标签下 [真实, 合成] 条数 */
+  /**
+   * 句子级样本条数（`segments.length > 1`，见 `isSentenceSample`）。
+   *
+   * **不进 `labelCounts`**：句子的 `primaryLabel` 是它的第一个词，混进去就等于给
+   * 那个词虚增条数，采集页会显示"这个词已经够了"而其实一条没多。单列成一个数，
+   * 才能在页面上如实说"另有 N 条句子样本，不参与孤立词训练"。
+   */
+  sentenceCount: number;
+  /** 每个标签下 [真实, 合成] 条数。**只统计孤立词样本**，句子样本走 `sentenceCount` */
   labelCounts: Record<string, { recorded: number; synthesized: number }>;
   labels: string[];
   avgDurationMs: number;
@@ -475,6 +499,7 @@ export async function getSequenceStats(): Promise<SequenceStats> {
   let synthesizedCount = 0;
   let totalDuration = 0;
   let estimatedBytes = 0;
+  let sentenceCount = 0;
   const handCounts = { leftOnly: 0, rightOnly: 0, both: 0, neither: 0 };
 
   for (const s of seqs) {
@@ -485,25 +510,32 @@ export async function getSequenceStats(): Promise<SequenceStats> {
     else if (hasL) handCounts.leftOnly++;
     else if (hasR) handCounts.rightOnly++;
     else handCounts.neither++;
+    if (s.origin === "synthesized") synthesizedCount++;
+    else recordedCount++;
+    totalDuration += s.durationMs;
+    estimatedBytes += sequenceByteSize(s);
+
+    // 只有孤立词进每词计数。句子的 primaryLabel 是它的第一个词，算进去就是给那个词
+    // 虚增条数 —— 采集页会据此显示"这个词够了"，而其实一条孤立词都没多
+    if (isSentenceSample(s)) {
+      sentenceCount++;
+      continue;
+    }
     const entry = (labelCounts[s.primaryLabel] ??= {
       recorded: 0,
       synthesized: 0,
     });
-    if (s.origin === "synthesized") {
-      entry.synthesized++;
-      synthesizedCount++;
-    } else {
-      entry.recorded++;
-      recordedCount++;
-    }
-    totalDuration += s.durationMs;
-    estimatedBytes += sequenceByteSize(s);
+    if (s.origin === "synthesized") entry.synthesized++;
+    else entry.recorded++;
   }
 
   return {
+    // 总数/真实合成/分手别/平均时长都算**全部**样本（句子录制也是一条真录制）；
+    // 只有 labelCounts 把句子排除掉。所以 labelCounts 之和 = 总数 − sentenceCount
     totalSequences: seqs.length,
     recordedCount,
     synthesizedCount,
+    sentenceCount,
     labelCounts,
     labels: Object.keys(labelCounts),
     avgDurationMs: seqs.length ? totalDuration / seqs.length : 0,

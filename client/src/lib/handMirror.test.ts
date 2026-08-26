@@ -5,6 +5,7 @@ import {
   mirrorQuat,
   mirrorVec3,
   mirrorImuSeries,
+  mirrorLandmarkSeries,
   normalizeHandedness,
   mirrorSample,
   mirrorStaticInputs,
@@ -17,12 +18,14 @@ import {
 import {
   SEQ_SENSOR_N,
   SEQ_IMU_N,
+  SEQ_LANDMARK_N,
   type SequenceSample,
 } from "./datasetStore";
 import {
   quatMul,
   quatNormalize,
   gravityInHandFrame,
+  normalizeLandmarkFrame,
   type Quat,
 } from "./sequenceFeatures";
 
@@ -192,6 +195,53 @@ describe("mirrorImuSeries", () => {
   });
 });
 
+// ===== 关键点 =====
+
+describe("mirrorLandmarkSeries", () => {
+  const T = 3;
+  const src = new Float32Array(T * SEQ_LANDMARK_N);
+  for (let i = 0; i < src.length; i++) src[i] = ((i * 7) % 100) / 100;
+
+  it("只翻 x（归一化图像坐标绕竖直中线反射 = 1−x），y/z 不动", () => {
+    const out = mirrorLandmarkSeries(src, T);
+    for (let i = 0; i < src.length; i += 3) {
+      expect(out[i]).toBeCloseTo(1 - src[i], 6);
+      expect(out[i + 1]).toBe(src[i + 1]);
+      expect(out[i + 2]).toBe(src[i + 2]);
+    }
+  });
+
+  it("镜像两次回到原值", () => {
+    const twice = mirrorLandmarkSeries(mirrorLandmarkSeries(src, T), T);
+    twice.forEach((v, i) => expect(v).toBeCloseTo(src[i], 6));
+  });
+
+  it("缺失帧的 NaN 照样传下去（可见性判据靠它）", () => {
+    const nan = new Float32Array(SEQ_LANDMARK_N).fill(NaN);
+    const out = mirrorLandmarkSeries(nan, 1);
+    expect([...out].every((v) => Number.isNaN(v))).toBe(true);
+  });
+
+  it("特征层的归一化会自动跟着镜像 —— 相对手腕的 x 正好变号、手长不变", () => {
+    // 这一条锁的是"镜像放在原始关键点上就够了、不用在特征层再补一次"。
+    // 手长是 hypot(Δ)，Δx 变号不改变模长，所以缩放因子不变
+    const frame = new Float32Array(SEQ_LANDMARK_N);
+    for (let i = 0; i < SEQ_LANDMARK_N; i++) frame[i] = Math.sin(i) * 0.3 + 0.5;
+    const mirrored = mirrorLandmarkSeries(frame, 1);
+    const a = new Float32Array(SEQ_LANDMARK_N);
+    const b = new Float32Array(SEQ_LANDMARK_N);
+    normalizeLandmarkFrame(frame, 0, a, 0);
+    normalizeLandmarkFrame(mirrored, 0, b, 0);
+    expect(b[0]).toBeCloseTo(1 - a[0], 6); // 手腕保留绝对坐标
+    expect(b[1]).toBeCloseTo(a[1], 6);
+    for (let p = 1; p < 21; p++) {
+      expect(b[p * 3]).toBeCloseTo(-a[p * 3], 5); // 相对量变号
+      expect(b[p * 3 + 1]).toBeCloseTo(a[p * 3 + 1], 5);
+      expect(b[p * 3 + 2]).toBeCloseTo(a[p * 3 + 2], 5);
+    }
+  });
+});
+
 // ===== mirrorSample / normalizeHandedness =====
 
 function makeSample(which: "left" | "right" | "both" | "none"): SequenceSample {
@@ -207,6 +257,11 @@ function makeSample(which: "left" | "right" | "both" | "none"): SequenceSample {
     for (let i = 0; i < a.length; i++) a[i] = Math.sin(i + seed);
     return a;
   };
+  const marks = (seed: number) => {
+    const a = new Float32Array(T * SEQ_LANDMARK_N);
+    for (let i = 0; i < a.length; i++) a[i] = ((i * 3 + seed) % 100) / 100;
+    return a;
+  };
   const hasL = which === "left" || which === "both";
   const hasR = which === "right" || which === "both";
   return {
@@ -218,8 +273,8 @@ function makeSample(which: "left" | "right" | "both" | "none"): SequenceSample {
     rightSensor: hasR ? sensor(101) : null,
     leftImu: hasL ? imu(0) : null,
     rightImu: hasR ? imu(7) : null,
-    leftLandmarks: null,
-    rightLandmarks: null,
+    leftLandmarks: hasL ? marks(0) : null,
+    rightLandmarks: hasR ? marks(41) : null,
     durationMs: 80,
     sourceFps: 50,
     origin: "recorded",
@@ -267,15 +322,47 @@ describe("mirrorSample", () => {
     expect([...s.leftSensor!]).toEqual(before);
   });
 
-  it("视觉通道原样带过（滑窗本来就是纯触觉两路都 null）", () => {
-    const m = mirrorSample(makeSample("both"));
+  it("视觉通道跟着触觉一起镜像互换（否则教师的两路指的不是同一只手）", () => {
+    // 训练样本是有视觉的，教师吃的是触觉+视觉拼接的 420 维。只换触觉不换视觉，
+    // 左半段就成了"触觉是镜像后的右手、视觉是原封不动的左手"
+    const s = makeSample("both");
+    const m = mirrorSample(s);
+    expect([...m.rightLandmarks!]).toEqual([
+      ...mirrorLandmarkSeries(s.leftLandmarks!, s.frameCount),
+    ]);
+    expect([...m.leftLandmarks!]).toEqual([
+      ...mirrorLandmarkSeries(s.rightLandmarks!, s.frameCount),
+    ]);
+  });
+
+  it("视觉两路都 null 时不凭空造（推理滑窗就是这种）", () => {
+    const s = { ...makeSample("both"), leftLandmarks: null, rightLandmarks: null };
+    const m = mirrorSample(s);
     expect(m.leftLandmarks).toBeNull();
     expect(m.rightLandmarks).toBeNull();
+  });
+
+  it("imuHealth 跟着互换（特征层没用它，但留着不换是个坑）", () => {
+    const s: SequenceSample = {
+      ...makeSample("both"),
+      imuHealth: {
+        left: { verdict: "ok" } as never,
+        right: { verdict: "drifting" } as never,
+      },
+    };
+    const m = mirrorSample(s);
+    expect(m.imuHealth?.left).toBe(s.imuHealth!.right);
+    expect(m.imuHealth?.right).toBe(s.imuHealth!.left);
+  });
+
+  it("没有 imuHealth 时不凭空加一个字段", () => {
+    const m = mirrorSample(makeSample("both"));
+    expect("imuHealth" in m).toBe(false);
   });
 });
 
 describe("normalizeHandedness", () => {
-  it("指定左手 + 双手套都连着 → 照样镜像（这是唯一能覆盖那种用法的路径）", () => {
+  it("判成左手 + 双手套都连着 → 照样镜像（左手主导的双手词就是这种）", () => {
     const s = makeSample("both");
     const r = normalizeHandedness(s, "left");
     expect(r.mirrored).toBe(true);
@@ -287,7 +374,7 @@ describe("normalizeHandedness", () => {
     expect(r.sample.leftSensor).not.toBeNull();
   });
 
-  it("指定右手 → 原样返回，哪怕左手套也连着", () => {
+  it("判成右手 → 原样返回，哪怕左手套也连着", () => {
     const s = makeSample("both");
     const r = normalizeHandedness(s, "right");
     expect(r.mirrored).toBe(false);
@@ -295,39 +382,41 @@ describe("normalizeHandedness", () => {
     expect(r.sample).toBe(s); // 同一个对象，没有多余拷贝
   });
 
-  it("auto + 只有左手 → 镜像", () => {
+  it("判成左手 + 只有左手有数据 → 镜像", () => {
     const s = makeSample("left");
-    const r = normalizeHandedness(s, "auto");
+    const r = normalizeHandedness(s, "left");
     expect(r.mirrored).toBe(true);
     expect(r.reason).toBe("mirrored");
     expect(r.sample.leftSensor).toBeNull();
   });
 
-  it("auto + 只有右手 → 不动（本来就是训练口径）", () => {
+  it("判成右手 + 只有右手有数据 → 不动（本来就是训练口径）", () => {
     const s = makeSample("right");
-    const r = normalizeHandedness(s, "auto");
+    const r = normalizeHandedness(s, "right");
     expect(r.mirrored).toBe(false);
     expect(r.reason).toBe("already_right");
     expect(r.sample).toBe(s);
   });
 
-  it("auto + 双手都有 → 判不了，报 both_hands 且不动", () => {
-    // 闲着那只手也在出静止数据，从数据上分不出"没戴"和"戴着不动"，
-    // 所以这里必须交给界面上的主手选择器
+  it("判成 both（双手词）→ 报 both_hands 且不动", () => {
+    // 两只手都在动，谁也不是"闲着的那只"，镜像无从下手
     const s = makeSample("both");
-    const r = normalizeHandedness(s, "auto");
+    const r = normalizeHandedness(s, "both");
     expect(r.mirrored).toBe(false);
     expect(r.reason).toBe("both_hands");
     expect(r.sample).toBe(s);
   });
 
-  it("默认参数就是 auto", () => {
-    expect(normalizeHandedness(makeSample("both")).reason).toBe("both_hands");
-    expect(normalizeHandedness(makeSample("left")).reason).toBe("mirrored");
+  it("传了 both 但只有一只手有数据 → 仍不变换（判定器不会这么给，但不能猜）", () => {
+    for (const which of ["left", "right"] as const) {
+      const r = normalizeHandedness(makeSample(which), "both");
+      expect(r.mirrored).toBe(false);
+      expect(r.reason).toBe("both_hands");
+    }
   });
 
-  it("两只手都没有 → no_hand，指定了主手也一样不崩", () => {
-    for (const d of ["auto", "left", "right"] as const) {
+  it("两只手都没有 → no_hand，任何判定结果都一样不崩", () => {
+    for (const d of ["both", "left", "right"] as const) {
       const r = normalizeHandedness(makeSample("none"), d);
       expect(r.mirrored).toBe(false);
       expect(r.reason).toBe("no_hand");

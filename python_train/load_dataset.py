@@ -59,6 +59,17 @@ class Sequence:
         """句子级 CTC 的目标标签序列。孤立词就是长度 1。"""
         return [s["label"] for s in self.segments]
 
+    @property
+    def is_sentence(self) -> bool:
+        """
+        是不是句子级录制(一条里连着打了多个词)。与 TS 侧 `isSentenceSample` 同一判据。
+
+        孤立词训练**必须**用它把句子挡掉:句子的 primary_label 是它的第一个词,
+        不挡的话一条「我 名字 王」会作为一条 `我` 进 softmax,等于往那一类里掺噪声,
+        而条数和覆盖率看起来全是正常的。CTC 训练反过来只要它为真的样本。
+        """
+        return len(self.segments) > 1
+
 
 # ===== 读取 =====
 

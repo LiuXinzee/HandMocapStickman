@@ -95,6 +95,66 @@ describe("SequenceWindowBuffer", () => {
     expect(buf.snapshot(1500)).toBeNull();
   });
 
+  describe("snapshotAll（整句捕获用）", () => {
+    it("取缓冲里现有的全部，不要求攒满某个窗口", () => {
+      // snapshot(windowMs) 要求 buf[0].t <= end-windowMs，整句捕获满足不了这个判据
+      // （按下按钮后第一帧的时间戳必然晚于按下的时刻），所以必须有这条路
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000 });
+      const last = fill(buf, 700);
+      const snap = buf.snapshotAll()!;
+      expect(snap).not.toBeNull();
+      expect(snap.frameCount).toBe(35); // 700ms @50Hz
+      expect(buf.spanMs()).toBe(last - 1000);
+    });
+
+    it("maxMs 从尾部往前算（超长时丢的是最老的）", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000 });
+      fill(buf, 5000);
+      const snap = buf.snapshotAll(2000)!;
+      expect(snap.frameCount).toBe(100);
+      // 起点在 end-2000 = 4000ms 处，不是缓冲开头（值 = (t-1000)/10）
+      expect(snap.leftSensor![0]).toBe(((4000 - 1000) / 10) % 256);
+    });
+
+    it("dropTailMs 砍的是尾巴，句子开头必须留着", () => {
+      // 这是收句时的实际用法：整段 3000ms，末尾 800ms 是收句判据用掉的静止。
+      // 砍错方向（靠调小 maxMs）会把开头那几个词丢掉，而尾部静止照样留着 ——
+      // 表现是"每句话前面都少几个词"，非常难查
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000 });
+      fill(buf, 3000);
+      const snap = buf.snapshotAll(2200, "_sentence", 800)!;
+      expect(snap.frameCount).toBe(110); // 2200ms @50Hz
+      // 开头仍是缓冲的第一帧（值 0），不是被砍掉之后的某一帧
+      expect(snap.leftSensor![0]).toBe(0);
+      // 末尾停在 end-800 附近（值 = (t-1000)/10），而不是 end=4000 处的 300
+      const lastIdx = (snap.frameCount - 1) * SEQ_SENSOR_N;
+      expect(snap.leftSensor![lastIdx]).toBe(((3180 - 1000) / 10) % 256); // 218
+      expect(snap.leftSensor![lastIdx]).toBeLessThan((3200 - 1000) / 10);
+      expect(snap.leftSensor![lastIdx]).toBeGreaterThan((2000 - 1000) / 10);
+    });
+
+    it("尾巴砍过头（比整段还长）返回 null 而不是负长度的段", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000 });
+      fill(buf, 500);
+      expect(buf.snapshotAll(500, "_sentence", 800)).toBeNull();
+    });
+
+    it("起点取两手首帧的较晚者（较早者会把另一只手开头填成假静止）", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000 });
+      for (let t = 1000; t <= 4000; t += 10) buf.push("left", frame(t, 7));
+      for (let t = 2000; t <= 4000; t += 10) buf.push("right", frame(t, 9));
+      const snap = buf.snapshotAll()!;
+      // 起点 = 2000（右手首帧），所以整段 2000ms 而不是 3000ms
+      expect(snap.frameCount).toBe(100);
+      expect(buf.spanMs()).toBe(2000);
+    });
+
+    it("空缓冲返回 null", () => {
+      expect(new SequenceWindowBuffer().snapshotAll()).toBeNull();
+      expect(new SequenceWindowBuffer().spanMs()).toBeNull();
+    });
+  });
+
   it("双手独立时间戳都能落到同一栅格上", () => {
     const buf = new SequenceWindowBuffer();
     // 两只手速率和相位都不同 —— 真实硬件就是两个独立 COM 口

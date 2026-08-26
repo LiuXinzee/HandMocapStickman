@@ -19,8 +19,15 @@
  *   ctc 符号），句子级训练必须走 python_train/ 的 tf.keras 路径。
  */
 import * as tf from "@tensorflow/tfjs";
+import { isSentenceSample } from "./datasetStore";
 import type { SequenceSample, SavedModel } from "./datasetStore";
 import { summarizeTrim, type TrimStats } from "@/lib/sequenceTrim";
+import {
+  normalizeSamplesToRight,
+  type BendRanges,
+  type HandednessStats,
+} from "@/lib/dominantHand";
+import { mergeSamples, type MergeGroup } from "@/lib/labelMerge";
 import {
   buildSequenceFeatures,
   DEFAULT_AUGMENT,
@@ -49,6 +56,35 @@ export interface SeqTrainingConfig {
   /** 每条样本额外生成几个增强副本（0 = 只用原始） */
   augmentCopies: number;
   augment: SeqAugmentConfig;
+  /**
+   * 训练前把左手主导的样本整条镜像到右手口径（`normalizeSamplesToRight`）。
+   *
+   * 默认开。关掉它只在一种情况下讲得通：确认整个数据集本来就是同一只手采的、
+   * 想省掉这一遍判定。左右混采时关掉它 = 同一个词的两半落进两段零重叠的槽位，
+   * 网络只能退回类先验，表现是"打什么都输出同一个词"。
+   */
+  normalizeHandedness: boolean;
+  /**
+   * 两只手的弯折两点标定，喂给主手判定当分母。
+   *
+   * 为什么要从外面传：判定要按各自量程归一化（实测左右量程差 40~176，不归一化会
+   * 系统性偏向量程大的手），而标定存在 `localStorage` 里，本模块跑在 node 测试环境下
+   * 读不到。调用方（`TrainSequence.tsx`）负责 `loadBendRange` 之后传进来。
+   * 缺标定不会让判定失效，只是两只手一起走兜底量程，会在归一化汇总里报出来。
+   */
+  bendRanges: BendRanges;
+  /**
+   * 把特征层不可分的类合并（我/你/他 → 一类，我们/你们/他们 → 一类）。
+   *
+   * 默认开。这不是"先凑合"，是当前硬件下的正确建模：这几个词只差指向(yaw)，
+   * 而六轴 IMU 没有磁力计、绝对 yaw 不可观测，实测漂移 P90 15.9°/s 已经盖过
+   * 45° 的类间距（yawDrift 探针，399 条）。三个类抢同一块特征空间时 softmax
+   * 只能按训练集比例乱分，逃逸的概率还会污染邻近词。
+   *
+   * 关掉是有意义的对照实验（想看合并到底帮了多少）。换成九轴 IMU 后应该重测
+   * 漂移再决定要不要关 —— 库里的原始标签一直留着，退得回去。
+   */
+  mergeDegenerateLabels: boolean;
 }
 
 export interface SeqTrainingProgress {
@@ -78,6 +114,9 @@ export const DEFAULT_SEQ_CONFIG: SeqTrainingConfig = {
   backbone: "tcn",
   augmentCopies: 2,
   augment: DEFAULT_AUGMENT,
+  normalizeHandedness: true,
+  bendRanges: {},
+  mergeDegenerateLabels: true,
 };
 
 // ===== 网络结构 =====
@@ -254,6 +293,45 @@ export function buildSeqStudent(
   );
 }
 
+/**
+ * 句子级（CTC）head：逐帧输出 `numClasses+1` 维，**末位是 blank**，不做时间塌缩。
+ *
+ * 与 `python_train/train_seq.py` 的 `frame_wise_head` 一一对应。Dense 作用在最后一维，
+ * 3D 输入时等于逐时间步共享同一个全连接 —— keras 和 tfjs 在这点上行为一致。
+ */
+function frameWiseHead(
+  x: tf.SymbolicTensor,
+  numClasses: number,
+  prefix: string
+): tf.SymbolicTensor {
+  return tf.layers
+    .dense({ units: numClasses + 1, activation: "softmax", name: `${prefix}_out` })
+    .apply(x) as tf.SymbolicTensor;
+}
+
+/**
+ * 搭出与 Python 句子模型**同构**的空网络，供 `sentenceModel.ts` 填权重。
+ *
+ * 为什么放在这个文件里：结构定义只能有一份。骨干（`tcnBackbone`）本来就在这里，
+ * 句子模型只是换了个 head。在别处另搭一套的话，改了池化或通道数只会在
+ * 加载权重时报形状不符 —— 而那时候人在排查的是"模型加载失败"，不会想到是两处结构漂了。
+ *
+ * **不 compile**：这个模型只做推理（CTC loss 在 tfjs 里不存在，训练在 Python 侧）。
+ */
+export function buildSeqSentenceStudent(
+  numClasses: number,
+  seqLen: number,
+  backbone: SeqBackbone
+): tf.LayersModel {
+  const input = tf.input({
+    shape: [seqLen, TACTILE_FRAME_DIM],
+    name: "student_in",
+  });
+  const feat = tcnBackbone(input, 64, 128, backbone, "student");
+  const out = frameWiseHead(feat, numClasses, "student");
+  return tf.model({ inputs: input, outputs: out, name: "student" });
+}
+
 // ===== 数据准备 =====
 
 interface PreparedData {
@@ -420,7 +498,7 @@ function generateSoftLabels(
 // ===== 训练 =====
 
 export async function trainSequenceModel(
-  samples: SequenceSample[],
+  rawSamples: SequenceSample[],
   config: Partial<SeqTrainingConfig> = {},
   onProgress?: (p: SeqTrainingProgress) => void
 ): Promise<{
@@ -433,9 +511,49 @@ export async function trainSequenceModel(
   split: { trainSamples: number; valSamples: number };
   /** 起手段自动裁剪的统计（见 sequenceTrim.ts）；给页面显示一行，不影响训练本身 */
   trim: TrimStats;
+  /** 主手归一化的统计；关掉 `normalizeHandedness` 时为 null */
+  handedness: HandednessStats | null;
+  /** 合并掉的样本条数与命中的组。关掉合并时是 0 / 空数组 */
+  merge: { merged: number; groups: MergeGroup[] };
+  /** 被挡掉的句子级样本条数（多 segment，不属于孤立词训练） */
+  sentencesExcluded: number;
 }> {
   const cfg: SeqTrainingConfig = { ...DEFAULT_SEQ_CONFIG, ...config };
-  if (samples.length === 0) throw new Error("没有序列样本可供训练");
+  if (rawSamples.length === 0) throw new Error("没有序列样本可供训练");
+
+  /*
+   * 挡掉句子级样本（多 segment，见 `isSentenceSample`）。
+   *
+   * 这是**孤立词**训练器。句子样本的 `primaryLabel` 等于它的第一个词，不挡的话
+   * 一条「我 名字 王」会作为一条 `我` 进 softmax，而它的特征里还有另外两个词 ——
+   * 相当于往 `我` 这一类里掺噪声。症状是"某个词莫名变差"，而条数、覆盖率、
+   * 裁剪汇总全都正常，几乎无法定位。
+   *
+   * 放在**归一化之前**：镜像和裁剪都按"一条录制 = 一个词"的假设写的，
+   * 先挡掉就不必去想它们在多词样本上是什么行为。
+   */
+  const wordSamples = rawSamples.filter((s) => !isSentenceSample(s));
+  const sentencesExcluded = rawSamples.length - wordSamples.length;
+  if (wordSamples.length === 0)
+    throw new Error(
+      `全部 ${rawSamples.length} 条都是句子级样本，孤立词训练没有数据。` +
+        `句子模型走 python_train/train_seq.py --ctc，不在浏览器里训。`
+    );
+
+  // 归一化到右手口径**只做一次**，放在这里而不是 prepareSequenceData 里：
+  // 那个函数每个增强副本、教师学生各跑一遍，同一条样本会被重复判定、重复镜像 6 次，
+  // 而结论对同一条样本恒定。放在这里还有个好处 —— 切分、视觉占比、裁剪汇总
+  // 看到的都是归一化后的同一批数据，不会出现"报的是 A、训的是 B"。
+  const handednessResult = cfg.normalizeHandedness
+    ? normalizeSamplesToRight(wordSamples, cfg.bendRanges)
+    : null;
+  const normalized = handednessResult?.samples ?? wordSamples;
+
+  // 合并特征层不可分的类（我/你/他、我们/你们/他们，见 labelMerge.ts）。
+  // 必须在下一行推类别表**之前**做，否则合并进来的类根本进不了 softmax。
+  // 放在归一化之后：镜像判定看的是运动能量，和标签无关，两者互不影响
+  const mergeResult = mergeSamples(normalized, cfg.mergeDegenerateLabels);
+  const samples = mergeResult.samples;
 
   const labels = Array.from(new Set(samples.map((s) => s.primaryLabel))).sort();
   if (labels.length < 2) throw new Error("至少需要 2 个不同的标签才能训练");
@@ -594,6 +712,9 @@ export async function trainSequenceModel(
     config: cfg,
     split: { trainSamples: split.trainSamples, valSamples: split.valSamples },
     trim: trimStats,
+    handedness: handednessResult?.stats ?? null,
+    merge: { merged: mergeResult.merged, groups: mergeResult.groups },
+    sentencesExcluded,
   };
 }
 

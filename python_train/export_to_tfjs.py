@@ -1,6 +1,21 @@
 """
 把 train_seq.py 训好的 keras 模型转成浏览器能加载的 tfjs LayersModel。
 
+⚠️ **本机(Windows)跑不了这个脚本。用 export_weights.py 代替。**
+
+`tensorflowjs` 装不上,不是版本问题:它的转换器无条件
+`import tensorflow_decision_forests`,而 TF-DF 只发 Linux/macOS 轮子(官方文档写明
+Windows 要用 WSL)。桩掉 TF-DF 之后下一关是 tfjs 用的 `tf_keras` 是 Keras 2,
+读不了 Keras 3 存的 `.keras`。已经趟过一遍,别再趟。
+
+替代方案 `export_weights.py` 只导权重(weights.bin + weights.json),浏览器用
+`sequenceModel.ts` 里已有的 tfjs 结构自己搭网络再填进去 —— 两边逐层同构本来就是
+这个仓库的硬约束,所以不需要转换结构。数值一致性有测试兜着
+(`sentenceModel.test.ts`,实测最大输出差 5e-6)。
+
+本文件保留是因为在 Linux/macOS 或 WSL 上它仍然可用,而且下面关于"标签顺序就是
+softmax 下标"的说明对两条路都成立。
+
 产物:
     out/tfjs_student/model.json + group1-shard*.bin
     out/tfjs_student/meta.json          # 标签、seqLen、backbone、frameDim

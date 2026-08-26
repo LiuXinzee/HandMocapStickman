@@ -77,17 +77,86 @@ export class SequenceWindowBuffer {
   snapshot(windowMs: number, label = "_live"): SequenceSample | null {
     const end = this.latestTime();
     if (end === null) return null;
+    // 缓冲还没攒够一整个窗口就别推理 —— 前半段会被最近邻拉成一条直线，
+    // 那是个"静止"的假动作，模型多半会输出错词
     const start = end - windowMs;
+    const covers = (buf: WindowEntry[]) => buf.length > 0 && buf[0].t <= start;
+    if (!covers(this.left) && !covers(this.right)) return null;
+    // 显式传 windowMs 而不是让 resample 用 end-start 还原：浮点相减可能差 1 ULP，
+    // 而 T = floor(windowMs/dt) 在恰好整除时（2000/20=100）会因此掉一帧
+    return this.resample(
+      start,
+      windowMs,
+      covers(this.left),
+      covers(this.right),
+      label
+    );
+  }
+
+  /**
+   * 取**缓冲里现有的全部**一段（可选上限 maxMs、可选砍掉尾部 dropTailMs），
+   * 给整句捕获用。
+   *
+   * 为什么不能用 `snapshot(now - 按下的时刻)`：`snapshot` 要求
+   * `buf[0].t <= end - windowMs`，而按下之后第一帧的时间戳必然**略大于**按下的时刻，
+   * 这个判据会不成立，整句捕获永远返回 null。调用方靠减一点余量去凑是撞浮点，
+   * 不同帧率下时好时坏 —— 所以区间边界由缓冲自己算。
+   *
+   * **只收时长，不收时刻。** 帧时间戳是 `performance.now()`，调用方的状态机可能跑在
+   * 另一个时钟上（`Date.now()`），绝对时刻不可比；而"多长""砍掉多长"是时长，跨时钟成立。
+   *
+   * 起点取两只手首帧的**较晚者**（不是较早者）：较早者会让另一只手开头那段被最近邻
+   * 填成一条直线，那是假的"静止"。少取几十毫秒换全段两手都是真数据。
+   *
+   * @param maxMs 最长取多少（从**尾部**往前算）；不传 = 缓冲里有多少取多少
+   * @param dropTailMs 从尾部砍掉多少。收句判据用掉的那段静止要从**末尾**砍，
+   *        不能靠调小 maxMs —— 那样砍掉的是句子的**开头**（区间是贴着尾部对齐的），
+   *        表现为"每句话前几个词都丢了"
+   */
+  snapshotAll(maxMs?: number, label = "_live", dropTailMs = 0): SequenceSample | null {
+    const latest = this.latestTime();
+    if (latest === null) return null;
+    const end = latest - Math.max(0, dropTailMs);
+    const firsts: number[] = [];
+    if (this.left.length) firsts.push(this.left[0].t);
+    if (this.right.length) firsts.push(this.right[0].t);
+    if (!firsts.length) return null;
+    let start = Math.max(...firsts);
+    if (maxMs !== undefined) start = Math.max(start, end - maxMs);
+    // 砍过头（尾部静止比整段还长）：没有可用区间，返回 null 而不是负长度的段
+    if (end - start < 1) return null;
+    // 两只手都从 start 起有真数据（start 是首帧较晚的那只手的首帧），
+    // 所以只要那只手有数据就算 covers
+    return this.resample(
+      start,
+      end - start,
+      this.left.length > 0,
+      this.right.length > 0,
+      label
+    );
+  }
+
+  /** 缓冲里两只手**共同**覆盖的时长（ms）；不足以推理时返回 null */
+  spanMs(): number | null {
+    const end = this.latestTime();
+    if (end === null) return null;
+    const firsts: number[] = [];
+    if (this.left.length) firsts.push(this.left[0].t);
+    if (this.right.length) firsts.push(this.right[0].t);
+    return firsts.length ? end - Math.max(...firsts) : null;
+  }
+
+  private resample(
+    start: number,
+    windowMs: number,
+    hasLeft: boolean,
+    hasRight: boolean,
+    label: string
+  ): SequenceSample | null {
+    if (!hasLeft && !hasRight) return null;
     const dt = 1000 / this.gridFps;
     const T = Math.floor(windowMs / dt);
     if (T < 4) return null;
-
-    // 缓冲还没攒够一整个窗口就别推理 —— 前半段会被最近邻拉成一条直线，
-    // 那是个"静止"的假动作，模型多半会输出错词
-    const covers = (buf: WindowEntry[]) => buf.length > 0 && buf[0].t <= start;
-    const hasLeft = covers(this.left);
-    const hasRight = covers(this.right);
-    if (!hasLeft && !hasRight) return null;
 
     const timestamps = new Float32Array(T);
     const leftSensor = hasLeft ? new Uint8Array(T * SEQ_SENSOR_N) : null;
