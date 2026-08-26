@@ -124,14 +124,17 @@ __pycache__/
 # 手工备份文件，不入库
 *.bak-*
 
-# 训练数据集导出（从浏览器 IndexedDB 导出的 dataset.bin/json，44MB+）与 keras 模型产物。
-# 都是构建输入/输出，不是源码。
+# 训练数据集导出（python_train/data/：从浏览器 IndexedDB 导出的 dataset.bin/json，43MB）
+# 与 keras 模型产物（python_train/out/）**入库**。
 #
-# ⚠ dataset.bin 是 IndexedDB 的**唯一备份**，忽略它意味着这份备份只存在于本机磁盘上。
-# 要异地留一份的话手工拷走，不要靠 git —— 几十 MB 的二进制进版本库以后每次
-# clone 都要拖，而且它会随采集不断变大。
-python_train/data/
-python_train/out/
+# 原本忽略了这两个目录，理由是"构建输入/输出不是源码"。改成入库的理由更重：
+# dataset.bin 是 IndexedDB 的**唯一备份**，忽略它就等于这份 399 条录制只存在于
+# 本机一块磁盘上，删了没有撤销。异地备份的价值大于仓库变大的代价。
+#
+# ⚠ 代价是真的：dataset.bin 是二进制，git 存不了增量，**每次重新导出并提交都会
+# 再加约 43MB 到仓库历史里，且永久不可回收**（除非 filter-repo 重写历史）。
+# 所以：采集完一批再导出一次，不要每改一点就提交。单文件 100MB 是 GitHub 的硬上限，
+# 现在 43MB，还能再涨一倍多；到那时候要转 git-lfs。
 
 # 例外：句子模型的**权重**要随代码部署（浏览器运行时从 /models/ 读），必须入库。
 # 只有 623KB，是 export_weights.py 从 out/ 里抽出来的推理所需部分
