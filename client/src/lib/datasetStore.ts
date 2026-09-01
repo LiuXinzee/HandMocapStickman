@@ -17,6 +17,7 @@
  */
 
 import type { ImuHealthReport } from "./imuHealth";
+import { templateKey } from "./sentenceTemplates";
 
 const DB_NAME = "hand_mocap_dataset";
 const DB_VERSION = 6; // v6: 新增 sequences store（时序样本）；旧 samples 保持不动，供合成迁移读取
@@ -127,6 +128,17 @@ export function isSentenceSample(s: { segments: SequenceSegment[] }): boolean {
 }
 
 /**
+ * 一条句子样本属于哪个句型。格式与 `sentenceTemplates.ts` 的 `templateKey` **同一个函数**，
+ * 所以采集页可以直接拿句型表里的 key 去查"这一句已经采了几条"。
+ *
+ * 词序就是句型的全部信息（CTC 只读标签顺序，见 `load_dataset.py` 的 `label_sequence`），
+ * 所以「我 爱 你」和「你 爱 我」必须是两个不同的 key。
+ */
+export function sampleTemplateKey(s: { segments: SequenceSegment[] }): string {
+  return templateKey(s.segments.map((g) => g.label));
+}
+
+/**
  * 一条时序样本 —— 列存（SoA）+ TypedArray。
  *
  * 为什么不用 `number[]`：一条 1.5s@100Hz 的双手序列用 JS number 存约 700KB，
@@ -182,6 +194,15 @@ export interface SequenceStats {
    * 才能在页面上如实说"另有 N 条句子样本，不参与孤立词训练"。
    */
   sentenceCount: number;
+  /**
+   * 按句型分的句子条数，key = `sampleTemplateKey`（标签序列用空格连起来）。
+   *
+   * 句子采集页要按句型显示 N/20 进度，而这件事**只能靠标签序列数**：
+   * 句子的 `primaryLabel` 只是它的第一个词，`labelCounts` 里也刻意不含句子。
+   * 库里出现了句型表以外的 key 也照样统计（早期采的、或表改过），
+   * 采集页只挑自己关心的那几个 key 读。
+   */
+  sentenceCounts: Record<string, number>;
   /** 每个标签下 [真实, 合成] 条数。**只统计孤立词样本**，句子样本走 `sentenceCount` */
   labelCounts: Record<string, { recorded: number; synthesized: number }>;
   labels: string[];
@@ -415,6 +436,25 @@ export async function getSequencesByLabel(
 }
 
 /**
+ * 取某个句型下的所有句子样本（采集页的"这一句已有的样本"列表）。
+ *
+ * **不能直接用 `getSequencesByLabel(labels[0])`**：那个查的是 `primaryLabel` 索引，
+ * 而句子的 `primaryLabel` 就是它的第一个词 —— 查「我 爱 你」会把所有 `我` 的**孤立词**
+ * 一起捞出来，采集页会显示成"这一句已经采了 30 条"（其实一条没有），
+ * 而且删除按钮会删到孤立词样本上。
+ *
+ * 实现上仍然走那个索引拿候选（比全表扫快），再用 `isSentenceSample` + 逐位比标签筛。
+ */
+export async function getSentencesByTemplate(
+  labels: readonly string[]
+): Promise<SequenceSample[]> {
+  if (labels.length < 2) return []; // 少于两个词的不是句子（isSentenceSample 的判据）
+  const key = templateKey(labels);
+  const cands = await getSequencesByLabel(labels[0]);
+  return cands.filter((s) => isSentenceSample(s) && sampleTemplateKey(s) === key);
+}
+
+/**
  * 删除单条序列。序列样本比静态样本贵得多（录一条要摆位+做动作），
  * 录废了必须能单独剔掉而不是整个标签重录。
  */
@@ -428,20 +468,42 @@ export async function deleteSequence(id: number): Promise<void> {
   });
 }
 
-export async function deleteSequencesByLabel(label: string): Promise<void> {
+/**
+ * 删掉一个词的**全部孤立词样本**（录制的 + 合成的），返回删了几条。
+ *
+ * ⚠ **句子样本不删。** `primaryLabel` 索引对句子样本来说是它的**第一个词**
+ * （见 `sentenceSamplesFor`），所以按 `primaryLabel = "i"` 开游标会一并扫到
+ * 「我爱你」「我叫…」这些句子录制。整段删掉的话，用户点的是"重录我这个词"，
+ * 丢掉的却是几十条打了十几分钟的句子 —— 而且界面上不会有任何提示，因为
+ * 句子条数走的是 `sentenceCount`/`sentenceCounts`，和 `labelCounts` 是两套。
+ * 这里用 `isSentenceSample` 逐条挡掉，与 `getSequenceStats` 刻意不把句子计入
+ * `labelCounts` 是同一条口径。
+ *
+ * 合成样本一起删是有意的：合成是从该词的录制派生的（`synth_sentences.py` /
+ * 静态词序列化），录制换了打法之后旧的合成件比录制本身更误导。
+ *
+ * 走 IndexedDB，单测覆盖不到（仓库里没装 fake-indexeddb）；能测的判据
+ * `isSentenceSample` 已经在 datasetStore.test.ts 里锁住了。
+ */
+export async function deleteWordSequencesByLabel(
+  label: string
+): Promise<number> {
   const db = await openDB();
   return new Promise((resolve, reject) => {
+    let deleted = 0;
     const tx = db.transaction(STORE_SEQUENCES, "readwrite");
     const index = tx.objectStore(STORE_SEQUENCES).index("primaryLabel");
     const request = index.openCursor(label);
     request.onsuccess = (event) => {
       const cursor = (event.target as IDBRequest<IDBCursorWithValue>).result;
-      if (cursor) {
+      if (!cursor) return;
+      if (!isSentenceSample(cursor.value as SequenceSample)) {
         cursor.delete();
-        cursor.continue();
+        deleted++;
       }
+      cursor.continue();
     };
-    tx.oncomplete = () => resolve();
+    tx.oncomplete = () => resolve(deleted);
     tx.onerror = () => reject(tx.error);
   });
 }
@@ -500,6 +562,7 @@ export async function getSequenceStats(): Promise<SequenceStats> {
   let totalDuration = 0;
   let estimatedBytes = 0;
   let sentenceCount = 0;
+  const sentenceCounts: SequenceStats["sentenceCounts"] = {};
   const handCounts = { leftOnly: 0, rightOnly: 0, both: 0, neither: 0 };
 
   for (const s of seqs) {
@@ -519,6 +582,8 @@ export async function getSequenceStats(): Promise<SequenceStats> {
     // 虚增条数 —— 采集页会据此显示"这个词够了"，而其实一条孤立词都没多
     if (isSentenceSample(s)) {
       sentenceCount++;
+      const k = sampleTemplateKey(s);
+      sentenceCounts[k] = (sentenceCounts[k] ?? 0) + 1;
       continue;
     }
     const entry = (labelCounts[s.primaryLabel] ??= {
@@ -536,6 +601,7 @@ export async function getSequenceStats(): Promise<SequenceStats> {
     recordedCount,
     synthesizedCount,
     sentenceCount,
+    sentenceCounts,
     labelCounts,
     labels: Object.keys(labelCounts),
     avgDurationMs: seqs.length ? totalDuration / seqs.length : 0,
@@ -658,6 +724,28 @@ export interface SeqArrayRef {
   dtype: "uint8" | "float32";
 }
 
+/**
+ * 这条录制"动作真正开始/结束"的帧区间，由 `sequenceTrim.detectSignSpan` 判出。
+ *
+ * **为什么在浏览器算完再导出，而不是让 Python 自己判**：判据要视觉关键点、
+ * 要 `localStorage` 里的弯折两点标定，在 Python 重实现一遍就是 `load_dataset.py`
+ * 开头明令禁止的那种双实现（"改一边就要改另一边"）。这里是**一份实现、两处消费**：
+ * 浏览器训词模型时直接用 span 切栅格，Python 合成句子时按同一个 span 切片。
+ *
+ * `applied` 为假时 start/end 就是整条 —— 但 `reason` 仍然有信息量：
+ * `full_span` 是"判过了、没什么可裁"，`no_vision` 是"判据压根没运行"。
+ */
+export interface SeqTrimSpan {
+  startFrame: number;
+  /** 不含 */
+  endFrame: number;
+  applied: boolean;
+  reason: string;
+  keptRatio: number;
+  /** 第三层（触觉静止段）有没有运行 —— 没运行意味着收尾静止还在数据里 */
+  tactileRan: boolean;
+}
+
 export interface SeqManifestEntry {
   segments: SequenceSegment[];
   primaryLabel: string;
@@ -667,6 +755,8 @@ export interface SeqManifestEntry {
   origin: "recorded" | "synthesized";
   timestamp: number;
   arrays: Record<string, SeqArrayRef | null>;
+  /** seq-1.1 起。`null` = 导出时没传标定，也就没算（不是"不用裁"） */
+  trimSpan: SeqTrimSpan | null;
 }
 
 export interface SeqManifest {
@@ -717,15 +807,35 @@ const SEQ_ARRAY_LAYOUT: Record<
  * Float32 段按 4 字节对齐（在 uint8 段之后补 padding），
  * 否则 numpy 在部分平台上 frombuffer 会因未对齐而报错。
  */
-export async function exportSequencesBinary(): Promise<{
+export async function exportSequencesBinary(
+  trimOf?: SeqTrimSpanFn
+): Promise<{
   bin: ArrayBuffer;
   manifest: SeqManifest;
 }> {
-  return encodeSequencesBinary(await getAllSequences());
+  return encodeSequencesBinary(await getAllSequences(), trimOf);
 }
 
-/** exportSequencesBinary 的纯函数内核（不碰 IndexedDB，可单测 round-trip） */
-export function encodeSequencesBinary(seqs: SequenceSample[]): {
+/**
+ * 逐条判出 `trimSpan` 的函数。用 `trimSpanForExport`（`sequenceTrim.ts`）。
+ *
+ * 为什么传函数而不是在这里直接 `import { detectSignSpan }`：`sequenceTrim` 已经
+ * import 本文件（要 `SEQ_LANDMARK_N` 等），反向再连一条就成了运行时循环依赖。
+ * 传函数把判据留在它自己的模块里，本文件仍然只管存取。逐条回调而不是"给我一个
+ * 数组"也顺手消掉了下标错位那类隐患。
+ */
+export type SeqTrimSpanFn = (sample: SequenceSample) => SeqTrimSpan | null;
+
+/**
+ * exportSequencesBinary 的纯函数内核（不碰 IndexedDB，可单测 round-trip）。
+ *
+ * 不传 `trimOf` 时 `trimSpan` 全为 `null` —— 那是"没算"，不是"不用裁"。
+ * Python 侧在要求裁剪时会对着 null 报错，不会静默不裁。
+ */
+export function encodeSequencesBinary(
+  seqs: SequenceSample[],
+  trimOf?: SeqTrimSpanFn
+): {
   bin: ArrayBuffer;
   manifest: SeqManifest;
 } {
@@ -761,6 +871,7 @@ export function encodeSequencesBinary(seqs: SequenceSample[]): {
       origin: s.origin,
       timestamp: s.timestamp,
       arrays,
+      trimSpan: trimOf ? trimOf(s) : null,
     });
   }
 
@@ -781,7 +892,9 @@ export function encodeSequencesBinary(seqs: SequenceSample[]): {
   return {
     bin,
     manifest: {
-      version: "seq-1.0",
+      // seq-1.1：每条多了 `trimSpan`。Python 侧 load_dataset.py 两个版本都读，
+      // 但在"要求按 span 裁剪"时会对 seq-1.0 报错而不是静默不裁
+      version: "seq-1.1",
       exportedAt: new Date().toISOString(),
       totalSequences: seqs.length,
       sensorN: SEQ_SENSOR_N,

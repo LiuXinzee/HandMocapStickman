@@ -28,13 +28,12 @@ import type { SequenceSample } from "./datasetStore";
 import { SEQ_SENSOR_N } from "./datasetStore";
 import {
   detectSignSpan,
+  leadingStillMs,
   DEFAULT_TRIM,
   type TrimReason,
 } from "./sequenceTrim";
 import {
-  IDLE_ENERGY,
   judgeSampleDominance,
-  sampleEnergies,
   type BendRanges,
   type SampleDominance,
 } from "./dominantHand";
@@ -43,15 +42,6 @@ import { IDLE_LABEL } from "./signLanguageVocab";
 
 /** 时长偏离该词中位数超过这个倍数 → 记为离群。两倍速的同一个词在特征空间里不是一个东西 */
 export const DURATION_OUTLIER_RATIO = 1.5;
-
-/**
- * 找静止头段时前缀的最小长度 / 扫描步长（ms）。
- *
- * 这也是这项测量的分辨率。不能取太小：能量里的弯折那一路是窗口内的 σ，
- * 前缀太短时 σ 只反映几帧噪声，判不出"动了没有"。200ms @ 50Hz = 10 帧，
- * 对"头段是 0 还是 800ms"这个量级的问题够用了。
- */
-export const ONSET_PROBE_MS = 200;
 
 export type TrimReasonCounts = Record<TrimReason, number>;
 export type DominanceCounts = Record<SampleDominance, number>;
@@ -150,47 +140,14 @@ function frozenHandsOf(sample: SequenceSample): string[] {
   return out;
 }
 
-/**
- * 这条录制**开头有多少毫秒没人在动** —— 纯触觉判据，与视觉裁剪独立。
- *
- * 为什么必须另做一份而不看 `trimReason`：起手段裁剪是纯视觉的，它找的是关键点
- * 速度谷底。手一开始就已经举在画面里时，判据找不到谷底就返回 `full_span` ——
- * 那只意味着"没找到可裁的地方"，**不等于"开头没有静止段"**。实测 08-17 批
- * 242 条里 167 条是 `full_span`，这 167 条的头段长度在报告里此前完全没有数字。
- *
- * 这个数为什么要紧：训练是把（裁剪后的）整段重采样到 32 帧的。头段越长，
- * 这个词的 32 帧里"什么都没发生"的比例越大，也就是**这个词的标签被贴到了静止上**。
- * 滑窗推理时手放着不动的窗口，模型就会正确地（按它学到的东西）输出这些词。
- *
- * 判据用"前缀整体的能量"而不是"局部小窗的能量"：`IDLE_ENERGY` 这个门限是在
- * 整段尺度上校准的（数据体检对 399 条真实录制的判定），拿它去卡一个 200ms 小窗
- * 会偏严 —— 小窗里的 σ 天然比整段的 σ 小，会把动作的头几百毫秒也算成静止。
- */
-function leadingStillMs(sample: SequenceSample, ranges: BendRanges): number {
-  const T = sample.frameCount;
-  if (T < 4 || !(sample.durationMs > 0)) return 0;
-  const dt = sample.durationMs / (T - 1);
-  const step = Math.max(3, Math.round(ONSET_PROBE_MS / dt));
-
-  let still = 0;
-  for (let n = step; n <= T; n += step) {
-    const { left, right } = sampleEnergies(sample, ranges, 0, n);
-    // 取两只手较大者：单手词只有一只手动，用平均会把头段算长
-    const peak = Math.max(left?.total ?? 0, right?.total ?? 0);
-    // 前缀一整段都还在静止门限下 → 动作至少要到 n 帧之后才开始
-    if (peak >= IDLE_ENERGY) return still * dt;
-    still = n;
-  }
-  // 扫到末尾都没超过门限：整条录制都没有动作（空录）
-  return sample.durationMs;
-}
-
 function auditSample(
   sample: SequenceSample,
   index: number,
   ranges: BendRanges
 ): PerSampleAudit {
-  const trim = detectSignSpan(sample, DEFAULT_TRIM);
+  // 体检要看的是**训练实际会用的那个口径**，所以标定要传进去 —— 不传的话
+  // 第三层（触觉静止段）整层不跑，报告里的 trimReason 会比训练时乐观
+  const trim = detectSignSpan(sample, { ...DEFAULT_TRIM, ranges });
   const dom = judgeSampleDominance(sample, ranges);
   const health =
     sample.imuHealth ??
@@ -349,8 +306,12 @@ function collectFlags(
   //
   // 分界线是 no_vision 和其余，不是 applied 和其余：`full_span` 意味着判据跑了、
   // 结论是"整段都在做动作、没有起手段可裁"—— 那是一个**经过确认**的口径。
-  // `no_vision` 是判据根本没运行（`detectSignSpan` 开头就返回了），
-  // 那一批里有多少预备动作**完全未知**。这两者混在一个数据集里同样致命。
+  // `no_vision` 是判据根本没运行，那一批里有多少预备动作**完全未知**。
+  // 这两者混在一个数据集里同样致命。
+  //
+  // 补了第三层（触觉静止段）之后，`no_vision` 只在**没有弯折标定**时还会出现 ——
+  // 有标定的话无视觉样本也会被判过一遍，落到 applied / full_span。所以这条 flag
+  // 现在同时兼任"标定没做"的告警，下面那句"修法"照旧适用（去做两点标定）。
   const judgedDays = byDay.filter((d) => d.trim.applied + d.trim.full_span > 0);
   const blindDays = byDay.filter(
     (d) => d.trim.applied + d.trim.full_span === 0 && d.trim.no_vision > 0
@@ -363,8 +324,9 @@ function collectFlags(
         `（裁掉 ${cut} 条 / 确认全程有效 ${full} 条）；` +
         `而 ${blindDays.map((d) => d.key).join("/")} 全是 no_vision（没开摄像头），` +
         `判据一次都没运行，那一批有多少预备动作完全未知。` +
-        `同一个词于是有两种时间口径 —— 这是最该先修的一项，` +
-        `修法是给无视觉样本补一套纯触觉的裁剪判据。`
+        `同一个词于是有两种时间口径 —— 这是最该先修的一项。` +
+        `无视觉样本的触觉兜底判据（sequenceTrim 第三层）需要弯折两点标定，` +
+        `回第 1 步把两只手都标一遍，这一批就能被判过。`
     );
   } else if (overall.trim.no_vision === overall.count && overall.count > 0) {
     flags.push(
@@ -393,8 +355,10 @@ function collectFlags(
    * 窗口输出它们，是**按它学到的东西正确作答** —— 这种错查不出来是因为看模型、
    * 看特征、看窗口长度都是对的，错在标签。
    *
-   * 与 `trimReason` 独立：视觉裁剪判据在手一开始就举在画面里时返回 `full_span`，
-   * 那是"没找到可裁的地方"，不是"没有静止头段"。见 `leadingStillMs`。
+   * 与 `trimReason` **不再独立**：这个测量（`leadingStillMs`）已经被提进
+   * `sequenceTrim` 当第三层判据了，所以有标定时这里报的头段基本会被真的裁掉。
+   * 这份排行现在读作"**如果**第三层没跑（没标定），静止会贴到哪些词上"，
+   * 以及第三层实际切了多少的对照 —— 排行还很高就说明标定没生效。
    */
   const headRanked = byLabel
     .filter((l) => l.key !== IDLE_LABEL)

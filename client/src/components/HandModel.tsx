@@ -1,8 +1,21 @@
 /*
- * HandModel — 由「弯折通道 + IMU 四元数」直接驱动的 3D 手模
+ * HandModel — 由「弯折通道 + IMU 四元数」直接驱动的 3D 手模（**单手一个 Canvas**）
  *
  * 移植自 glove_visual/cc_part2 的 HandScene.tsx（同一份硬件协议的分叉项目），
  * 按 deaf-kit 改成单手 + Cyberpunk HUD 配色 + 白手套材质。
+ *
+ * ⚠ **一手一个 Canvas，这是全项目唯一的手模视口**：`/mocap` 的四格自检、
+ * 向导里的示意手模、`/translate` 底部的两格，用的都是这一个组件。
+ *
+ * 曾经还有一个 `SigningStage.tsx`：两只手 + 躯干剪影放进同一个场景，读起来像
+ * 一个人在打手语。**已经删掉了**，理由不是观感 —— 手语的**位置**是语言学通道
+ * （额头 / 下巴 / 胸前是不同的词），而手套只有弯折 + 压力 + IMU：IMU 给朝向不给
+ * 位置，加速度二次积分在手上无 ZUPT 可重置，六轴还观测不到绝对 yaw。所以那个
+ * 场景里手的位置只能是常量，看着像"在打手语"却仍然展示不出一个完整的手语词，
+ * 只是把"位置是编的"藏得更深。要合回去，先得真有位置观测。
+ *
+ * 骨骼驱动那段（`SEGMENT_MAX_DEG` / rest 四元数 / slerp 收敛）**不要复制第二份**：
+ * 那几个角度是离屏 FK 验算过的解剖学行程，复制出去两边就会各自漂。
  *
  * 为什么不用骨架回归模型的 21 关键点来驱动：
  *  1. 这条链路要能在**没有任何已训练模型**时就工作，否则新装机器上一片黑；
@@ -31,6 +44,33 @@ import { clone as cloneSkeleton } from "three/addons/utils/SkeletonUtils.js";
 
 const MODEL_URL = "/assets/hand1.glb";
 
+/*
+ * ===== hand1.glb 的实测尺寸 =====
+ *
+ * 全部从 glb 里量出来的，不是估的：网格空间的 POSITION 包围盒 + skin 的
+ * inverseBindMatrices（骨骼在网格空间的位置）。量法记在这里，换模型时能复现：
+ *
+ *   POSITION  x∈[-4.81, 2.14]  y∈[-2.08, 1.10]  z∈[-9.19, 7.06]
+ *   Wrist 骨在 (0.28, 0.48, 0.00) —— **腕就在网格原点**，所以下面 AnimatedHand 里
+ *   那个 `position={[0,-1.2,0]}` 放的确实是腕关节。
+ *   Forearm_00（肘端）在 z=-12.68，Finger_23（中指尖）在 z=+10.59。
+ *
+ * 内层 group 的 `rotation={[-π/2,0,0]}` 把网格的 z 转成竖直方向，外层 scale 0.78，
+ * 于是相对腕关节、以世界单位算：
+ *   腕 → 指尖（上）  7.06 × 0.78 = 5.51
+ *   腕 → 前臂末端（下） 9.19 × 0.78 = 7.17  ← **比手掌本身还长**
+ *   腕 → 拇指侧（横） 4.81 × 0.78 = 3.75
+ *   腕 → 小指侧（横） 2.14 × 0.78 = 1.67
+ *
+ * 两条用得上的推论：
+ *  1. **模型自带前臂**（`Forearm_00/01` 两根骨头）。别再往腕上加一根 capsule ——
+ *     加过，结果是同一个腕点上长出两根前臂、还呈夹角岔开，看着就是两根柱子。
+ *     自带那根跟着手刚性转，"前臂倾斜"由它提供；代价是手转 90° 时会横扫出画。
+ *  2. 下面 Canvas 的取景：竖直 FOV 34° @ 距离 17 → 半高 17·tan17° = 5.20，
+ *     而腕→指尖是 5.51 —— 手**撑满竖直方向**。所以视口有多高就决定手有多大，
+ *     把框加宽不会让手变大。调用方分配高度时按这个来。
+ */
+
 /**
  * 实物手套是**白色**的（规格书 p12 写"黑色面料"与实物不符），
  * 所以用 cc_part2 的 white 预设：亮面料 + 低粗糙度 + 一点点金属感。
@@ -41,9 +81,23 @@ const HAND_MATERIAL = {
   metalness: 0.08,
 } as const;
 
-/** 本页主色（琥珀）与全站强调色（青） */
-const AMBER = "#f59e0b";
-const CYAN = "#00f0ff";
+/**
+ * 缺手那一侧的材质：灰、半透明。
+ *
+ * **不能什么都不画。** 一只手套没连上时画面里少一只手，看起来和"这个词是单手词"
+ * 一模一样 —— 用户会以为系统在正常工作。画成灰影 + 画面内文字才分得出
+ * "没戴/没连" 和 "戴着不动"。
+ */
+const HAND_MATERIAL_DIMMED = {
+  color: "#2b3644",
+  roughness: 0.9,
+  metalness: 0,
+  opacity: 0.38,
+} as const;
+
+/** 本页主色（琥珀）与全站强调色（青）。导出出去，避免各处配色各自漂 */
+export const AMBER = "#f59e0b";
+export const CYAN = "#00f0ff";
 
 /** 指节绕这个局部轴弯曲；右手镜像组会把局部旋转一并镜像，故左右同符号 */
 const AXIS = new Vector3(0, 0, 1);
@@ -128,12 +182,21 @@ function JointBeacons({
   );
 }
 
-function AnimatedHand({
+/**
+ * 一只手的骨骼驱动。**全项目只有这一份** —— 见文件头那条警告。
+ *
+ * 它只负责"手本身"：位置固定在 `[0,-1.2,0]`（该 group 的原点就是腕关节的旋转支点，
+ * 外层再包一层 `position` 做摆位是安全的）。前臂是 glb 自带的，不用也不该另画。
+ */
+export function AnimatedHand({
   driveRef,
   side,
+  dimmed = false,
 }: {
   driveRef: RefObject<HandDrive>;
   side: "left" | "right";
+  /** 这只手套没连上：画成灰影、并且不画关节光点（光点会让它看着像在工作） */
+  dimmed?: boolean;
 }) {
   const gltf = useGLTF(MODEL_URL);
   // 必须 clone：直接用 gltf.scene 会让所有实例共享同一套骨骼状态
@@ -153,18 +216,26 @@ function AnimatedHand({
         const materials = Array.isArray(node.material) ? node.material : [node.material];
         // 克隆材质避免实例间共享；负缩放镜像会翻转三角形绕序，必须双面渲染，
         // 否则右手只剩内表面可见（看起来像"反面"）。
+        const preset = dimmed ? HAND_MATERIAL_DIMMED : HAND_MATERIAL;
         const cloned = materials.map((material) => {
           const copy = material.clone();
           copy.side = DoubleSide;
-          if ("color" in copy && copy.color) copy.color.set(HAND_MATERIAL.color);
-          if ("roughness" in copy) copy.roughness = HAND_MATERIAL.roughness;
-          if ("metalness" in copy) copy.metalness = HAND_MATERIAL.metalness;
+          if ("color" in copy && copy.color) copy.color.set(preset.color);
+          if ("roughness" in copy) copy.roughness = preset.roughness;
+          if ("metalness" in copy) copy.metalness = preset.metalness;
+          // 透明只在灰影档开：整个模型开 transparent 会走另一条排序路径，
+          // 正常档没必要为此付代价、也会让指缝出现穿透感
+          copy.transparent = dimmed;
+          copy.opacity = dimmed ? HAND_MATERIAL_DIMMED.opacity : 1;
+          copy.depthWrite = !dimmed;
           return copy;
         });
         node.material = Array.isArray(node.material) ? cloned : cloned[0];
       }
     });
-  }, [model]);
+    // dimmed 进依赖：连上/断开手套要立刻换材质。少了它断开后手仍是白的，
+    // 而"白手 + 不动"看起来就是"戴着没动"
+  }, [model, dimmed]);
 
   useFrame((_, delta) => {
     const drive = driveRef.current;
@@ -211,8 +282,24 @@ function AnimatedHand({
       <group rotation={[-Math.PI / 2, 0, 0]}>
         <primitive object={model} />
       </group>
-      <JointBeacons model={model} rootRef={handRef} />
+      {!dimmed && <JointBeacons model={model} rootRef={handRef} />}
     </group>
+  );
+}
+
+/**
+ * 场景灯光。**所有手模视口共用这一份** —— /mocap 自检那格和 /translate 那两格
+ * 必须看着是同一只手，各写一份灯光的话两页的手会呈现出不同的材质感，
+ * 很容易被当成"手模不一样"。
+ */
+export function HandSceneLights() {
+  return (
+    <>
+      <ambientLight intensity={1.35} />
+      <directionalLight position={[4, 7, 7]} intensity={2.3} color="#ffffff" />
+      <directionalLight position={[-6, 1, 4]} intensity={1.15} color={CYAN} />
+      <pointLight position={[0, -4, 4]} intensity={0.9} color={AMBER} />
+    </>
   );
 }
 
@@ -232,10 +319,7 @@ export default memo(function HandModel({ driveRef, side }: HandModelProps) {
       dpr={[1, 1.6]}
       gl={{ antialias: true, alpha: true }}
     >
-      <ambientLight intensity={1.35} />
-      <directionalLight position={[4, 7, 7]} intensity={2.3} color="#ffffff" />
-      <directionalLight position={[-6, 1, 4]} intensity={1.15} color={CYAN} />
-      <pointLight position={[0, -4, 4]} intensity={0.9} color={AMBER} />
+      <HandSceneLights />
       <Suspense fallback={null}>
         <AnimatedHand driveRef={driveRef} side={side} />
       </Suspense>

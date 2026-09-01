@@ -53,6 +53,39 @@ function rampInput(seqLen: number, frameDim: number, mod: number): Float32Array 
 describe.skipIf(!hasArtifacts)("loadSentenceModel（需要构建产物）", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  /**
+   * **这条必须排在数值对照前面。**
+   *
+   * fixture 和 weights.bin 是同一次训练的两个产物，但由两个脚本分别生成
+   * （export_fixture.py / export_weights.py）。重训之后只跑了后者的话，下面那条
+   * 逐位对照会报 `maxDiff = 1` —— 而它的注释把 1e-2 以上的偏差解释成
+   * "BN epsilon 用错 / 权重错位"，于是排查方向被直接带偏到层实现上去。
+   *
+   * 页面上「导出到浏览器」现在是一个按钮（vite-plugin-train-bridge 的 /export），
+   * 所以"导了权重没重生成 fixture"会反复发生。这条把它认出来并说清怎么修。
+   */
+  it("fixture 与部署的权重出自同一次训练", async () => {
+    const meta = (
+      JSON.parse(readFileSync(`${MODEL_DIR}/weights.json`, "utf8")) as {
+        meta: Record<string, unknown>;
+      }
+    ).meta;
+    const want = fixture.provenance.trainMeta as Record<string, unknown> | undefined;
+    if (!want) {
+      throw new Error(
+        "fixture 里没有 provenance.trainMeta —— 它是用旧版 export_fixture.py 生成的。" +
+          "在 python_train/ 跑一次 `python export_fixture.py` 重生成。"
+      );
+    }
+    const got = Object.fromEntries(Object.keys(want).map((k) => [k, meta[k]]));
+    expect(
+      got,
+      "fixture 与 client/public/models/seq_sentence/ 的权重来自不同的训练。" +
+        "重训 + 导出之后要跟着跑 `python export_fixture.py`（在 python_train/ 下）。" +
+        "不要去查 tfjs 的层实现 —— 下面那条 maxDiff 断言此时必然失败，但那是果不是因。"
+    ).toEqual(want);
+  });
+
   it("加载成功，meta 与 fixture 一致", async () => {
     stubFetch();
     const loaded = await loadSentenceModel("/models/seq_sentence");

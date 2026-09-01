@@ -66,14 +66,20 @@ def main():
     ap.add_argument("--samples", type=int, default=6, help="错例/正确例各一半")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--val-split", type=float, default=0.2)
+    # 这两个必须与训练那一轮传的**一致**,否则验证集不是同一批(见下面的同序注释)
+    ap.add_argument("--exclude-words", nargs="*", default=[], metavar="WORD",
+                    help="训练那一轮传给 train_seq.py 的 --exclude-words,原样照抄")
+    ap.add_argument("--no-hand-norm", dest="hand_norm", action="store_false", default=True,
+                    help="训练那一轮传了 --no-hand-norm 时才加")
     ap.add_argument("--synth-per-template", type=int, default=24)
     args = ap.parse_args()
 
     import keras
 
     from ctc_decode import greedy_decode
+    from dominant_hand import format_stats, normalize_samples_to_right
     from load_dataset import load_dataset
-    from synth_sentences import synthesize_sentences
+    from synth_sentences import UNTRAINED_WORDS, synthesize_sentences
     from train_seq import build_ctc_xy, split_by_sequence
 
     meta = json.loads(Path(args.meta).read_text(encoding="utf-8"))
@@ -90,9 +96,28 @@ def main():
     ramp_dec = greedy_decode(pr, blank)
 
     # --- 2. 真实(合成)验证句 ---
+    # ⚠ 下面这几步必须与 train_seq.main() **同序**:归一化 → 拆词/句 → drop → 划分。
+    # 顺序错一步,rng 消耗的次序就变了,划出来的验证集与训练时不是同一批,
+    # fixture 里存的"错例"就成了假的。2026-08-30 踩过一次:这里少了归一化,
+    # 拿混手别的数据去考只学过右手的模型,354 条里 209 条"不一致" ——
+    # 看着像模型烂掉了,其实是考卷用的口径不对。
     all_seqs, labels = load_dataset(args.data)
+
+    if args.hand_norm:
+        all_seqs, hstats = normalize_samples_to_right(all_seqs)
+        print(format_stats(hstats))
+    else:
+        print("⚠️  --no-hand-norm:验证集留在原始手别口径(只在给对照实验模型出 fixture 时用)")
+
     word_seqs = [s for s in all_seqs if not s.is_sentence]
     sent_seqs = [s for s in all_seqs if s.is_sentence]
+
+    drop = set(UNTRAINED_WORDS) | set(args.exclude_words)
+    if drop:
+        word_seqs = [s for s in word_seqs if s.primary_label not in drop]
+        sent_seqs = [s for s in sent_seqs if not (drop & set(s.label_sequence))]
+        print(f"排除不训练的词 {sorted(drop)}:剩孤立词 {len(word_seqs)} / 句子 {len(sent_seqs)}")
+
     rng = np.random.default_rng(args.seed)
     real_tr, real_va = split_by_sequence(sent_seqs, args.val_split, rng) if sent_seqs else ([], [])
     w_tr, w_va = split_by_sequence(word_seqs, args.val_split, rng)
@@ -158,6 +183,17 @@ def main():
             "synthPerTemplate": args.synth_per_template,
             "valSize": int(len(xv)),
             "valMismatched": int(n_bad),
+            # 这一份 fixture 出自哪次训练。**JS 侧用它对账**:
+            # export_weights.py 把同一个 meta 抄进 weights.json,两边对不上就说明
+            # 模型重新导过、fixture 没重生成。
+            #
+            # 少了这一条的表现是:sentenceModel.test 报 maxDiff=1、
+            # 提示指向"tfjs 与 keras 的层实现不一致",而真正的原因是 fixture 过期。
+            # 网页上「导出到浏览器」现在是一个按钮,这件事会反复发生
+            "trainMeta": {
+                k: meta.get(k)
+                for k in ("valWer", "numTrain", "numVal", "numReal", "synthOnly")
+            },
         },
         "ramp": {
             "formula": f"x[t][d] = ((t * {frame_dim} + d) % {RAMP_MOD}) / {RAMP_MOD}",

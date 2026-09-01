@@ -1,4 +1,8 @@
-# 序列数据集导出格式（seq-1.0）
+# 序列数据集导出格式（seq-1.1）
+
+> **1.0 → 1.1**：每条序列多了 `trimSpan`（见下）。二进制布局一个字节都没变，
+> 1.0 的数据集照样读得进来 —— 但**要求按 span 裁剪时会报错而不是静默不裁**。
+
 
 浏览器端 `/train-seq` 页面的「导出数据集给 Python」按钮产出两个文件，放进 `python_train/data/`：
 
@@ -18,7 +22,7 @@ python_train/data/
 
 ```jsonc
 {
-  "version": "seq-1.0",
+  "version": "seq-1.1",
   "exportedAt": "2026-08-10T12:00:00.000Z",
   "totalSequences": 612,
   "sensorN": 137,          // 每帧每手的传感点数
@@ -48,6 +52,14 @@ python_train/data/
         "leftSensor":     { "offset": 300,   "length": 10275, "dtype": "uint8"   },
         "rightLandmarks": null,     // 该手/该模态缺失
         ...
+      },
+      "trimSpan": {                  // seq-1.1 起。null = 导出时没算
+        "startFrame": 12,            // 含
+        "endFrame": 68,              // 不含
+        "applied": true,             // false 时 start/end 就是整条
+        "reason": "applied",         // applied|full_span|no_vision|no_run|too_short
+        "keptRatio": 0.74,
+        "tactileRan": true           // 第三层（触觉静止段）跑过没有
       }
     }
   ]
@@ -74,6 +86,19 @@ uint8 段字节数 = length，float32 段字节数 = length × 4。
 **`segments` 是词边界列表**。孤立词是长度为 1、覆盖全段的特例；句子级（连续手语）
 用同一个 schema 装多个 segment，不需要改数据库或重新采集。CTC 训练直接读
 `[seg.label for seg in segments]` 作为目标标签序列。
+
+**`trimSpan` 是「动作真正开始/结束」的帧区间**，由浏览器端 `sequenceTrim.detectSignSpan`
+三层判据给出：① 手在画面里的最长连续段；② 段内的速度谷底（抬手 transport 的终点，
+带弯折成形钳位）；③ 触觉能量低于静止门限的头尾段。**只有第三层会裁尾。**
+
+- 为什么不在 Python 里判：判据要视觉关键点 **和** 浏览器 `localStorage` 里的弯折两点标定。
+  在这边重实现一遍就是本文件开头那条禁令说的双实现。一份实现、两处消费。
+- `applied: false` 时 `reason` 仍有信息量：`full_span` 是"判过了、没什么可裁"，
+  `no_vision` / `no_run` 是"判据压根没运行"，这两者混在一个数据集里 = 同一个词两种时间口径。
+- `tactileRan: false` 意味着**收尾静止还在数据里**（导出时没做弯折标定）。合成句子时
+  这一段会顶在句尾，而推理端 `sentenceEnvelope` 会把尾部 800ms 静止掐掉 —— 口径就差了。
+- 整条为 `null`（1.0 的数据集也一样）时，要求裁剪的调用方**必须报错**，不能静默不裁：
+  静默的唯一症状是 WER 差几个点，没有任何线索指回这里。
 
 **`origin: "synthesized"`** 的样本是从旧的单帧静态样本合成出来的（低通相关噪声扩帧），
 帧间统计与真实录制不完全一致。`load_dataset.py --recorded-only` 可以只要真实数据。

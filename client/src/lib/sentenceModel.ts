@@ -17,6 +17,9 @@
  * 走转换器时同类问题的典型症状是加载成功但权重对错位 ——
  * 线上表现为"能跑、有置信度、每个词都错"。
  *
+ * 读 manifest / 填权重那套现在在 `modelWeights.ts`，与孤立词模型
+ * （`wordModel.ts`）共用一份 —— 两边导出格式相同，抄两份会漂。
+ *
  * ===== 模型是静态文件，不进 IndexedDB =====
  *
  * 浏览器自己训的孤立词模型存在 IndexedDB（`datasetStore` 的 SavedModel）。
@@ -27,7 +30,15 @@ import * as tf from "@tensorflow/tfjs";
 import type { SequenceSample } from "./datasetStore";
 import { buildSeqSentenceStudent, type SeqBackbone } from "./sequenceModel";
 import { buildSequenceFeatures, TACTILE_FRAME_DIM } from "./sequenceFeatures";
-import { decodeToWords, greedyDecode } from "./ctcDecode";
+import type { DecodedSpan } from "./ctcDecode";
+import { decodeToWords, greedyDecode, greedyDecodeSpans } from "./ctcDecode";
+import {
+  ModelMissingError,
+  fetchWeights,
+  fillWeights,
+  modelDeployed,
+  type WeightManifest,
+} from "./modelWeights";
 
 /** 默认部署位置。与 `export_weights.py --out` 的默认值对应 */
 export const SENTENCE_MODEL_DIR = "/models/seq_sentence";
@@ -55,24 +66,6 @@ export interface SentenceModelMeta {
   numSynth?: number;
 }
 
-interface WeightEntry {
-  shape: number[];
-  /** 元素下标（不是字节），×4 就是 byteOffset，天然满足 Float32Array 的对齐要求 */
-  offset: number;
-  count: number;
-}
-
-interface LayerEntry {
-  name: string;
-  weights: WeightEntry[];
-}
-
-interface WeightManifest {
-  format: string;
-  layers: LayerEntry[];
-  meta: SentenceModelMeta;
-}
-
 export interface LoadedSentenceModel {
   model: tf.LayersModel;
   meta: SentenceModelMeta;
@@ -84,6 +77,13 @@ export interface SentencePrediction {
   words: string[];
   /** 对应的类别下标 */
   indices: number[];
+  /**
+   * 每个词占的输出帧区间，与 `words` / `indices` 一一对应、等长。
+   *
+   * 拇指压力闸门在句子路径上靠它只看**那个词**的那几帧 —— 见
+   * `greedyDecodeSpans` 的注释里那条「好看全段峰值 26」的实测。
+   */
+  spans: DecodedSpan[];
   /** 逐帧概率 [outputFrames * (numClasses+1)]，给 UI 画时间轴或调试用 */
   perFrame: Float32Array;
   outputFrames: number;
@@ -91,25 +91,16 @@ export interface SentencePrediction {
   blankIndex: number;
 }
 
-/** 没部署模型（404）。**要和"部署了但坏了"分开** —— 前者是正常状态，UI 要给引导文案 */
-export class SentenceModelMissingError extends Error {
-  constructor(url: string) {
-    super(`没有找到句子模型（${url}）。先在 python_train/ 跑 train_seq.py --ctc，再跑 export_weights.py。`);
-    this.name = "SentenceModelMissingError";
-  }
-}
+/**
+ * 没部署句子模型（404）。
+ *
+ * 现在是 `ModelMissingError` 的别名 —— 抽共享加载器时错误类型跟着共用了一个。
+ * 保留这个名字是因为调用方（Translate 的探测逻辑、测试）按它做 instanceof 判断，
+ * 而"404 = 没部署，别的 HTTP 错 = 坏了"这条区分本身没变。
+ */
+export { ModelMissingError as SentenceModelMissingError } from "./modelWeights";
 
-async function fetchOrThrow(url: string): Promise<Response> {
-  let res: Response;
-  try {
-    res = await fetch(url);
-  } catch (e) {
-    throw new Error(`读取 ${url} 失败：${String(e)}`);
-  }
-  if (res.status === 404) throw new SentenceModelMissingError(url);
-  if (!res.ok) throw new Error(`读取 ${url} 失败：HTTP ${res.status}`);
-  return res;
-}
+const HINT = "先在 python_train/ 跑 train_seq.py --ctc，再跑 export_weights.py。";
 
 /**
  * 加载句子模型：读 manifest → 搭同构空网络 → 按层名填权重。
@@ -120,9 +111,7 @@ async function fetchOrThrow(url: string): Promise<Response> {
 export async function loadSentenceModel(
   dir: string = SENTENCE_MODEL_DIR
 ): Promise<LoadedSentenceModel> {
-  const manifest = (await (await fetchOrThrow(`${dir}/weights.json`)).json()) as WeightManifest;
-  const buf = await (await fetchOrThrow(`${dir}/weights.bin`)).arrayBuffer();
-
+  const { manifest, buf } = await fetchWeights<SentenceModelMeta>(dir, HINT);
   const meta = manifest.meta;
   if (!meta?.labels?.length) {
     throw new Error(`${dir}/weights.json 里没有 labels —— 无法把输出下标翻回词`);
@@ -149,55 +138,7 @@ export async function loadSentenceModel(
   }
 
   const model = buildSeqSentenceStudent(meta.labels.length, meta.seqLen, meta.backbone);
-  const byName = new Map(model.layers.map((l) => [l.name, l]));
-  const seen = new Set<string>();
-
-  try {
-    for (const entry of manifest.layers) {
-      const layer = byName.get(entry.name);
-      if (!layer) {
-        throw new Error(
-          `模型里没有层 "${entry.name}" —— 两边结构不同构（对照 sequenceModel.ts 的 tcnBackbone）`
-        );
-      }
-      const want = layer.getWeights();
-      if (want.length !== entry.weights.length) {
-        throw new Error(
-          `层 "${entry.name}" 权重个数不符：本端 ${want.length}，文件 ${entry.weights.length}`
-        );
-      }
-      const tensors = entry.weights.map((w, i) => {
-        const expected = want[i].shape;
-        const same =
-          expected.length === w.shape.length &&
-          expected.every((d, k) => d === w.shape[k]);
-        if (!same) {
-          throw new Error(
-            `层 "${entry.name}" 第 ${i} 个权重形状不符：本端 [${expected}]，文件 [${w.shape}]`
-          );
-        }
-        // slice 一份而不是直接引用 buf：tf.tensor 会持有这块内存，
-        // 而 buf 是整份权重（623KB），逐层引用会把整块留在内存里
-        const view = new Float32Array(buf, w.offset * 4, w.count).slice();
-        return tf.tensor(view, w.shape);
-      });
-      layer.setWeights(tensors);
-      tensors.forEach((t) => t.dispose());
-      seen.add(entry.name);
-    }
-
-    // 反向检查：本端有权重、但文件里没给的层。漏一层 BN 不会报错，
-    // 它会带着随机初始化的 gamma/beta 跑下去 —— 输出偏一点、词全错
-    const missing = model.layers
-      .filter((l) => l.getWeights().length > 0 && !seen.has(l.name))
-      .map((l) => l.name);
-    if (missing.length) {
-      throw new Error(`文件里缺这些层的权重：${missing.join(", ")}`);
-    }
-  } catch (e) {
-    model.dispose();
-    throw e;
-  }
+  fillWeights(model, manifest, buf, "对照 sequenceModel.ts 的 tcnBackbone");
 
   return { model, meta, dispose: () => model.dispose() };
 }
@@ -229,9 +170,22 @@ export function predictSentence(
 
   // 解码用 outputFrames（T/4），不是 seqLen。传错的话会多读 3 倍的帧、越界抛错
   const indices = greedyDecode(perFrame, meta.outputFrames, numClasses, meta.blankIndex);
+  /*
+   * 区间**另算一遍**而不是从区间反推 indices：`greedyDecode` 是被
+   * `sentenceCtcFixture.json` 逐条钉在 Python 解码结果上的那一条路，
+   * 输出的词序列必须一直由它决定。下面这个断言保证两者没有分岔 ——
+   * 分岔时区间和词就会错位一格，闸门去看别的词的帧,静默判错。
+   */
+  const spans = greedyDecodeSpans(perFrame, meta.outputFrames, numClasses, meta.blankIndex);
+  if (spans.length !== indices.length) {
+    throw new Error(
+      `greedyDecodeSpans 解出 ${spans.length} 个词、greedyDecode 解出 ${indices.length} 个 —— 两条解码路径分岔了`
+    );
+  }
   return {
     words: decodeToWords(indices, meta.labels),
     indices,
+    spans,
     perFrame,
     outputFrames: meta.outputFrames,
     numClasses,
@@ -243,11 +197,5 @@ export function predictSentence(
 export async function sentenceModelAvailable(
   dir: string = SENTENCE_MODEL_DIR
 ): Promise<boolean> {
-  try {
-    await fetchOrThrow(`${dir}/weights.json`);
-    return true;
-  } catch (e) {
-    if (e instanceof SentenceModelMissingError) return false;
-    throw e;
-  }
+  return modelDeployed(dir, HINT);
 }

@@ -5,12 +5,15 @@
  *
  * 1. **不丢词**（最要紧）。规则表没命中时必须原样拼接。吞词的失败模式是不可见的：
  *    人看到一句通顺的话，不知道模型其实还解出了别的词，会以为模型没认出来。
- * 2. **和句型表对齐**。规则表照 python_train/synth_sentences.py 的 SENTENCE_TEMPLATES
- *    写的，两份分别在两种语言里。下面把那张表原样抄过来逐条跑 —— 抄一份是故意的，
- *    Python 那边加了句型而这边忘了加时，这个测试会红。
+ * 2. **每条句型都顺得出汉语**。句型表从 `sentenceTemplates.ts` import ——
+ *    以前这里手抄了一份 66 句的常量，注释还写着"Python 那边改了这个测试会红"，
+ *    **那是假的**：它比的是自己那份字面量，Python 改了它什么都不知道。
+ *    真正的跨语言锁在 `sentenceTemplates.test.ts`（直接读 synth_sentences.py 解析比对）。
+ *    这个文件只管"TS 这份表里的每条句型，规则表能不能顺出汉语"。
  */
 import { describe, expect, it } from "vitest";
 import { mergeLabel } from "./labelMerge";
+import { SENTENCE_TEMPLATES } from "./sentenceTemplates";
 import {
   defaultPronoun,
   displayWord,
@@ -22,82 +25,20 @@ import {
 } from "./sentenceGrammar";
 
 /**
- * synth_sentences.py 的 SENTENCE_TEMPLATES（原始标签，未合并）。
- * 改这里之前先改那边 —— 反过来会训出顺不出汉语的句型。
+ * 句型表的别名。原本这里是手抄的 66 句常量，现在指向唯一来源
+ * （`sentenceTemplates.ts`，由 sentenceTemplates.test.ts 锁着与 Python 一致）。
  */
-const TEMPLATES: string[][] = [
-  ["you", "name", "what"],
-  ["i", "name", "is"],
-  ["hello", "you", "name", "what"],
-  ["you", "eat", "what"],
-  ["you", "speak", "what"],
-  ["you", "work", "what"],
-  ["you", "study", "what"],
-  ["hello", "you"],
-  ["hello", "i", "name", "is"],
-  ["goodbye", "you"],
-  ["thank_you", "you"],
-  ["sorry", "i"],
-  ["welcome", "you"],
-  ["welcome", "you", "we"],
-  ["i", "love", "you"],
-  ["you", "love", "i"],
-  ["i", "listen", "you"],
-  ["i", "help", "you"],
-  ["you", "help", "i"],
-  ["i", "speak", "you"],
-  ["i", "is_not", "happy"],
-  ["i", "is_not", "sad"],
-  ["i", "is_not", "angry"],
-  ["i", "is_not", "eat"],
-  ["you", "is_not", "listen"],
-  ["i", "happy"],
-  ["i", "sad"],
-  ["i", "eat"],
-  ["i", "drink"],
-  ["i", "work"],
-  ["i", "study"],
-  ["we", "study"],
-  ["we", "work"],
-  ["they", "study"],
-  ["you_pl", "listen"],
-  ["he", "is_not", "work"],
-  ["i", "thank_you", "you"],
-  ["i", "help", "you", "study"],
-  ["you", "eat", "drink"],
-  // 无主语句。这一组在 synth_sentences.py 里是为了压类先验加的
-  // （加之前 merged_pron_sg 独占 41% 的词位，模型一没把握就只输出代词）
-  ["name", "what"],
-  ["eat", "what"],
-  ["drink", "what"],
-  ["work", "what"],
-  ["study", "what"],
-  ["speak", "what"],
-  ["listen", "what"],
-  ["hello", "welcome"],
-  ["hello", "thank_you"],
-  ["goodbye", "thank_you"],
-  ["help", "thank_you"],
-  ["sorry", "goodbye"],
-  ["is_not", "happy"],
-  ["is_not", "angry"],
-  ["is_not", "sad"],
-  ["is_not", "eat"],
-  ["is_not", "drink"],
-  ["is_not", "work"],
-  ["eat", "drink"],
-  ["study", "work"],
-  ["listen", "speak"],
-  ["love", "eat"],
-  ["love", "study"],
-  ["name", "is"],
-  ["hello", "name", "what"],
-  ["welcome", "study", "work"],
-  ["help", "study", "thank_you"],
-];
+const TEMPLATES: readonly (readonly string[])[] = SENTENCE_TEMPLATES;
 
-/** 模型看到的是合并后的类别 —— 六个代词只剩两个类 */
-const merged = (t: string[]) => t.map((w) => mergeLabel(w));
+/**
+ * 模型看到的是合并后的类别。
+ *
+ * ⚠ **「我」原样穿过。** 它已经从合并组里拆出去（指自己胸口、有接触，分得开 ——
+ * 见 labelMerge.ts），所以 `merged(["i","love","you"])` 是
+ * `["i", "love", "merged_pron_sg"]`，两个代词位**不再是同一个 id**。
+ * 下面凡是要"同一个合并 id 出现两次"的测试，只能拿复数组构造。
+ */
+const merged = (t: readonly string[]) => t.map((w) => mergeLabel(w));
 
 /**
  * 顺句允许的少数改写。**这张表必须一直很短**：它一长就说明规则表在换词而不是调语序，
@@ -147,7 +88,8 @@ describe("sentenceGrammar", () => {
     });
   });
 
-  describe("与 synth_sentences.py 的句型表对齐", () => {
+  // 表本身与 Python 是否一致由 sentenceTemplates.test.ts 管；这里只管"顺不顺得出来"
+  describe("句型表里每条都顺得出汉语", () => {
     it("每条句型都命中某条规则", () => {
       const missed = TEMPLATES.filter((t) => resolveSentence(merged(t)).rule === null);
       expect(
@@ -165,7 +107,10 @@ describe("sentenceGrammar", () => {
 
   describe("代词默认值：位置本身信息不够", () => {
     // 这四条是"按句法角色定默认值"不成立的证据（见模块头注释）。
-    // 前两条同为句首主语取的人相反，后两条同为寒暄词之后取的人也相反
+    // 前两条同为句首主语取的人相反，后两条同为寒暄词之后取的人也相反。
+    //
+    // ⚠ 现在前两条里的「我」已经**不是猜的了** —— 它是独立类，模型直接认出来。
+    // 保留这几条是因为它们仍然是复数组的判据，而且记录了一件试过并失败的事。
     it("问名字：句首主语取「你」（问的是对面）", () => {
       const r = resolveSentence(merged(["you", "name", "what"]));
       expect(r.resolved[0]).toBe("you");
@@ -173,8 +118,13 @@ describe("sentenceGrammar", () => {
     });
 
     it("自我介绍：同样是句首主语，取「我」", () => {
+      // 这条现在同时锁着 `isPronoun("i")`：「我」拆出合并组之后，如果 PRONOUN_IDS
+      // 还是从 MERGE_GROUPS 推的，`@pron` 就匹配不上它，这句会掉到「主谓宾」
+      // 渲染成「我名字是。」—— 词没丢，所以只会被当成"顺句变差了"，极难定位
       const r = resolveSentence(merged(["i", "name", "is"]));
+      expect(r.raw[0]).toBe("i"); // 「我」不是合并类，原样穿过
       expect(r.resolved[0]).toBe("i");
+      expect(r.rule).toBe("自我介绍");
       expect(r.text).toBe("我的名字是……");
     });
 
@@ -192,13 +142,41 @@ describe("sentenceGrammar", () => {
       expect(resolveSentence(merged(["i", "love", "you"])).text).toBe("我爱你。");
     });
 
-    it("同一句里两个代词位可以取不同的人", () => {
-      // [sg, love, sg] 两个位置是同一个类别 id，取的人却不同 ——
-      // 消解必须逐位置做，不能按类别做
-      const ids = merged(["i", "love", "you"]);
+    it("「我爱你」和「你爱我」是两个不同的序列 —— 方向是量到的，不是猜的", () => {
+      // 拆开「我」换来的就是这个。以前两句都解成 [sg, love, sg]，字面完全相同，
+      // 方向只能靠规则表猜；猜错的症状是"方向偶尔反"，而序列是对的，没法自查。
+      // 现在「我」在哪一位是模型直接输出的。
+      const a = merged(["i", "love", "you"]);
+      const b = merged(["you", "love", "i"]);
+      expect(a).not.toEqual(b);
+      expect(a).toEqual(["i", "love", "merged_pron_sg"]);
+      expect(b).toEqual(["merged_pron_sg", "love", "i"]);
+      expect(resolveSentence(a).text).toBe("我爱你。");
+      expect(resolveSentence(b).text).toBe("你爱我。");
+    });
+
+    it("同一句里两个代词位可以取不同的人（复数组）", () => {
+      // 同一个类别 id 出现两次、取的人却不同 —— 消解必须逐位置做，不能按类别做。
+      //
+      // 只能拿复数组构造：单数组现在是 你/他，没有 selfMember，两个 slot 都落到
+      // 「你」，本来就不可能取到不同的人（模型说朝外指，那就不是「我」）。
+      const ids = merged(["we", "help", "you_pl"]);
       expect(ids[0]).toBe(ids[2]);
       const r = resolveSentence(ids);
       expect(r.resolved[0]).not.toBe(r.resolved[2]);
+      // 「他们」而不是「你们」：复数组的 defaultMember 已从 you_pl 改成 they
+      // （you_pl 在 UNTRAINED_WORDS 里，见 sentenceTemplates.ts）
+      expect(r.text).toBe("我们帮助他们。");
+    });
+
+    it("单数合并类无论哪个 slot 都取「你」，绝不取「我」", () => {
+      // 「我」是独立类了。合并类还翻译成「我」的话，等于把一个**量到不是我**的
+      // 输出改写成「我」—— 比挑错人更糟，它伪造了一个模型没给的结论
+      const subj = resolveSentence(merged(["you", "study"])); // slot=self
+      expect(subj.resolved[0]).toBe("you");
+      expect(subj.text).toBe("你学习。");
+      const obj = resolveSentence(merged(["i", "love", "you"])); // slot=other
+      expect(obj.resolved[2]).toBe("you");
     });
 
     it("复数类取「我们/你们」而不是单数", () => {
@@ -215,9 +193,60 @@ describe("sentenceGrammar", () => {
     });
 
     it("取不到的那个人（他/你们）只能靠手动改 —— 默认值给不出来", () => {
+      // 默认值是**默认值不是判定**：组里另一个成员永远只能靠 UI 一键换。
+      // 单数组现在只有两个成员，猜错的代价从 1/3 降到 1/2
       const ids = merged(["he", "is_not", "work"]);
-      expect(resolveSentence(ids).resolved[0]).toBe("i"); // 默认挑错了
+      expect(resolveSentence(ids).resolved[0]).toBe("you"); // 默认挑错了（该是「他」）
       expect(resolveSentence(ids, { 0: "he" }).text).toBe("他不工作。");
+    });
+  });
+
+  /*
+   * 2026-08-29 追加的三句。锁的是**顺出来的整句汉语**，不只是"命中了规则" ——
+   * 上面「每条句型都命中某条规则」那条只保证 rule ≠ null，
+   * 一条 render 写错字的规则照样能让它全绿。
+   */
+  describe("你叫什么名字 / 你真好看 / 你笑起来像太阳", () => {
+    it("你叫什么名字（name 训回来之后的第一句）", () => {
+      const r = resolveSentence(merged(["you", "name", "what"]));
+      expect(r.rule).toBe("问名字");
+      expect(r.text).toBe("你叫什么名字？");
+    });
+
+    it("你真好看 —— 有专门规则，不落到通例「主谓」", () => {
+      const r = resolveSentence(merged(["you", "beautiful"]));
+      // 落到通例的话是「你好看。」：词不丢、人也看得懂，所以只断言 text 不够，
+      // 必须连规则名一起锁 —— 否则规则被别人挪到 ["@pron","*"] 后面就静默失效
+      expect(r.rule).toBe("赞美");
+      expect(r.text).toBe("你真好看！");
+    });
+
+    it("你笑起来像太阳 —— 4 词句，缺了规则会退化成原样拼词", () => {
+      const r = resolveSentence(merged(["you", "smile", "resemble", "sun"]));
+      expect(r.rule).toBe("笑起来像");
+      expect(r.text).toBe("你笑起来像太阳。");
+    });
+
+    it("三句的句首都消解成「你」（不是「我」）", () => {
+      // `slotsOf` 的启发式在后两句上会给 self：句子里没有疑问词，
+      // 而 smile/beautiful 都不在 TAKES_OTHER 里。规则表写死 other 才对。
+      // 单数组没有 selfMember，所以 self 现在恰好也落到「你」—— 但那是巧合，
+      // 这条测试锁的是"规则里那个 other 别被删掉"
+      for (const t of [
+        ["you", "name", "what"],
+        ["you", "beautiful"],
+        ["you", "smile", "resemble", "sun"],
+      ]) {
+        const r = resolveSentence(merged(t));
+        expect(r.slots[0], `「${t.join(" ")}」句首 slot`).toBe("other");
+        expect(r.resolved[0]).toBe("you");
+      }
+    });
+
+    it("换成「他」也顺得出来（默认值是默认值不是判定）", () => {
+      expect(
+        resolveSentence(merged(["you", "beautiful"]), { 0: "he" }).text
+      ).toBe("他真好看！");
     });
   });
 
@@ -234,11 +263,14 @@ describe("sentenceGrammar", () => {
     });
 
     it("raw 永远保持未消解的形态（UI 要一直显示原始词序）", () => {
-      const ids = merged(["i", "love", "you"]);
+      const ids = merged(["you", "love", "i"]);
       const r = resolveSentence(ids, { 0: "he" });
       expect(r.raw).toEqual(ids);
+      // 第 0 位是合并类，raw 里必须还是那个未消解的 id；第 2 位的「我」是确定的词
       expect(r.raw[0]).toBe("merged_pron_sg");
-      expect(displayWord(r.raw[0])).toBe("我/你/他");
+      expect(displayWord(r.raw[0])).toBe("你/他");
+      expect(r.raw[2]).toBe("i");
+      expect(r.text).toBe("他爱我。");
     });
   });
 
@@ -306,31 +338,49 @@ describe("sentenceGrammar", () => {
   });
 
   describe("辅助函数", () => {
-    it("isPronoun 认合并类也认原始成员", () => {
+    it("isPronoun 认合并类也认原始成员，「我」也必须认", () => {
       expect(isPronoun("merged_pron_sg")).toBe(true);
       expect(isPronoun("merged_pron_pl")).toBe(true);
+      // ⚠ 「我」已经不在任何合并组里，但语法上当然还是代词。这条断言防的是
+      // 把 PRONOUN_IDS 改回"从 MERGE_GROUPS 推"—— 那样每一句以「我」开头的话
+      // 都会掉到通例规则，顺出来的汉语全部退化而词一个不少
       expect(isPronoun("i")).toBe(true);
       expect(isPronoun("they")).toBe(true);
       expect(isPronoun("eat")).toBe(false);
     });
 
-    it("pronounChoices 只对合并类给三选", () => {
-      expect(pronounChoices("merged_pron_sg")).toEqual(["i", "you", "he"]);
+    it("pronounChoices 只对合并类给候选", () => {
+      // 单数只剩两选：「我」拆出去之后不该再出现在这个列表里，
+      // 出现了就等于允许用户把一个量到"朝外指"的输出改写成「我」
+      expect(pronounChoices("merged_pron_sg")).toEqual(["you", "he"]);
       expect(pronounChoices("merged_pron_pl")).toEqual(["we", "you_pl", "they"]);
-      // 已经确定的人不该给三选 —— 给了等于允许把模型的确定输出改掉
+      // 已经确定的人不该给候选 —— 给了等于允许把模型的确定输出改掉
       expect(pronounChoices("i")).toBeNull();
       expect(pronounChoices("eat")).toBeNull();
     });
 
-    it("defaultPronoun 单复数各取本组的成员", () => {
-      expect(defaultPronoun("merged_pron_sg", "self")).toBe("i");
+    it("defaultPronoun 按组自己声明的成员取，不按下标", () => {
+      // 单数组没有 selfMember，所以两个 slot 都落到 defaultMember「你」。
+      // 以前这里是 `opts[0]` / `opts[1]`，把「我」从 members 里删掉那一刻
+      // 默认值会静默挪一位（类型过、大半测试也过，只有翻译悄悄变了）
+      expect(defaultPronoun("merged_pron_sg", "self")).toBe("you");
       expect(defaultPronoun("merged_pron_sg", "other")).toBe("you");
       expect(defaultPronoun("merged_pron_pl", "self")).toBe("we");
-      expect(defaultPronoun("merged_pron_pl", "other")).toBe("you_pl");
+      // 复数组的 defaultMember：you_pl → they。you_pl 不再训练，默认值指向它
+      // 等于整组翻译成一个模型从来没见过的词（见 sentenceTemplates.ts 的
+      // UNTRAINED_WORDS；那边有测试锁着"defaultMember 不指向不训练的词"）。
+      // 没取 `we`：它是 selfMember，再拿它当默认值 selfMember 就永远不起作用了
+      expect(defaultPronoun("merged_pron_pl", "other")).toBe("they");
     });
 
-    it("displayWord 合并类给三选文字，普通词给中文", () => {
-      expect(displayWord("merged_pron_sg")).toBe("我/你/他");
+    it("defaultPronoun 遇到非合并 id 原样返回，绝不吞词", () => {
+      expect(defaultPronoun("i", "self")).toBe("i");
+      expect(defaultPronoun("eat", "other")).toBe("eat");
+    });
+
+    it("displayWord 合并类给候选文字，普通词给中文", () => {
+      expect(displayWord("merged_pron_sg")).toBe("你/他");
+      expect(displayWord("i")).toBe("我"); // 独立类，走词表
       expect(displayWord("eat")).toBe("吃");
       expect(displayWord("nope")).toBe("nope");
     });

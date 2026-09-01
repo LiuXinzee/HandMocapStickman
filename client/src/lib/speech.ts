@@ -71,6 +71,25 @@ export function speakChinese(text: string): SpeakResult {
   };
 }
 
+/**
+ * 预热 voice 列表。**自动朗读必须先调这个。**
+ *
+ * 上面第 1 条坑（列表异步填）在**手动**朗读下几乎不会发作：用户点按钮的时机天然
+ * 晚于列表填充。改成收句后自动朗读就没有这个缓冲了 —— 每次会话的**第一句**正好
+ * 撞在冷启动上，退到系统默认（多半是英文）引擎念汉字，出来是一串字母音。
+ *
+ * 修法就是提前把加载踢起来：浏览器要等到第一次 `getVoices()` 才去异步填列表，
+ * 填好之后再调就是完整的。所以在句子模型加载完时调一次，等到真要念的时候
+ * （至少几秒后）列表已经在了。
+ *
+ * 返回值刻意丢掉：**调用本身就是目的**，此刻拿到的大概率还是空数组。
+ * 重复调用无害（浏览器只填一次），所以不设幂等标记 —— 那个标记会跨测试泄漏。
+ */
+export function warmUpVoices(): void {
+  if (typeof window === "undefined") return;
+  window.speechSynthesis?.getVoices();
+}
+
 /** 停止朗读。切模式/开始新一句时调用 —— 上一句还在念会盖住新句子 */
 export function stopSpeaking(): void {
   if (typeof window !== "undefined") window.speechSynthesis?.cancel();

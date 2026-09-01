@@ -29,6 +29,9 @@ ACC_SCALE = 16.0
 
 IDLE_LABEL = "_idle"
 
+# 读得进来的导出版本。1.1 起每条多了 trimSpan(见 export_format.md),二进制布局没变
+SUPPORTED_VERSIONS = ("seq-1.0", "seq-1.1")
+
 _DTYPE = {"uint8": np.uint8, "float32": np.float32}
 
 
@@ -49,6 +52,12 @@ class Sequence:
     right_imu: np.ndarray | None
     left_landmarks: np.ndarray | None
     right_landmarks: np.ndarray | None
+    # ↓ seq-1.1。浏览器端 sequenceTrim.detectSignSpan 判出的"动作真正开始/结束"区间
+    trim_span: tuple[int, int] | None = None
+    trim_applied: bool = False
+    trim_reason: str = "not_exported"
+    #: 第三层(触觉静止段)有没有跑过。False = 收尾静止还在这条数据里
+    trim_tactile_ran: bool = False
 
     @property
     def has_vision(self) -> bool:
@@ -70,6 +79,93 @@ class Sequence:
         """
         return len(self.segments) > 1
 
+    def trimmed_view(self, head_only: bool = False) -> "Sequence":
+        """
+        按 `trim_span` 切出"只剩动作"的那一段,返回一条新的 Sequence(不改原对象)。
+
+        `head_only=True` 时**只切头,尾巴一帧不动**(终点强制为 frame_count)。
+        逐词模型要的是这个,理由是推理口径:
+          - 句子推理(`sentenceEnvelope`)会主动掐掉尾部 800ms 静止 → 训练必须跟着裁尾
+          - 逐词推理只是取最近 2000ms 滑窗,**不掐尾** → 裁尾会让训练离推理更远
+        实测这一刀不小:441 条要裁的词录制里,尾部中位切掉 700ms(占录制 25%),
+        比头部的 520ms 还多,244/441 条尾部切得比头部多。
+
+        用途是句子合成:把孤立词录制拼成句子之前,先去掉每个词的抬手 transport 和
+        收尾静止。真实连续手语里这两段不存在,留着就是给模型一个人造的分词标记 ——
+        与 synth_sentences 模块 docstring 里那个 127 倍尖峰同一类错误。
+
+        **不裁的条件是 `trim_applied` 为假**,那时原样返回(同一个对象)。判据判不出来
+        就不裁,是浏览器端那三条守则之一,这里照搬。
+
+        时间戳重新以 0 为起点:build_features 按归一化位置 [0,1] 采样,起点不归零的话
+        第一帧会落在切掉的那段里。`segments` 的帧号跟着平移并夹到新区间内。
+        """
+        if not self.trim_applied or self.trim_span is None:
+            return self
+        a, b = self.trim_span
+        a = max(0, min(a, self.frame_count))
+        b = self.frame_count if head_only else max(a + 1, min(b, self.frame_count))
+        b = max(a + 1, b)
+
+        def cut(arr: np.ndarray | None) -> np.ndarray | None:
+            return None if arr is None else arr[a:b].copy()
+
+        ts = self.timestamps[a:b].astype(np.float32) - float(self.timestamps[a])
+        segs = [
+            {
+                **s,
+                "startFrame": max(0, min(int(s["startFrame"]) - a, b - a)),
+                "endFrame": max(0, min(int(s["endFrame"]) - a, b - a)),
+            }
+            for s in self.segments
+        ]
+        return Sequence(
+            segments=segs,
+            primary_label=self.primary_label,
+            frame_count=b - a,
+            duration_ms=float(ts[-1] - ts[0]) if len(ts) > 1 else 0.0,
+            source_fps=self.source_fps,
+            origin=self.origin,
+            timestamps=ts,
+            left_sensor=cut(self.left_sensor),
+            right_sensor=cut(self.right_sensor),
+            left_imu=cut(self.left_imu),
+            right_imu=cut(self.right_imu),
+            left_landmarks=cut(self.left_landmarks),
+            right_landmarks=cut(self.right_landmarks),
+            # 已经裁过了。再调一次 trimmed_view 必须是恒等操作,否则重复切片
+            trim_span=(0, b - a),
+            trim_applied=False,
+            trim_reason=self.trim_reason,
+            trim_tactile_ran=self.trim_tactile_ran,
+        )
+
+
+def require_trim_spans(seqs: list[Sequence]) -> None:
+    """
+    确认这批序列真的带着裁剪区间。**要求裁剪却拿到 seq-1.0 时必须炸在这里。**
+
+    与 `_check_pair` 同一条理由:静默不裁不会报错、形状全合法、训练照跑,
+    唯一的症状是 WER 差几个点 —— 而那时候已经没有任何线索指回"数据集是旧版导出的"。
+
+    `trim_tactile_ran` 全为假只是**警告**:视觉那两层的结论是真的,只是收尾静止还在。
+    """
+    missing = [s for s in seqs if s.trim_reason == "not_exported"]
+    if missing:
+        raise ValueError(
+            f"{len(missing)}/{len(seqs)} 条没有 trimSpan —— 这份 dataset.json 是 seq-1.0 导出的,\n"
+            f"里面没有裁剪区间。继续跑的话句子会带着抬手 transport 和收尾静止合成出来,\n"
+            f"而推理端(sentenceEnvelope)那两段永远见不到 —— 训练与推理的时间口径就差了一截,\n"
+            f"表现是句首持续丢词/插词,且合成 val WER 看不出来。\n"
+            f"回浏览器 /train-seq 重新点「导出数据集给 Python」,两个文件都覆盖进 data/。"
+        )
+    blind = [s for s in seqs if not s.trim_tactile_ran]
+    if blind:
+        print(
+            f"  ⚠ {len(blind)}/{len(seqs)} 条的触觉静止段判据没跑过(导出时没做弯折两点标定)。\n"
+            f"    那是唯一会裁尾的一层 —— 这些条的收尾静止还在数据里。"
+        )
+
 
 # ===== 读取 =====
 
@@ -81,8 +177,11 @@ def load_dataset(
     manifest = json.loads((data_dir / "dataset.json").read_text(encoding="utf-8"))
     blob = np.frombuffer((data_dir / "dataset.bin").read_bytes(), dtype=np.uint8)
 
-    if manifest.get("version") != "seq-1.0":
-        raise ValueError(f"未知的导出版本 {manifest.get('version')!r},见 export_format.md")
+    if manifest.get("version") not in SUPPORTED_VERSIONS:
+        raise ValueError(
+            f"未知的导出版本 {manifest.get('version')!r}(本脚本读 {'/'.join(SUPPORTED_VERSIONS)}),"
+            "见 export_format.md"
+        )
     for key, expected in (("sensorN", SENSOR_N), ("imuN", IMU_N), ("landmarkN", LANDMARK_N)):
         if manifest[key] != expected:
             raise ValueError(
@@ -90,10 +189,48 @@ def load_dataset(
                 "改了硬件通道数就要同步改本文件的常量。"
             )
 
+    _check_pair(manifest, blob.size)
+
     seqs = [s for s in _iter_sequences(manifest, blob)]
     if recorded_only:
         seqs = [s for s in seqs if s.origin == "recorded"]
     return seqs, list(manifest["labels"])
+
+
+def _check_pair(manifest: dict, blob_size: int) -> None:
+    """
+    dataset.json 和 dataset.bin 必须是**同一次导出**的。
+
+    这不是防手滑的小检查,是防一种会一路跑通的错误:.json 里存的是每个数组在
+    .bin 里的字节偏移,两个文件配错时偏移全都落在错误的位置上 —— 读出来是别的
+    样本的传感值,形状却完全合法。训练照跑、准确率照样很高(错标签配错特征,
+    模型学的是另一个映射),只有实机推理是全错的,而那时候已经没有线索指回这里。
+
+    实际踩过一次:浏览器导出后只把 .bin 覆盖进 data/,.json 忘了覆盖。
+    新 .bin 比旧 .json 声明的长 145,676 字节,越界检查也不会触发(是更长而不是更短)。
+
+    判据是**严格相等**:导出器只写它列出来的那些数组,没有对齐填充,合法的一对
+    永远恰好相等。宁可误报一次让人重新导一遍,也不要静默读错。
+    """
+    declared = 0
+    for e in manifest["sequences"]:
+        for ref in e["arrays"].values():
+            if not ref:  # 缺哪只手就是 null(单手录制),不占字节
+                continue
+            end = ref["offset"] + ref["length"] * _DTYPE[ref["dtype"]]().itemsize
+            declared = max(declared, end)
+
+    if declared != blob_size:
+        diff = blob_size - declared
+        raise ValueError(
+            f"dataset.json 与 dataset.bin 不是同一次导出的:\n"
+            f"  .json 声明需要 {declared:,} 字节({manifest['totalSequences']} 条,"
+            f"导出于 {manifest.get('exportedAt')})\n"
+            f"  .bin  实际  {blob_size:,} 字节(相差 {diff:+,})\n"
+            f"两个文件必须一起覆盖 —— 只换一个的话字节偏移会全部错位,"
+            f"而训练不会报错、准确率还很高,只有实机推理是全错的。\n"
+            f"回浏览器 /train-seq 重新点「导出数据集给 Python」,两个文件都放进 data/。"
+        )
 
 
 def _iter_sequences(manifest: dict, blob: np.ndarray) -> Iterator[Sequence]:
@@ -110,6 +247,10 @@ def _iter_sequences(manifest: dict, blob: np.ndarray) -> Iterator[Sequence]:
             arr = raw.view(dtype)
             return arr.reshape(-1, per_frame) if per_frame > 1 else arr.copy()
 
+        # seq-1.0 没有这个字段。区分"没导出"和"导出了但判据说不用裁"很重要:
+        # 前者要报错(require_trim_spans),后者是一个经过确认的结论
+        span = e.get("trimSpan")
+
         yield Sequence(
             segments=e["segments"],
             primary_label=e["primaryLabel"],
@@ -124,6 +265,12 @@ def _iter_sequences(manifest: dict, blob: np.ndarray) -> Iterator[Sequence]:
             right_imu=read("rightImu", IMU_N),
             left_landmarks=read("leftLandmarks", LANDMARK_N),
             right_landmarks=read("rightLandmarks", LANDMARK_N),
+            trim_span=(
+                (int(span["startFrame"]), int(span["endFrame"])) if span else None
+            ),
+            trim_applied=bool(span["applied"]) if span else False,
+            trim_reason=str(span["reason"]) if span else "not_exported",
+            trim_tactile_ran=bool(span.get("tactileRan")) if span else False,
         )
 
 
@@ -349,7 +496,14 @@ def build_xy(
 
 if __name__ == "__main__":
     import argparse
+    import sys
     from collections import Counter
+
+    # 与 train_seq.main 同一条理由:Windows 控制台默认 GBK,编不出 ⚠️(U+26A0),
+    # print 会抛 UnicodeEncodeError —— 体检崩在一句警告上,而警告本身才是要看的东西
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
 
     ap = argparse.ArgumentParser(description="检查导出的数据集")
     ap.add_argument("--data", default="data")
@@ -371,6 +525,51 @@ if __name__ == "__main__":
     vision = sum(1 for s in seqs if s.has_vision)
     print(f"含视觉: {vision}/{len(seqs)} ({vision / max(len(seqs), 1) * 100:.0f}%)")
     print(f"平均时长: {np.mean([s.duration_ms for s in seqs]):.0f}ms")
+
+    # 裁剪区间。这是最后一处能看见"到底裁了多少"的地方 —— 下游只会用切好的片段
+    reasons = Counter(s.trim_reason for s in seqs)
+    cut = [s for s in seqs if s.trim_applied]
+    print(f"\n裁剪区间: {dict(reasons)}")
+    if cut:
+        kept = np.mean([(s.trim_span[1] - s.trim_span[0]) / s.frame_count for s in cut])
+        after = np.mean([s.trimmed_view().duration_ms for s in cut])
+        print(f"  要裁 {len(cut)} 条,平均留下 {kept*100:.0f}% 帧,裁后平均时长 {after:.0f}ms")
+
+    # trimmed_view 自检。**造一个区间而不是等数据集里有** —— 旧版导出里一条都没有,
+    # 挂在 `if cut` 下面的断言在 seq-1.0 上永远不跑,而句子合成已经依赖这段切片了
+    if seqs:
+        import dataclasses
+        src = max(seqs, key=lambda s: s.frame_count)
+        a, b = 5, src.frame_count - 3
+        probe = dataclasses.replace(src, trim_span=(a, b), trim_applied=True)
+        v = probe.trimmed_view()
+        assert v.frame_count == b - a, f"切片长度错: {v.frame_count} != {b - a}"
+        assert len(v.timestamps) == b - a, "时间戳没跟着切"
+        assert float(v.timestamps[0]) == 0.0, "裁后时间戳没归零,build_features 会采到切掉那段"
+        assert np.allclose(
+            v.timestamps, src.timestamps[a:b] - src.timestamps[a]
+        ), "时间戳不是原区间的平移"
+        for name in ("left_sensor", "right_sensor", "left_imu", "right_imu",
+                     "left_landmarks", "right_landmarks"):
+            orig, got = getattr(src, name), getattr(v, name)
+            if orig is None:
+                assert got is None, f"{name} 本来是缺失,裁完变成了数组"
+            else:
+                assert got.shape[0] == b - a, f"{name} 帧数没跟着切"
+                # equal_nan:视觉数组里的 NaN 是"这帧丢手"的合法取值,不是错误
+                same = np.array_equal(got, orig[a:b], equal_nan=got.dtype.kind == "f")
+                assert same, f"{name} 切错了位置"
+        assert all(0 <= s["startFrame"] <= b - a for s in v.segments), "segment 帧号越界"
+        assert v.trimmed_view() is v, "trimmed_view 不幂等 —— 二次调用会重复切片"
+        # build_features 必须能吃裁后的序列(帧数比 SEQ_LEN 少也要能重采样上去)
+        f = build_features(v, include_vision=True)
+        assert f.shape == (SEQ_LEN, FUSED_FRAME_DIM) and np.isfinite(f).all()
+        print(f"  trimmed_view 自检通过(以 {src.primary_label} 的 {src.frame_count} 帧造区间)")
+
+    try:
+        require_trim_spans(seqs)
+    except ValueError as err:
+        print(f"\n⚠️  {err}")
 
     x, y = build_xy(seqs[: min(8, len(seqs))], labels, include_vision=False)
     print(f"\n触觉特征形状: {x.shape}  范围 [{x.min():.3f}, {x.max():.3f}]")

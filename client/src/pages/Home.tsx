@@ -264,7 +264,17 @@ export default function Home() {
 
           {/* 手语识别系统导航 —— 按实际操作顺序排成递进流程，而不是按模块罗列。
               静态词与动态词是两条平行支线：②里选哪个采，③就用对应的那个训。
-              /train-skeleton 不在这条链路上（它只驱动 /mocap 的火柴人），单列为旁支。 */}
+              /train-skeleton 不在这条链路上（它只驱动 /mocap 的火柴人），单列为旁支。
+
+              ⚠ **句子那条不是第三条平行支线，是 Y 形。** 句子训练同时吃两份数据：
+              句子录制（真实连续手语）**和**时序词录制。三处硬依赖：
+                1. 类别表从数据集全部标签推（train_seq.py 的 merged_class_table）；
+                2. 合成句子由孤立词录制交叉淡化拼出来（synth_sentences.py），
+                   45 条真实句根本训不动一个 CTC；
+                3. 数据不够时 train_seq.py 直接 SystemExit。
+              反过来不成立：孤立词训练会把句子样本滤掉（sequenceModel.ts 的
+              isSentenceSample）。所以颜色上让时序采集同时连着两条训练，
+              而句子采集只连句子训练。 */}
           <div className="w-full">
             <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider text-center mb-3">
               Sign Language Recognition System · 按顺序操作
@@ -291,30 +301,62 @@ export default function Home() {
                   sub="单帧手型"
                   hoverCls="hover:border-[#00f0ff]/60"
                 />
+                {/* sub 里写"两条训练都要"是因为这件事完全反直觉：多数人以为
+                    句子训练只吃句子录制。它是句子训练的必要输入，缺了训不动 */}
                 <StepLink
                   href="/collect-seq"
-                  icon={<Video className="w-3.5 h-3.5 text-[#00f0ff] shrink-0" />}
+                  icon={<Video className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
                   label="时序采集"
-                  sub="动态词 · 开始/结束"
-                  hoverCls="hover:border-[#00f0ff]/60"
+                  sub="动态词 · 两条训练都要"
+                  hoverCls="hover:border-[#a855f7]/60"
+                />
+                {/* 句子采集与时序采集共用一个 store、一条时序链路，但它只喂 CTC
+                    那条路（孤立词训练会把句子样本滤掉）。紫色标的就是这条路 */}
+                <StepLink
+                  href="/collect-sentence"
+                  icon={<Waves className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  label="句子采集"
+                  sub="连续手语 · 只喂句子训练"
+                  hoverCls="hover:border-[#a855f7]/60"
                 />
               </FlowStep>
 
               <FlowArrow />
 
               <FlowStep n="3" title="训练模型" hint="离线，可拔手套">
+                {/* 青色，与 /train 页自己的标题色一致。原来这里是绿色 #00e5a0，
+                    而绿色在本项目里表示"已连接/已就绪"，不是链路色 */}
                 <StepLink
                   href="/train"
-                  icon={<Brain className="w-3.5 h-3.5 text-[#00e5a0] shrink-0" />}
+                  icon={<Brain className="w-3.5 h-3.5 text-[#00f0ff] shrink-0" />}
                   label="静态训练"
                   sub="配静态采集 · 单帧 MLP"
-                  hoverCls="hover:border-[#00e5a0]/60"
+                  hoverCls="hover:border-[#00f0ff]/60"
                 />
                 <StepLink
                   href="/train-seq"
                   icon={<Waves className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
                   label="时序训练"
                   sub="配时序采集 · TCN 含蒸馏"
+                  hoverCls="hover:border-[#a855f7]/60"
+                />
+                {/*
+                  也是紫色。约定是**紫＝时序链路、青＝静态链路**
+                  （见 CollectSentence.tsx 头部那条注释），句子属于时序链路
+                  —— 同一个 store、同一套特征，区别只在一条录制里装几个词。
+                  不要拿颜色去区分"句子 vs 单词"：那会把紫色的含义从"链路"
+                  偷偷改成"子分支"，而 /collect-seq、/train-seq、/translate
+                  的 MODE 开关全都按前一个含义在用它。
+
+                  Y 形关系（句子训练还要吃时序采集的词录制）在界面上只由第 2 步
+                  那两条 sub 承载 —— "两条训练都要" / "只喂句子训练"。这里曾经
+                  有一段讲清 Y 形的说明文字，删掉了；别再往流程图下面加。
+                */}
+                <StepLink
+                  href="/train-sentence"
+                  icon={<Brain className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  label="句子训练"
+                  sub="CTC 连续手语 · 本机 Python"
                   hoverCls="hover:border-[#a855f7]/60"
                 />
               </FlowStep>

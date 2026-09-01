@@ -10,8 +10,9 @@
  * 时必须**明确报错**而不是训出一个空模型。
  */
 import { describe, expect, it } from "vitest";
-import { isSentenceSample } from "./datasetStore";
+import { isSentenceSample, sampleTemplateKey } from "./datasetStore";
 import { trainSequenceModel } from "./sequenceModel";
+import { BATCH1_TEMPLATES, templateKey } from "./sentenceTemplates";
 import type { SequenceSample } from "./datasetStore";
 
 const seg = (label: string, startFrame: number, endFrame: number) => ({
@@ -55,6 +56,37 @@ describe("isSentenceSample", () => {
     // 判据是"多于一个词"，不是"不等于一个词"。空数组是坏数据，
     // 判成句子会把它塞进 CTC 那条路，那里更没法处理
     expect(isSentenceSample(sample([]))).toBe(false);
+  });
+});
+
+/*
+ * 采集页按句型显示 N/20 进度、并按句型列样本。两件事都靠这个 key，
+ * 而 `getSentencesByTemplate` 的实现是「用 primaryLabel 索引拿候选 + isSentenceSample
+ * + key 相等」。key 算错的后果是进度永远停在 0/20（人会一直采下去），
+ * 或者反过来把孤立词当成句子列出来（删除按钮删到孤立词上）。
+ */
+describe("sampleTemplateKey", () => {
+  it("和句型表用的是同一个 key 格式", () => {
+    // 这一条是采集页能查到计数的**前提**：页面手里拿的是句型表的 templateKey，
+    // 库里存的是样本算出来的 sampleTemplateKey，两个必须逐字节相同
+    for (const t of BATCH1_TEMPLATES) {
+      const s = sample(t.map((label, i) => seg(label, i, i + 1)));
+      expect(sampleTemplateKey(s)).toBe(templateKey(t));
+    }
+  });
+
+  it("词序不同就是不同句型", () => {
+    const a = sample([seg("i", 0, 1), seg("love", 1, 2), seg("you", 2, 3)]);
+    const b = sample([seg("you", 0, 1), seg("love", 1, 2), seg("i", 2, 3)]);
+    expect(sampleTemplateKey(a)).not.toBe(sampleTemplateKey(b));
+  });
+
+  it("孤立词样本的 key 撞不上以它开头的句型", () => {
+    // 句子的 primaryLabel 就是第一个词，所以按 primaryLabel 查「i love you」
+    // 会把所有 `i` 的孤立词一起捞出来 —— 靠 key 相等把它们筛掉
+    expect(sampleTemplateKey(sample([seg("i", 0, 4)]))).not.toBe(
+      templateKey(["i", "love", "you"])
+    );
   });
 });
 

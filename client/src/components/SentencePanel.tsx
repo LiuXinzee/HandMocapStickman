@@ -17,11 +17,14 @@ import {
   pronounChoices,
   resolveSentence,
 } from "@/lib/sentenceGrammar";
-import type { CaptureStatus } from "@/lib/sentenceCapture";
-import { SETTLE_MS } from "@/lib/sentenceCapture";
+import {
+  CONTINUOUS_SETTLE_MS,
+  SETTLE_MS,
+  type CaptureStatus,
+} from "@/lib/sentenceCapture";
 import { speakChinese, speechSupported } from "@/lib/speech";
 import { useMemo, useState } from "react";
-import { Check, Delete, Mic, Square, Volume2 } from "lucide-react";
+import { Check, Delete, Mic, Square, StopCircle, Volume2 } from "lucide-react";
 
 const SENT_COLOR = "#f59e0b";
 
@@ -34,16 +37,39 @@ export interface SentencePanelProps {
   onDeleteWord: (index: number) => void;
   grammarOn: boolean;
   onToggleGrammar: (on: boolean) => void;
+  /**
+   * 收句后自动朗读顺句结果。**念这一步不在本组件里做** —— 触发点是"刚解出来
+   * 那一刻"，只有父组件的 `decodeUtterance` 知道。这里放在本组件里的话只能靠
+   * watch `resolved.text`，那会在用户改代词/删词时每改一下念一遍。
+   */
+  autoSpeak: boolean;
+  onToggleAutoSpeak: (on: boolean) => void;
+  /**
+   * 连续模式：一句解完自动接着等下一句，起手就自动开始。
+   *
+   * 开着的时候「成句」的含义变成**定版** —— 句子在解出来那一刻就已经进历史了
+   * （不然下一句会把它覆盖掉），所以父组件在这一档不会再追加一遍。
+   */
+  continuous: boolean;
+  onToggleContinuous: (on: boolean) => void;
   /** 捕获状态机的实时状态；null = 没在捕获 */
   status: CaptureStatus | null;
   /** 上一次捕获/解码的提示（起手超时、没录到动作、解码失败…） */
   note: string | null;
   onArm: () => void;
+  /** 连续模式的「停止」：丢掉手头这半句 + 关掉推理循环 */
+  onStop: () => void;
   onFinish: () => void;
   onCommit: (text: string) => void;
   /** 已成句的历史 */
   history: string[];
   onClearHistory: () => void;
+  /**
+   * 推理循环开着吗（`isTranslating`）。**连续模式下主按钮靠它决定是开始还是停止**，
+   * 不能用 `status.state` —— 一句解完到下一次起手之间状态是 `armed`，
+   * 而"干等着"和"没开始"在状态机里长得一样，用状态判会让按钮在每句之间抖动。
+   */
+  running: boolean;
   /** 手套/模型没就绪时按钮要灰掉 */
   disabled: boolean;
 }
@@ -55,13 +81,19 @@ export default function SentencePanel({
   onDeleteWord,
   grammarOn,
   onToggleGrammar,
+  autoSpeak,
+  onToggleAutoSpeak,
+  continuous,
+  onToggleContinuous,
   status,
   note,
   onArm,
+  onStop,
   onFinish,
   onCommit,
   history,
   onClearHistory,
+  running,
   disabled,
 }: SentencePanelProps) {
   const [picking, setPicking] = useState<number | null>(null);
@@ -74,6 +106,14 @@ export default function SentencePanel({
 
   const capturing = status?.state === "capturing" || status?.state === "settling";
   const armed = status?.state === "armed";
+
+  /**
+   * 画进度条／写读数用的门限。**优先取状态机报的实测值** —— 自适应之后它会变，
+   * 拿常量画的条会填满后卡在 100% 干等，看着像卡死了。
+   * 状态为 null（还没开始过）时没有实测值，用对应档的基线，只为了帮助文字有个数。
+   */
+  const settleMs =
+    status?.settleMs ?? (continuous ? CONTINUOUS_SETTLE_MS : SETTLE_MS);
 
   const doSpeak = () => {
     if (!resolved?.text) return;
@@ -90,20 +130,31 @@ export default function SentencePanel({
           <span className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
             Utterance Capture
           </span>
-          <span
-            className="text-[10px] font-mono"
-            style={{ color: capturing || armed ? SENT_COLOR : "#556677" }}
-          >
-            {status?.state === "armed"
-              ? "已就绪 · 等你起手"
-              : status?.state === "capturing"
-              ? `录制中 ${(status.elapsedMs / 1000).toFixed(1)}s`
-              : status?.state === "settling"
-              ? `静止中 ${(status.stillMs / 1000).toFixed(1)}s / ${(
-                  SETTLE_MS / 1000
-                ).toFixed(1)}s`
-              : "未开始"}
-          </span>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-[9px] font-mono text-[#556677] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={continuous}
+                onChange={(e) => onToggleContinuous(e.target.checked)}
+                className="accent-[#f59e0b]"
+              />
+              连续模式
+            </label>
+            <span
+              className="text-[10px] font-mono"
+              style={{ color: capturing || armed ? SENT_COLOR : "#556677" }}
+            >
+              {status?.state === "armed"
+                ? "已就绪 · 等你起手"
+                : status?.state === "capturing"
+                ? `录制中 ${(status.elapsedMs / 1000).toFixed(1)}s`
+                : status?.state === "settling"
+                ? `静止 ${(status.stillMs / 1000).toFixed(1)}s / ${(
+                    settleMs / 1000
+                  ).toFixed(1)}s`
+                : "未开始"}
+            </span>
+          </div>
         </div>
         {/* settling 进度条：正在被判"这一句结束了"。看得见才知道为什么被收句 */}
         {status?.state === "settling" && status.settleRemainMs !== null && (
@@ -111,15 +162,35 @@ export default function SentencePanel({
             <div
               className="h-full rounded-full transition-all duration-100"
               style={{
-                width: `${Math.min(100, (status.stillMs / SETTLE_MS) * 100)}%`,
+                width: `${Math.min(100, (status.stillMs / settleMs) * 100)}%`,
                 backgroundColor: SENT_COLOR,
               }}
             />
           </div>
         )}
+        {/* 实测的句内最长停顿：门限为什么被抬高，只有这个数说得清。
+            现场读数也靠它 —— `CONTINUOUS_SETTLE_MS` 那个基线是估的 */}
+        {continuous && !!status && status.maxIntraStillMs > 0 && (
+          <div className="text-[9px] font-mono text-[#556677]">
+            本句最长停顿 {(status.maxIntraStillMs / 1000).toFixed(2)}s · 门限已抬到{" "}
+            {(settleMs / 1000).toFixed(2)}s
+          </div>
+        )}
         <div className="text-[9px] font-mono text-[#556677] leading-relaxed">
-          点「开始一句」→ 整句连着打完，中间不用停 → 停手约 {SETTLE_MS / 1000}s
-          自动收句（或点「结束」）。起手前的静止不算句尾。
+          {continuous ? (
+            <>
+              点「开始」一次 → 打一句 → 停手约 {(settleMs / 1000).toFixed(1)}s
+              自动收句并自动进历史 → 直接接着打下一句，不用再点。
+              句内犹豫过一次之后，门限会自动抬到比那次犹豫更长。
+            </>
+          ) : (
+            <>
+              点「开始一句」→ 整句连着打完，中间不用停 → 停手约{" "}
+              {(settleMs / 1000).toFixed(1)}s 自动收句（或点「结束」）。
+              起手前的静止不算句尾。
+            </>
+          )}
+          {autoSpeak && speechSupported() && "收句后自动念出来。"}
         </div>
         {note && (
           <div className="text-[10px] font-mono text-[#f59e0b]">{note}</div>
@@ -132,15 +203,38 @@ export default function SentencePanel({
           <span className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
             原始词序 · 模型输出
           </span>
-          <label className="flex items-center gap-1.5 text-[9px] font-mono text-[#556677] cursor-pointer">
-            <input
-              type="checkbox"
-              checked={grammarOn}
-              onChange={(e) => onToggleGrammar(e.target.checked)}
-              className="accent-[#f59e0b]"
-            />
-            套用顺句规则
-          </label>
+          <div className="flex items-center gap-3">
+            <label className="flex items-center gap-1.5 text-[9px] font-mono text-[#556677] cursor-pointer">
+              <input
+                type="checkbox"
+                checked={grammarOn}
+                onChange={(e) => onToggleGrammar(e.target.checked)}
+                className="accent-[#f59e0b]"
+              />
+              套用顺句规则
+            </label>
+            <label
+              className={`flex items-center gap-1.5 text-[9px] font-mono ${
+                speechSupported()
+                  ? "text-[#556677] cursor-pointer"
+                  : "text-[#334455] cursor-not-allowed"
+              }`}
+              title={
+                speechSupported()
+                  ? "收句后自动把顺句结果念出来。改完代词要重念请点「朗读」"
+                  : "这个浏览器不支持语音合成（Web Speech API）"
+              }
+            >
+              <input
+                type="checkbox"
+                checked={autoSpeak && speechSupported()}
+                disabled={!speechSupported()}
+                onChange={(e) => onToggleAutoSpeak(e.target.checked)}
+                className="accent-[#f59e0b]"
+              />
+              自动朗读
+            </label>
+          </div>
         </div>
 
         {!words ? (
@@ -254,22 +348,42 @@ export default function SentencePanel({
 
       {/* ===== 按钮 ===== */}
       <div className="flex flex-wrap items-center justify-center gap-2">
-        <button
-          onClick={onArm}
-          disabled={disabled}
-          className={`cyber-btn px-5 py-2.5 rounded-sm text-xs flex items-center gap-2 ${
-            armed || capturing ? "cyber-btn-accent" : ""
-          } ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
-        >
-          <Mic className="w-4 h-4" />
-          {armed || capturing ? "重新开始一句" : "开始一句"}
-        </button>
+        {/*
+          连续模式下主按钮是**开始 / 停止**（点一次管一整段对话），
+          一句一次模式下是「开始一句 / 重新开始一句」。
+          两档共用一个按钮位：并排放两个会让人不知道该点哪个。
+        */}
+        {continuous && running ? (
+          <button
+            onClick={onStop}
+            disabled={disabled}
+            className={`cyber-btn cyber-btn-accent px-5 py-2.5 rounded-sm text-xs flex items-center gap-2 ${
+              disabled ? "opacity-40 cursor-not-allowed" : ""
+            }`}
+            title="不再自动接下一句。手头这半句会被丢掉（不解码）"
+          >
+            <StopCircle className="w-4 h-4" />
+            停止
+          </button>
+        ) : (
+          <button
+            onClick={onArm}
+            disabled={disabled}
+            className={`cyber-btn px-5 py-2.5 rounded-sm text-xs flex items-center gap-2 ${
+              armed || capturing ? "cyber-btn-accent" : ""
+            } ${disabled ? "opacity-40 cursor-not-allowed" : ""}`}
+          >
+            <Mic className="w-4 h-4" />
+            {continuous ? "开始" : armed || capturing ? "重新开始一句" : "开始一句"}
+          </button>
+        )}
         <button
           onClick={onFinish}
           disabled={disabled || !(armed || capturing)}
           className={`cyber-btn px-4 py-2.5 rounded-sm text-xs flex items-center gap-2 ${
             disabled || !(armed || capturing) ? "opacity-40 cursor-not-allowed" : ""
           }`}
+          title="现在就把这一句切掉（不等自动收句）"
         >
           <Square className="w-3.5 h-3.5" />
           结束
@@ -291,9 +405,14 @@ export default function SentencePanel({
           className={`cyber-btn px-4 py-2.5 rounded-sm text-xs flex items-center gap-2 ${
             !resolved?.text ? "opacity-40 cursor-not-allowed" : ""
           }`}
+          title={
+            continuous
+              ? "定版：这一句已经在历史里了，点一下不再让后续编辑同步过去"
+              : "把这一句加进历史"
+          }
         >
           <Check className="w-3.5 h-3.5" />
-          成句
+          {continuous ? "定版" : "成句"}
         </button>
         <button
           onClick={doSpeak}

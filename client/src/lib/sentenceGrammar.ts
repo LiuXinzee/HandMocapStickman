@@ -16,22 +16,29 @@
  *
  * ===== 合并类怎么定默认值 =====
  *
- * `merged_pron_sg`（我/你/他）是因为六轴 IMU 观测不到绝对 yaw 才合并的，
- * 模型**永远**分不出这三个（见 labelMerge.ts）。所以只能给个默认值。
+ * 单数组 `merged_pron_sg` 现在只剩 **你/他**（都朝身体外指，只差 yaw，六轴 IMU
+ * 测不到）。「我」已经拆成独立类 —— 它指自己胸口、有接触，分得开。见 labelMerge.ts。
  *
- * 默认值不是按"句法角色"定的 —— 试过，不成立。看 synth_sentences.py 的句型表：
+ * 所以单数代词位的默认值就是**「你」，一个常量**，不需要判断：
+ * 模型说"这是个朝外的指向"，那它按定义就不是「我」。要「他」由用户一键换。
+ *
+ * ⚠ 下面那套 self/other 的 slot 机制**不是死代码，但对单数组已经不起作用了** ——
+ * 它现在只对复数组有意义（`merged_pron_pl` 里还留着「我们」，因为复数一条数据都
+ * 没有，见 labelMerge.ts）。规则表里那些 `pron: { 0: "self" }` 同理：命中单数组时
+ * 一律落到「你」，命中复数组时才真的选出「我们」。别因为"看着没用"就删掉。
+ *
+ * 保留这套机制的另一个原因是它记录了一件**试过并且失败**的事：默认值不能按
+ * "句法角色"定。看句型表：
  *   ["you", "name", "what"]   句首主语，但要取「你」（问句是问对面的）
  *   ["i",   "name", "is"]     同样是句首主语，要取「我」
  *   ["sorry", "i"]            寒暄词之后，但要取「我」（道歉是自己道）
  *   ["hello", "you"]          同样是寒暄词之后，要取「你」
  * 同一个位置能取不同的人，所以位置本身信息不够。真正决定的是**这一句在说谁**。
+ * 现在这四条反例已经不再靠规则表解决了 —— 「我」是模型直接认出来的。
  *
- * 于是分两层：
- *   - 命中规则的句子：由规则自己带 `pron` 提示（句型表是已知的，直接写死最准）
- *   - 没命中的句子：退到一个粗启发式（动词后取「你」、问句主语取「你」、其余取「我」）
- *
- * 无论哪层，这都是**默认值不是判定**：UI 必须能一键换成另外两个，且原始词序里
- * 保持「我/你/他」这个未消解的形态。把默认值当结论显示的话，人会以为模型真分出来了。
+ * 无论哪层，这都是**默认值不是判定**：UI 必须能一键换成组里另一个成员，且原始
+ * 词序里保持「你/他」这个未消解的形态。把默认值当结论显示的话，人会以为模型
+ * 真分出来了。
  */
 import { MERGE_GROUPS, getMergeGroup, isMergedLabel } from "./labelMerge";
 import { getWordById } from "./signLanguageVocab";
@@ -46,32 +53,51 @@ export function displayWord(id: string): string {
 const L = displayWord;
 
 /**
- * 这个代词位默认指谁。`self` → 我/我们，`other` → 你/你们。
+ * 这个代词位默认指谁。`self` → 说话人自己（我们），`other` → 对方（你/他、你们）。
  *
  * 刻意不叫 subject/object：句法角色和该取谁**不是一回事**（见文件头的四个反例），
  * 用句法名字命名会诱导以后有人按主谓宾去"修正"它。
+ *
+ * 单数组已经没有 self 成员了（「我」是独立类），所以 `self` 在单数位上等于 `other`。
  */
 export type PronounSlot = "self" | "other";
 
-/** 单数代词三选，顺序即 UI 上的顺序（我 / 你 / 他） */
+/** 单数合并类的候选，顺序即 UI 上的顺序（你 / 他）。「我」不在里面 —— 它是独立类 */
 export const PRON_SG_OPTIONS = MERGE_GROUPS.find((g) => g.id === "merged_pron_sg")!.members;
 /** 复数代词三选（我们 / 你们 / 他们） */
 export const PRON_PL_OPTIONS = MERGE_GROUPS.find((g) => g.id === "merged_pron_pl")!.members;
 
-/** 代词相关的全部 id：两个合并类 id + 六个原始成员。用于 `@pron` 匹配 */
+/**
+ * 全部人称代词的原始 id。
+ *
+ * ⚠ **不能从 `MERGE_GROUPS` 推出来。** 「我」已经从合并组里拆出去了，但它在语法上
+ * 当然还是代词，`@pron` 必须匹配它 —— 否则 `["i","name","is"]` 匹配不上
+ * `["@pron","name","is"]`，每一句以「我」开头的话都会掉到通例规则，
+ * 顺出来的汉语全部退化（而词没丢，所以只会被当成"顺句变差了"，很难定位）。
+ */
+const PRONOUN_WORD_IDS = ["i", "you", "he", "we", "you_pl", "they"];
+
+/** 代词相关的全部 id：合并类 id + 六个原始代词。用于 `@pron` 匹配 */
 const PRONOUN_IDS = new Set<string>([
   ...MERGE_GROUPS.map((g) => g.id),
-  ...MERGE_GROUPS.flatMap((g) => g.members),
+  ...PRONOUN_WORD_IDS,
 ]);
 
 export function isPronoun(id: string): boolean {
   return PRONOUN_IDS.has(id);
 }
 
-/** 合并类按 slot 取默认成员。返回**原始**词 id（如 `"i"`），不是合并类 id */
+/**
+ * 合并类按 slot 取默认成员。返回**原始**词 id（如 `"you"`），不是合并类 id。
+ *
+ * 按组自己声明的 `defaultMember` / `selfMember` 取，**不按 members 下标**：
+ * 下标取法在成员表变动时会静默挪位（把「我」拆出去那次就是这么踩的）。
+ */
 export function defaultPronoun(groupId: string, slot: PronounSlot): string {
-  const opts = groupId === "merged_pron_pl" ? PRON_PL_OPTIONS : PRON_SG_OPTIONS;
-  return slot === "self" ? opts[0] : opts[1];
+  const g = getMergeGroup(groupId);
+  if (!g) return groupId; // 不是合并类就原样返回，绝不吞词
+  if (slot === "self" && g.selfMember) return g.selfMember;
+  return g.defaultMember;
 }
 
 /**
@@ -304,6 +330,29 @@ const RULES: GrammarRule[] = [
     name: "主谓宾",
     pattern: ["*", "*", "*"],
     render: ([a, v, o]) => `${L(a)}${L(v)}${L(o)}。`,
+  },
+  // ——— 赞美 / 比喻（2026-08-29 追加，配那三句新句型）———
+  {
+    // 「你 笑 像 太阳」。**必须有这条**：4 词句在这张表里除了「帮某人做某事」
+    // 没有任何通例接得住（`["*","*","*"]` 是恰好 3 词，`["@pron","*"]` 是恰好 2 词），
+    // 缺了它 resolveSentence 会 rule=null 走原样拼接 → 「你笑像太阳」。
+    // 词没丢，所以只会被当成"文案难看"，而 sentenceGrammar.test 的
+    // 「每条句型都命中某条规则」那条会立刻红 —— 这就是那条测试存在的意义。
+    name: "笑起来像",
+    pattern: ["@pron", "smile", "resemble", "sun"],
+    // 夸的是对面。启发式在这里会挑错：句子里既没有疑问词、`smile` 也不在
+    // TAKES_OTHER 里，`slotsOf` 会给句首 self —— 单数组没有 selfMember，
+    // 现在恰好也落到「你」，但那是**巧合**（复数组「我们笑起来像太阳」就错了）
+    pron: { 0: "other" },
+    render: ([a, , , d]) => `${L(a)}笑起来像${L(d)}。`,
+  },
+  {
+    // 「你 好看」。不写这条会落到下面的「主谓（代词主语）」渲染成「你好看。」——
+    // 词不丢、人也看得懂，纯粹是语气差别（原句是「你真好看」，是句赞美）
+    name: "赞美",
+    pattern: ["@pron", "beautiful"],
+    pron: { 0: "other" },
+    render: ([a]) => `${L(a)}真好看！`,
   },
   // ——— 主谓 ———
   {

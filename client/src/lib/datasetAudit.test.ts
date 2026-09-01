@@ -30,6 +30,14 @@ const range = (span: number): BendRange => ({
   fist: [40 + span, 40 + span, 40 + span, 40 + span, 40 + span],
 });
 const RANGES = { LH: range(120), RH: range(120) };
+/**
+ * 没做弯折标定。`sequenceTrim` 第三层（触觉静止段）只在量程齐全时才跑，
+ * 所以这就是"只有视觉判据"的那个旧世界 —— 无视觉样本会真的落到 `no_vision`。
+ *
+ * 「裁剪口径分裂」那几条必须用它：给了标定的话无视觉样本也会被判过一遍，
+ * 分裂本身就不成立了（那正是补第三层的目的）。
+ */
+const NO_CAL = {};
 
 /** 确定性伪随机，免得测试变成偶发失败 */
 function noise(seed: number): () => number {
@@ -193,13 +201,13 @@ describe("auditDataset：按批次分组", () => {
 });
 
 describe("auditDataset：裁剪口径", () => {
-  it("有视觉的批走 applied/full_span、无视觉的批走 no_vision", () => {
+  it("没标定时：有视觉的批走 applied/full_span、无视觉的批走 no_vision", () => {
     const a = auditDataset(
       [
         makeSample({ day: "2026-08-10", vision: false }),
         makeSample({ day: "2026-08-17", vision: true }),
       ],
-      RANGES
+      NO_CAL
     );
     const old = a.byDay.find((d) => d.key.startsWith("2026-08-10"))!;
     const now = a.byDay.find((d) => d.key.startsWith("2026-08-17"))!;
@@ -209,16 +217,28 @@ describe("auditDataset：裁剪口径", () => {
     expect(now.visionRatio).toBe(1);
   });
 
-  it("无视觉样本的 keptMs = 原时长（一刀没裁，预备动作全在里面）", () => {
-    const a = auditDataset([makeSample({ vision: false, durationMs: 3000 })], RANGES);
+  it("**有标定**时无视觉样本也被判过一遍 —— no_vision 归零，口径不再分裂", () => {
+    // 这是补第三层要达到的效果本身：同一批数据，唯一的差别是有没有弯折两点标定
+    const samples = [
+      makeSample({ day: "2026-08-10", vision: false }),
+      makeSample({ day: "2026-08-17", vision: true }),
+    ];
+    expect(auditDataset(samples, NO_CAL).overall.trim.no_vision).toBe(1);
+    const a = auditDataset(samples, RANGES);
+    expect(a.overall.trim.no_vision).toBe(0);
+    expect(a.flags.join("\n")).not.toContain("口径分裂");
+  });
+
+  it("无视觉样本的 keptMs = 原时长（没标定 → 一刀没裁，预备动作全在里面）", () => {
+    const a = auditDataset([makeSample({ vision: false, durationMs: 3000 })], NO_CAL);
     expect(a.samples[0].trimReason).toBe("no_vision");
     expect(a.samples[0].keptMs).toBeCloseTo(3000, 5);
   });
 
-  it("全都无视觉时报「裁剪从未生效」而不是「口径分裂」", () => {
+  it("没标定且全都无视觉时报「裁剪从未生效」而不是「口径分裂」", () => {
     const a = auditDataset(
       [makeSample({ vision: false }), makeSample({ vision: false })],
-      RANGES
+      NO_CAL
     );
     const joined = a.flags.join("\n");
     expect(joined).toContain("裁剪从未生效");
@@ -445,7 +465,8 @@ describe("formatAuditReport", () => {
       makeSample({ day: "2026-08-17", label: "a", vision: true, durationMs: 1600 }),
       makeSample({ day: "2026-08-17", label: "b", vision: true, durationMs: 1600 }),
     ],
-    RANGES
+    // NO_CAL：要让「口径分裂」那条真的出现在正文里，就得让无视觉那批停在 no_vision
+    NO_CAL
   );
   const text = formatAuditReport(a);
 

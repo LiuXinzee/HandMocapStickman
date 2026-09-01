@@ -71,9 +71,11 @@ import {
   assembleOrientationCalib,
   averageQuaternions,
   axisMapFailReason,
+  axisQualityWarning,
   clearOrientationCalib,
   loadOrientationCalib,
   saveOrientationCalib,
+  TARGET_MOTION_DEG,
   type OrientationCalib,
   type Quat,
 } from "@/lib/orientationCalib";
@@ -184,8 +186,17 @@ const WIZARD_STEPS: WizardStep[] = [
     key: "zero",
     short: "② 竖立",
     title: "抬起竖立 · 陀螺仪零位",
+    /*
+     * ⚠ "手心朝自己"不能改成"手心朝屏幕"。这两句差 180°，而 `MODEL_MOTION_AXES`
+     * 那张表只在"手心朝自己"下成立：换成朝屏幕，① 平铺就从绕 −X 的 90° 变成
+     * 一个 180° 复合旋转，轴系整个解歪。理由写在 orientationCalib.ts 文件头。
+     *
+     * 这里曾经写的就是"手心正对屏幕" —— 同一句话里又要求"摆成与示意手模一致"，
+     * 而示意手模（poseQuat 为单位四元数）是手心朝相机、也就是手心朝自己。
+     * 两条指示互相矛盾，照文字做的人会得到一份 180° 歪掉的标定。
+     */
     instruction:
-      "手指保持伸直，前臂向上抬起 90°，手心正对屏幕，摆成与示意手模一致的竖立姿态并保持静止。这一步记录姿态零位 —— 之后所有帧都按「相对这个姿态转了多少」来显示。",
+      "手指保持伸直，前臂向上抬起 90°，手心朝自己（手背对着屏幕），摆成与示意手模一致的竖立姿态并保持静止。这一步记录姿态零位 —— 之后所有帧都按「相对这个姿态转了多少」来显示。",
     curl: 0,
     poseQuat: { LH: IDENTITY_QUAT, RH: IDENTITY_QUAT },
   },
@@ -194,7 +205,7 @@ const WIZARD_STEPS: WizardStep[] = [
     short: "③ 相对",
     title: "双手手心相对 · 翻腕参考",
     instruction:
-      "手肘不动，双手向内翻腕，让左右手心相对（照着示意手模的朝向）并保持静止。这一步给出偏摆轴，和 ① 的俯仰轴一起反解出轴向映射矩阵。",
+      "手肘不动，双手向内翻腕，让左右手心相对（照着示意手模的朝向）并保持静止。转到手心正好相对、约 90° 就停，别转过头 —— 超过 165° 转轴的正负号就不稳了。这一步给出偏摆轴，和 ① 的俯仰轴一起反解出轴向映射矩阵。",
     curl: 0,
     poseQuat: { LH: quatAboutY(90), RH: quatAboutY(-90) },
   },
@@ -562,9 +573,13 @@ function useCalibWizard(
         lines.push(`${name} 朝向：没取到零位，未写入`);
       } else if (orient.axisMap) {
         const q = orient.axisQuality!;
+        // 三个数后面都跟上目标值：只报实测值时 40° 和 160° 看起来一样正常
         lines.push(
-          `${name} 朝向：零位 + 轴向映射已写入（俯仰 ${q.pitchDeg.toFixed(0)}° · 偏摆 ${q.swingDeg.toFixed(0)}° · 轴分离 ${q.separationDeg.toFixed(0)}°）`
+          `${name} 朝向：零位 + 轴向映射已写入（俯仰 ${q.pitchDeg.toFixed(0)}° · 偏摆 ${q.swingDeg.toFixed(0)}° · 轴分离 ${q.separationDeg.toFixed(0)}°，三项都应接近 ${TARGET_MOTION_DEG}°）`
         );
+        // 过了门限不等于好用 —— 这条不报的话，一份拧歪的矩阵只会显示成一个✓
+        const warn = axisQualityWarning(orient);
+        if (warn) lines.push(`${name} 朝向 WARN：${warn}`);
       } else {
         lines.push(
           `${name} 朝向：只写入零位 —— ${axisMapFailReason(orient)}。整体朝向已经对齐，但翻腕方向可能仍会串轴`
@@ -931,7 +946,14 @@ export default function VirtualMocap() {
 
         {/* 右侧面板 */}
         <div className="w-72 border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-4 shrink-0">
-          {/* 体检汇总：两只手全过才给绿灯，否则直接点名缺哪只手的哪一项 */}
+          {/*
+            体检汇总：两只手全过才给绿灯，否则直接点名缺哪只手的哪一项。
+
+            两只手都要过。弯折标定本身只喂本页的 3D 手模、不进数据集，但**死通道只能
+            靠它的跨度查出来** —— 一路弯折坏掉会往 137 维里灌一个常数，训练不报错、
+            能量曲线也正常，只表现为某几个词永远学不好。所以这一项不是"手模好看"的
+            可选项，别因为"标定不进数据集"就把它从 checklist 里摘掉。
+          */}
           <Section title="CHECKLIST">
             {[L, R].map((hc) => {
               const issues = handIssues(hc);
@@ -955,14 +977,22 @@ export default function VirtualMocap() {
                 </div>
               );
             })}
-            <p className="text-[8px] text-[#334455] leading-relaxed">
-              两只手都要过一遍。弯折标定本身只喂本页的 3D 手模、不进数据集，
-              但死通道要靠它的跨度才查得出来 —— 一路弯折坏掉会往 137 维里灌一个常数，
-              训练不报错、能量曲线也正常，只表现为某几个词永远学不好。
-            </p>
           </Section>
 
-          {/* 四步校准向导：一趟同时解决"手模朝向对不上"和"握拳不够弯" */}
+          {/*
+            四步校准向导（平铺 → 竖立 → 手心相对 → 握拳，自动连播）：一趟同时定下
+            **弯折两点**（张开/握拳）和**朝向零位 + 轴向映射**。只连一只手也能跑。
+
+            零位修的是"整体差一个固定旋转"；轴向映射修的是"我抬手、手模却在左右倾"。
+            后者需要 ①③ 两步真的各转到 90° 且方向分开，没做到时只写零位。
+
+            陀螺漂移也在这四步里顺带测掉（每步静止 3 秒 = 四段静置采样，取最差的一份），
+            所以没有单独的静置自检。判据是四元数推出的重力方向与加速度计实测方向的夹角。
+            ⚠ yaw 不检查：六轴没有磁力计，绝对 yaw 本就没有零点，特征层也不吃它 ——
+            别"补上 yaw 检查"。
+            ⚠ 结论不是 OK 时的处置是**硬件动作**：把手套放平、短按主控按键做陀螺校准、
+            再跑一遍向导。软件这边只能告诉你该按哪一只，没有任何软件修法。
+          */}
           <Section title="CALIBRATION WIZARD">
             <button
               onClick={wizard.startWizard}
@@ -979,23 +1009,6 @@ export default function VirtualMocap() {
               <ImuVerdictBlock hc={L} />
               <ImuVerdictBlock hc={R} />
             </div>
-            <p className="text-[8px] text-[#334455] leading-relaxed">
-              陀螺漂移就在这四步里顺带测掉了（每步静止 3 秒 = 四段静置采样，取最差的一份），
-              不再单独做静置自检。判据是四元数推出的重力方向与加速度计实测方向的夹角
-              —— 两者打架就说明姿态在漂。yaw 不检查：六轴没有磁力计，绝对 yaw 本就没有零点，
-              特征层也不吃它。结论不是 OK 时**把手套放平、短按主控按键做陀螺校准，再跑一遍向导**
-              —— 校准是硬件动作，软件只能告诉你该按哪一只。
-            </p>
-            <p className="text-[8px] text-[#334455] leading-relaxed">
-              平铺 → 竖立 → 手心相对 → 握拳，自动连播。一趟同时定下**弯折两点**
-              （张开/握拳，决定手指能弯到多少）和**朝向零位 + 轴向映射**
-              （决定手模的朝向跟不跟得上你的手）。只连了一只手也能跑，另一只自动跳过。
-            </p>
-            <p className="text-[8px] text-[#334455] leading-relaxed">
-              零位修的是"整体差一个固定旋转"；轴向映射修的是"我抬手、手模却在左右倾"。
-              后者需要 ①③ 两步真的各转到 90° 且方向分开，没做到时只写零位，
-              上面会写明是哪一步不到位。
-            </p>
           </Section>
 
           {/* 手套连接：两只手分别一个 COM 口，各连一次 */}
@@ -1071,20 +1084,27 @@ export default function VirtualMocap() {
             )}
           </Section>
 
-          {/* 弯折两点标定 —— 3D 手模的手指驱动源，左右手各一份（分别存 localStorage） */}
+          {/*
+            弯折两点标定 —— 3D 手模的手指驱动源，左右手各一份（分别存 localStorage）。
+            通道输出是 8 位 ADC 且**极性未知**，所以必须张开/握拳各捕捉一次才能换算成
+            角度；未标定时手模只是柔和预览（满量程只到 42%，握拳不会成形）。
+
+            这里的两个按钮是单点补录用的，主路径是上面的四步向导。
+            每行右侧两个小数字 = 当前原始 ADC · 标定跨度：纹丝不动 = 那一路传感器没反应，
+            在动但跨度小 = 标定时没做到极值。这两个数字是排查的入口，别当装饰删掉。
+          */}
           <Section title="BEND CALIBRATION">
             <BendCalibBlock hc={L} />
             <BendCalibBlock hc={R} />
-            <p className="text-[8px] text-[#334455] leading-relaxed">
-              弯折通道输出是 8 位 ADC 且极性未知，必须张开/握拳各捕捉一次才能换算成角度。
-              未标定时 3D 手模只是柔和预览（满量程也只到 42%，握拳不会成形）。
-              上面这两个按钮是单点补录用的，正常走上面的四步校准。
-            </p>
-            <p className="text-[8px] text-[#334455] leading-relaxed">
-              每行右侧两个小数字是**当前原始 ADC · 标定跨度**。手模看着不对时先看它们：
-              数字纹丝不动 = 那一路传感器没反应；数字在动但跨度小 = 标定时没做到极值。
-            </p>
           </Section>
+
+          {/*
+            这里曾有一块「NEXT · 去采集」，把三条采集入口（静态/时序/句子）平铺成
+            三个按钮。删掉了 —— header 右侧的 StepNav 在 /mocap 上已经给出同样的
+            三个出口，两处并列只是同一件事写两遍。
+            ⚠ 三条链路必须都能进得去（原来这页只有一个指向 /collect 的「数据采集」，
+            另外两条根本进不去）。要动 StepNav 的 `/mocap` 那条时记住这一点。
+          */}
 
           {/* 快捷导航 */}
           <Section title="NAVIGATION">
@@ -1095,12 +1115,6 @@ export default function VirtualMocap() {
             >
               <Activity className="w-3 h-3" />
               骨架训练
-            </Link>
-            <Link
-              href="/collect"
-              className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5 mt-1.5"
-            >
-              数据采集
             </Link>
             <Link
               href="/translate"
@@ -1211,6 +1225,8 @@ function ConnRow({ hc }: { hc: HandCheck }) {
 function OrientBlock({ hc }: { hc: HandCheck }) {
   const calib = hc.orientCalib;
   const fail = calib ? axisMapFailReason(calib) : null;
+  // 写入了矩阵但质量不佳：状态灯仍是绿的（矩阵确实在用），但要把话说出来
+  const warn = calib ? axisQualityWarning(calib) : null;
   return (
     <div className="space-y-0.5">
       <div className="flex items-center justify-between text-[10px] font-mono">
@@ -1228,10 +1244,14 @@ function OrientBlock({ hc }: { hc: HandCheck }) {
           俯仰 {calib.axisQuality.pitchDeg.toFixed(0)}° · 偏摆{" "}
           {calib.axisQuality.swingDeg.toFixed(0)}° · 分离{" "}
           {calib.axisQuality.separationDeg.toFixed(0)}°
+          <span className="text-[#3d4a5a]"> / 目标 {TARGET_MOTION_DEG}°</span>
         </div>
       )}
       {calib && fail && (
         <p className="text-[8px] text-[#00f0ff] leading-relaxed">{fail}</p>
+      )}
+      {calib && warn && (
+        <p className="text-[8px] text-[#f59e0b] leading-relaxed">{warn}</p>
       )}
       {calib && (
         <button

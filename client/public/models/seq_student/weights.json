@@ -1,0 +1,229 @@
+{
+  "format": "seq-weights-1.0",
+  "layers": [
+    {
+      "name": "student_b1_conv",
+      "weights": [
+        {
+          "shape": [
+            5,
+            294,
+            64
+          ],
+          "offset": 0,
+          "count": 94080
+        }
+      ]
+    },
+    {
+      "name": "student_b1_bn",
+      "weights": [
+        {
+          "shape": [
+            64
+          ],
+          "offset": 94080,
+          "count": 64
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 94144,
+          "count": 64
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 94208,
+          "count": 64
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 94272,
+          "count": 64
+        }
+      ]
+    },
+    {
+      "name": "student_b2_conv",
+      "weights": [
+        {
+          "shape": [
+            5,
+            64,
+            64
+          ],
+          "offset": 94336,
+          "count": 20480
+        }
+      ]
+    },
+    {
+      "name": "student_b2_bn",
+      "weights": [
+        {
+          "shape": [
+            64
+          ],
+          "offset": 114816,
+          "count": 64
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 114880,
+          "count": 64
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 114944,
+          "count": 64
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 115008,
+          "count": 64
+        }
+      ]
+    },
+    {
+      "name": "student_b3_conv",
+      "weights": [
+        {
+          "shape": [
+            5,
+            64,
+            128
+          ],
+          "offset": 115072,
+          "count": 40960
+        }
+      ]
+    },
+    {
+      "name": "student_b3_bn",
+      "weights": [
+        {
+          "shape": [
+            128
+          ],
+          "offset": 156032,
+          "count": 128
+        },
+        {
+          "shape": [
+            128
+          ],
+          "offset": 156160,
+          "count": 128
+        },
+        {
+          "shape": [
+            128
+          ],
+          "offset": 156288,
+          "count": 128
+        },
+        {
+          "shape": [
+            128
+          ],
+          "offset": 156416,
+          "count": 128
+        }
+      ]
+    },
+    {
+      "name": "student_fc",
+      "weights": [
+        {
+          "shape": [
+            128,
+            64
+          ],
+          "offset": 156544,
+          "count": 8192
+        },
+        {
+          "shape": [
+            64
+          ],
+          "offset": 164736,
+          "count": 64
+        }
+      ]
+    },
+    {
+      "name": "student_out",
+      "weights": [
+        {
+          "shape": [
+            64,
+            27
+          ],
+          "offset": 164800,
+          "count": 1728
+        },
+        {
+          "shape": [
+            27
+          ],
+          "offset": 166528,
+          "count": 27
+        }
+      ]
+    }
+  ],
+  "meta": {
+    "labels": [
+      "_idle",
+      "angry",
+      "beautiful",
+      "drink",
+      "eat",
+      "goodbye",
+      "hello",
+      "help",
+      "i",
+      "is",
+      "is_not",
+      "listen",
+      "love",
+      "merged_pron_pl",
+      "merged_pron_sg",
+      "name",
+      "resemble",
+      "sad",
+      "smile",
+      "sorry",
+      "speak",
+      "study",
+      "sun",
+      "thank_you",
+      "welcome",
+      "what",
+      "work"
+    ],
+    "seqLen": 32,
+    "backbone": "tcn",
+    "frameDim": 294,
+    "modelType": "seq_tactile",
+    "distilled": true,
+    "trim": "head",
+    "valAccuracy": 0.977011501789093,
+    "numSequences": 439,
+    "numTrain": 352,
+    "numVal": 87,
+    "epochsRun": 32,
+    "exportedAt": 1788102674006
+  }
+}

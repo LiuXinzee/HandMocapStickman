@@ -15,7 +15,7 @@
  *               按下按钮的那一刻手一定是静止的，没有 armed 的话
  *               "静止 800ms 即收句"会在起手之前就把句子收掉，永远录不到东西。
  *   capturing → 见过动作了，正在录。静止计时从这里开始才有意义。
- *   settling  → 正在静止，但还没到 800ms。中途又动了就退回 capturing
+ *   settling  → 正在静止，但还没到收句门限。中途又动了就退回 capturing
  *               （词与词之间的过渡有短暂停顿，不能一停就收）。
  *
  * ===== 为什么不复用逐词模式那套平滑窗口 =====
@@ -25,8 +25,34 @@
  * 这个模块只管切段，词序列完全交给 CTC。
  */
 
-/** 收句判据：连续静止多久算一句结束 */
+/**
+ * 收句判据：连续静止多久算一句结束。
+ *
+ * 不要改它 —— `/collect-sentence` 靠它决定录制的时间包络，改了之后新录的样本
+ * 和存量 90 条句子就是两种口径。
+ */
 export const SETTLE_MS = 800;
+
+/**
+ * **连续模式**的收句基线（一句接一句、不用点按钮）。
+ *
+ * 明显长于 `SETTLE_MS`：一句一次模式里"收早了"最多是这一句被切两半，用户看得见、
+ * 再点一次就行；连续模式下没人盯着按钮，切错会连着错下去。而且判"静止"本身滞后一个
+ * 600ms 探测窗（见 `sentenceEnvelope.SENTENCE_MOTION_WINDOW_MS`），所以体感收句延迟
+ * ≈ 1200 + 600 = 1.8s。宁可晚收句 —— 早收句是丢词，晚收句只是多等一会儿。
+ *
+ * ⚠ 1200 是**估的**，没有实测支撑。面板上会把实测的静止时长和生效门限一起显示出来，
+ * 按现场读数再定。
+ */
+export const CONTINUOUS_SETTLE_MS = 1200;
+
+/**
+ * 自适应能把门限抬到的上限。再长不如让人点「结束」。
+ *
+ * 只封住**自适应加出来的那部分**，不封基线：`effSettleMs` 里基线永远是下界，
+ * 否则谁把基线设得比这个大，门限会被无声地调小。
+ */
+export const SETTLE_CEIL_MS = 3000;
 
 /**
  * 单句上限。超过就强制收句。
@@ -62,12 +88,21 @@ export interface CaptureStatus {
   stillMs: number;
   /** 距离收句还差多少（settling 时用来画进度条）；其余状态为 null */
   settleRemainMs: number | null;
+  /**
+   * **当前生效**的收句门限（自适应之后）。进度条和读数必须用它，不能用常量 ——
+   * 门限抬高之后拿常量画的条会填满后卡在 100% 干等，看着像卡死了。
+   */
+  settleMs: number;
+  /** 本句里见过的最长"假句尾"（词间犹豫）；0 = 一次都没犹豫过 */
+  maxIntraStillMs: number;
 }
 
 export interface SentenceCaptureOptions {
   settleMs?: number;
   maxUtteranceMs?: number;
   armTimeoutMs?: number;
+  /** 见 `setSettle`。默认 false —— 采集页和一句一次模式的行为逐位不变 */
+  adaptiveSettle?: boolean;
 }
 
 /**
@@ -82,14 +117,60 @@ export class SentenceCapture {
   private startedAt = 0;
   private stillSince = 0;
   private lastNow = 0;
-  private readonly settleMs: number;
+  /** 收句门限的**基线**。不再 readonly —— 连续模式开关要在运行时改（见 `setSettle`） */
+  private settleMs: number;
+  private adaptive: boolean;
   private readonly maxMs: number;
   private readonly armTimeoutMs: number;
+  /**
+   * 本句里见过的最长"假句尾"：进了 `settling` 又因为动作回到 `capturing` 的那段时长。
+   * 句尾门限要比它更长，否则同样的犹豫会把下一句切两半。
+   *
+   * 只反映**真正的长犹豫**：`moving` 有 600ms 探测滞后，短于那个窗的词间保持
+   * 根本进不了 `settling`，所以不会被这里记上。
+   */
+  private maxIntraStillMs = 0;
+  /**
+   * 上一次 settled 收句**实际用掉**的门限，`settleDropMs` 读它。
+   *
+   * 为什么不能直接返回 `this.settleMs`：门限一旦是动态的，尾部就会**少砍**一段静止。
+   * 整段被重采样到定长 128 帧，尾部静止越长，每个词分到的帧越少 —— 这个 bug
+   * 能编译、能跑，只表现为"准确率稍微差一点"。
+   *
+   * 初值给基线而不是 0：万一 `settleDropMs` 拿到一个不是 tick 返回的 action
+   * （手工构造），砍基线等于今天的行为，砍 0 才是那个静默 bug。
+   */
+  private lastSettleUsedMs: number;
 
   constructor(opts: SentenceCaptureOptions = {}) {
     this.settleMs = opts.settleMs ?? SETTLE_MS;
+    this.adaptive = opts.adaptiveSettle ?? false;
     this.maxMs = opts.maxUtteranceMs ?? MAX_UTTERANCE_MS;
     this.armTimeoutMs = opts.armTimeoutMs ?? ARM_TIMEOUT_MS;
+    this.lastSettleUsedMs = this.settleMs;
+  }
+
+  /**
+   * 运行时改收句门限。**只影响下一跳的判据，不打断当前这一句、不清 `maxIntraStillMs`。**
+   *
+   * 需要它是因为连续模式是个 checkbox，而 `SentenceEnvelope` 在页面里只 new 一次。
+   * 不清 `maxIntraStillMs`：那是"本句"的观测量，中途改开关不该让它失忆。
+   */
+  setSettle(baseMs: number, adaptive: boolean): void {
+    this.settleMs = baseMs;
+    this.adaptive = adaptive;
+  }
+
+  /**
+   * 当前生效的门限。
+   *
+   * 自适应规则：句尾静止要比**本句里已经见过的最长假句尾**更长（×1.4 + 200ms 余量）。
+   * 基线永远是下界，上限只封自适应加出来的那部分。
+   */
+  private effSettleMs(): number {
+    if (!this.adaptive) return this.settleMs;
+    const want = Math.min(SETTLE_CEIL_MS, this.maxIntraStillMs * 1.4 + 200);
+    return Math.max(this.settleMs, want);
   }
 
   /** 按「开始一句」。已经在录的话重新开始（等于放弃当前这句）。 */
@@ -99,6 +180,9 @@ export class SentenceCapture {
     this.startedAt = 0;
     this.stillSince = 0;
     this.lastNow = now;
+    // 上一句的犹豫不该抬高下一句的门限：不同句子的停顿结构没有关系
+    this.maxIntraStillMs = 0;
+    this.lastSettleUsedMs = this.settleMs;
   }
 
   /** 按「结束」手动收句。没录到动作时返回 abort —— 空段送去解码只会解出乱句 */
@@ -156,12 +240,19 @@ export class SentenceCapture {
 
       case "settling":
         if (moving) {
-          // 又动了 —— 刚才那段静止是词间过渡，不是句尾。计时作废
+          // 又动了 —— 刚才那段静止是词间过渡，不是句尾。计时作废，
+          // 但**记一笔**：本句里出现过这么长的假句尾，句尾门限要比它更长
+          this.maxIntraStillMs = Math.max(
+            this.maxIntraStillMs,
+            now - this.stillSince
+          );
           this.state = "capturing";
           this.stillSince = 0;
           return { kind: "none" };
         }
-        if (now - this.stillSince >= this.settleMs) {
+        if (now - this.stillSince >= this.effSettleMs()) {
+          // latch：`settleDropMs` 必须砍掉**实际用掉**的这个值，不是基线
+          this.lastSettleUsedMs = this.effSettleMs();
           this.state = "idle";
           return { kind: "decode", reason: "settled" };
         }
@@ -176,6 +267,7 @@ export class SentenceCapture {
 
   status(): CaptureStatus {
     const capturing = this.state === "capturing" || this.state === "settling";
+    const eff = this.effSettleMs();
     return {
       state: this.state,
       elapsedMs: capturing ? Math.max(0, this.lastNow - this.startedAt) : 0,
@@ -183,8 +275,10 @@ export class SentenceCapture {
         this.state === "settling" ? Math.max(0, this.lastNow - this.stillSince) : 0,
       settleRemainMs:
         this.state === "settling"
-          ? Math.max(0, this.settleMs - (this.lastNow - this.stillSince))
+          ? Math.max(0, eff - (this.lastNow - this.stillSince))
           : null,
+      settleMs: eff,
+      maxIntraStillMs: this.maxIntraStillMs,
     };
   }
 
@@ -209,6 +303,8 @@ export class SentenceCapture {
    * 开头那几个词，而尾部那段静止照样留着。两个值一起传才是"掐掉尾巴、保住开头"。
    */
   settleDropMs(action: CaptureAction): number {
-    return action.kind === "decode" && action.reason === "settled" ? this.settleMs : 0;
+    return action.kind === "decode" && action.reason === "settled"
+      ? this.lastSettleUsedMs
+      : 0;
   }
 }

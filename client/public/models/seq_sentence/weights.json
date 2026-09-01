@@ -148,17 +148,17 @@
         {
           "shape": [
             128,
-            23
+            27
           ],
           "offset": 156544,
-          "count": 2944
+          "count": 3456
         },
         {
           "shape": [
-            23
+            27
           ],
-          "offset": 159488,
-          "count": 23
+          "offset": 160000,
+          "count": 27
         }
       ]
     }
@@ -166,12 +166,13 @@
   "meta": {
     "labels": [
       "angry",
+      "beautiful",
       "drink",
       "eat",
       "goodbye",
-      "happy",
       "hello",
       "help",
+      "i",
       "is",
       "is_not",
       "listen",
@@ -179,10 +180,13 @@
       "merged_pron_pl",
       "merged_pron_sg",
       "name",
+      "resemble",
       "sad",
+      "smile",
       "sorry",
       "speak",
       "study",
+      "sun",
       "thank_you",
       "welcome",
       "what",
@@ -193,13 +197,14 @@
     "frameDim": 294,
     "modelType": "seq_sentence",
     "ctc": true,
-    "blankIndex": 22,
+    "blankIndex": 26,
     "outputFrames": 32,
-    "valWer": 0.056584362139917695,
-    "numTrain": 1584,
-    "numVal": 396,
-    "numReal": 0,
-    "numSynth": 1980,
-    "synthOnly": true
+    "valWer": 0.006952491309385863,
+    "numTrain": 1416,
+    "numVal": 354,
+    "numReal": 90,
+    "numSynth": 1680,
+    "synthOnly": false,
+    "exportedAt": 1788102684539
   }
 }

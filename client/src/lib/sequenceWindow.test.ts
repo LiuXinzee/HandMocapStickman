@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { SequenceWindowBuffer } from "./sequenceWindow";
-import { SEQ_SENSOR_N, SEQ_IMU_N } from "./datasetStore";
+import { SEQ_SENSOR_N, SEQ_IMU_N, SEQ_LANDMARK_N } from "./datasetStore";
 import type { GloveFrame } from "./gloveProtocol";
 
 function frame(t: number, value: number): GloveFrame {
@@ -152,6 +152,132 @@ describe("SequenceWindowBuffer", () => {
     it("空缓冲返回 null", () => {
       expect(new SequenceWindowBuffer().snapshotAll()).toBeNull();
       expect(new SequenceWindowBuffer().spanMs()).toBeNull();
+    });
+  });
+
+  /*
+   * ===== 视觉通道 =====
+   *
+   * 这个开关只给句子采集页用（量词间过渡时长 + 补上裁剪的可见段判据），
+   * 推理端必须保持默认关。下面第一条和最后一条锁的就是这件事 ——
+   * 默认值哪天被改成 true，`/translate` 会开始给样本带 landmarks，
+   * 而 `includeVision` 默认 false 根本不读它，症状是"多花 CPU、什么都没变"。
+   */
+  describe("视觉通道", () => {
+    /** 63 维一帧，整帧同值，方便断言"取到了第几帧" */
+    const lm = (v: number) => new Float32Array(SEQ_LANDMARK_N).fill(v);
+
+    it("默认关：pushVision 被直接丢掉，landmarks 恒为 null", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000 });
+      fill(buf, 1000);
+      for (let t = 1000; t <= 2000; t += 30) buf.pushVision(t, lm(1), lm(2));
+      expect(buf.visionFrames()).toBe(0);
+      const snap = buf.snapshotAll()!;
+      expect(snap.leftLandmarks).toBeNull();
+      expect(snap.rightLandmarks).toBeNull();
+    });
+
+    it("开了但摄像头没启动（视觉缓冲空）时 landmarks 仍为 null", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      fill(buf, 1000);
+      const snap = buf.snapshotAll()!;
+      expect(snap.leftLandmarks).toBeNull();
+      expect(snap.rightLandmarks).toBeNull();
+    });
+
+    it("开了视觉但那只手没戴手套时不分配它的视觉列", () => {
+      // 口径与 useSequenceRecorder 一致：下游要能区分"这只手没戴手套"和"这只手视觉丢了"
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      fill(buf, 1000); // 只灌左手
+      for (let t = 1000; t <= 2000; t += 30) buf.pushVision(t, lm(1), lm(2));
+      const snap = buf.snapshotAll()!;
+      expect(snap.leftLandmarks).not.toBeNull();
+      expect(snap.rightLandmarks).toBeNull();
+    });
+
+    it("按时间最近邻落到栅格上", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      fill(buf, 1000);
+      // 视觉 30ms 一帧（约 33Hz），栅格 20ms 一帧 —— 真实情况就是不整除
+      let i = 0;
+      for (let t = 1000; t <= 2000; t += 30, i++) buf.pushVision(t, lm(i), null);
+      expect(buf.visionFrames()).toBe(i);
+      const snap = buf.snapshotAll()!;
+      expect(snap.frameCount).toBe(50);
+      expect(snap.leftLandmarks!.length).toBe(50 * SEQ_LANDMARK_N);
+      // 栅格点 0 → 1000ms，正对视觉第 0 帧
+      expect(snap.leftLandmarks![0]).toBe(0);
+      // 栅格点 1 → 1020ms，离 1030（第 1 帧）比离 1000 更近
+      expect(snap.leftLandmarks![SEQ_LANDMARK_N]).toBe(1);
+      // 栅格点 3 → 1060ms，正对视觉第 2 帧
+      expect(snap.leftLandmarks![3 * SEQ_LANDMARK_N]).toBe(2);
+    });
+
+    it("这一帧没检出手时填 NaN 而不是 0", () => {
+      // 0 是合法坐标（画面左上角）。填 0 等于宣称整段都看得见手，
+      // sequenceTrim 的可见段那一层会彻底失效，而症状只是"这批数据裁得比别批少"
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      fill(buf, 1000);
+      for (let t = 1000; t <= 2000; t += 30) {
+        const seen = t < 1500;
+        buf.pushVision(t, seen ? lm(0.7) : null, null);
+      }
+      const snap = buf.snapshotAll()!;
+      const L = snap.leftLandmarks!;
+      // Float32 存储，0.7 读回来是 0.69999998
+      expect(L[0]).toBeCloseTo(0.7, 6);
+      expect(L[SEQ_LANDMARK_N - 1]).toBeCloseTo(0.7, 6);
+      // 栅格点 40 → 1800ms，那时视觉已经丢手
+      const o = 40 * SEQ_LANDMARK_N;
+      expect(Number.isNaN(L[o])).toBe(true);
+      expect(Number.isNaN(L[o + SEQ_LANDMARK_N - 1])).toBe(true);
+    });
+
+    it("视觉离栅格点太远（>50ms）时判为没有视觉，不硬凑", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      fill(buf, 1000);
+      buf.pushVision(1000, lm(0.4), null); // 只有一帧视觉
+      const snap = buf.snapshotAll()!;
+      const L = snap.leftLandmarks!;
+      expect(L[0]).toBeCloseTo(0.4, 6); // 栅格点 0 = 1000ms，差 0
+      expect(L[2 * SEQ_LANDMARK_N]).toBeCloseTo(0.4, 6); // 1040ms，差 40 —— 容一帧抖动
+      expect(Number.isNaN(L[3 * SEQ_LANDMARK_N])).toBe(true); // 1060ms，差 60 > 50
+      expect(Number.isNaN(L[5 * SEQ_LANDMARK_N])).toBe(true); // 1100ms，差 100
+    });
+
+    it("视觉缓冲同样受 bufferMs 约束", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 1000, vision: true });
+      for (let t = 1000; t <= 31000; t += 30) buf.pushVision(t, lm(1), null);
+      // 30 秒共 1001 帧，留下的应该只有最后约 1 秒（约 34 帧）
+      expect(buf.visionFrames()).toBeLessThan(60);
+      expect(buf.visionFrames()).toBeGreaterThan(20);
+    });
+
+    it("clear 一并清掉视觉缓冲", () => {
+      const buf = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      buf.pushVision(1000, lm(1), lm(1));
+      expect(buf.visionFrames()).toBe(1);
+      buf.clear();
+      expect(buf.visionFrames()).toBe(0);
+    });
+
+    it("不开视觉时输出与视觉通道加进来之前逐位相同", () => {
+      // 防默认值漂移：推理端的样本必须和这个开关不存在时一模一样
+      const off = new SequenceWindowBuffer({ bufferMs: 12000 });
+      const on = new SequenceWindowBuffer({ bufferMs: 12000, vision: true });
+      fill(off, 1000);
+      fill(on, 1000);
+      for (let t = 1000; t <= 2000; t += 30) {
+        off.pushVision(t, new Float32Array(SEQ_LANDMARK_N).fill(0.3), null);
+      }
+      const a = off.snapshotAll()!;
+      const b = on.snapshotAll()!; // vision:true 但一帧视觉都没压
+      expect(a.frameCount).toBe(b.frameCount);
+      expect(Array.from(a.leftSensor!)).toEqual(Array.from(b.leftSensor!));
+      expect(Array.from(a.leftImu!)).toEqual(Array.from(b.leftImu!));
+      expect(Array.from(a.timestamps)).toEqual(Array.from(b.timestamps));
+      expect(a.leftLandmarks).toBeNull();
+      expect(b.leftLandmarks).toBeNull();
     });
   });
 

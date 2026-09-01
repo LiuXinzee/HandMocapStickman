@@ -21,14 +21,25 @@
  * 打不出来，而 CTC 本来就靠 blank 区分重复词。它只用那个 100ms 循环做一件事 ——
  * 判断"这一句什么时候结束"（`sentenceCapture.ts` 的状态机），推理是收句时跑一次。
  *
- * 底部有一条**双手 3D 手模**（与 /mocap 同一份标定、同一套驱动，见 useHandModelDrive）。
+ * 底部是**一手一个视口**（`HandModel` × 2，与第 1 步 /mocap 的自检同一个组件、
+ * 同一份标定、同一套驱动，见 useHandModelDrive）。
+ *
+ * ⚠ 这里**曾经**是一块两手合一的「手语舞台」（`SigningStage` + 躯干剪影），
+ * 已经撤掉了。撤的理由不是观感，是它承诺了一个做不到的东西：
+ * 手语的**位置**是语言学通道（额头 / 下巴 / 胸前是不同的词），而手套只有
+ * 弯折 + 压力 + IMU —— IMU 给朝向不给位置，六轴还观测不到绝对 yaw。
+ * 所以把两只手摆进同一个人形场景里，看着像"在打手语"，实际上仍然展示不出
+ * 一个完整的手语词，只是把"位置是编的"这件事藏得更深。
+ * 分成两格反而诚实：一格 = 一只手的手型 + 朝向，正好是手套真的测到的那些通道。
+ * **别再合回去**，除非哪天真加了位置观测（光学 / 超宽带之类）。
+ *
  * 它不参与识别，是给"为什么不识别"提供第一手判据的：手模不动 = 手套没在出数据；
  * 手模动了但手型不像 = 弯折标定或某一路传感器的问题，跟模型无关。
  * 没有它的时候，这两种硬件问题在这一页表现为"模型不准"，会把人引向重训模型。
  */
 import { useGloveFrames, useGloves } from "@/contexts/GloveContext";
 import StepNav from "@/components/StepNav";
-import HandModel from "@/components/HandModel";
+import HandModel, { type HandDrive } from "@/components/HandModel";
 import { useHandModelDrive } from "@/hooks/useHandModelDrive";
 import type { HandChannel } from "@/hooks/useDualGloveSerial";
 import type { HandKey } from "@/lib/bendRange";
@@ -51,14 +62,19 @@ import {
   sentenceModelAvailable,
   type LoadedSentenceModel,
 } from "@/lib/sentenceModel";
+import { fetchWordModelMeta, loadDeployedWordModel } from "@/lib/wordModel";
+import { ModelMissingError } from "@/lib/modelWeights";
 import {
+  CONTINUOUS_SETTLE_MS,
   MAX_UTTERANCE_MS,
-  SentenceCapture,
+  SETTLE_MS,
   type CaptureAction,
   type CaptureStatus,
 } from "@/lib/sentenceCapture";
+import { SentenceEnvelope } from "@/lib/sentenceEnvelope";
 import SentencePanel from "@/components/SentencePanel";
-import { stopSpeaking } from "@/lib/speech";
+import { speakChinese, stopSpeaking, warmUpVoices } from "@/lib/speech";
+import { resolveSentence } from "@/lib/sentenceGrammar";
 import { SequenceWindowBuffer } from "@/lib/sequenceWindow";
 import { judgeWindowMotion } from "@/lib/motionGate";
 import { mirrorStaticInputs, normalizeHandedness } from "@/lib/handMirror";
@@ -73,9 +89,29 @@ import { getLatestModel, getLatestSequenceModel } from "@/lib/datasetStore";
 import {
   getWordById,
   getCategoryColor,
+  getDisplayLabel,
+  getTranslationLabel,
+  resolveToMember,
   IDLE_LABEL,
 } from "@/lib/signLanguageVocab";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { matchCompound } from "@/lib/compoundWords";
+import { isSuppressed } from "@/lib/suppressedWords";
+import { postprocessSentence } from "@/lib/sentencePostprocess";
+import { applyFistGate, thumbPeak, THUMB_PEAK_GATE } from "@/lib/fistGate";
+import {
+  rotationRate,
+  ROT_RATE_HI,
+  ROT_RATE_LO,
+  type RotationReading,
+} from "@/lib/rotationRate";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { Link } from "wouter";
 import {
   ArrowLeft,
@@ -97,6 +133,22 @@ interface TranslationEntry {
 }
 
 type ModelMode = "static" | "sequence" | "sentence";
+
+/**
+ * URL 里带过来的初始 MODE（`/translate?mode=sentence`）。
+ *
+ * 为什么需要它：下面那个自动加载 effect 会**按模型新旧**选 MODE，而它只认识
+ * 静态和时序两条 —— 句子模型不在 IndexedDB 里（它是 Python 导出的构建产物，
+ * 见 sentenceModel.ts），`getLatestModel` 系列查不到它。于是从 /train-sentence
+ * 点「去使用」过来，落地永远是时序滑窗：刚训完句子模型的人看到的是另一条链路，
+ * 而页面上没有任何提示说"你要的那一档在第三个按钮里"。
+ *
+ * 所以让链接自己带上意图。读不出来就返回 null，交给按新旧自动选的老逻辑。
+ */
+function modeFromUrl(): ModelMode | null {
+  const m = new URLSearchParams(window.location.search).get("mode");
+  return m === "static" || m === "sequence" || m === "sentence" ? m : null;
+}
 
 /**
  * 滑窗长度。
@@ -124,22 +176,16 @@ const DOMINANCE_WINDOW_MS = 1000;
 /** 主手判定的重算间隔（ms）。10Hz 推理里每次都重算是白费，运动能量不会那么快变 */
 const DOMINANCE_RECHECK_MS = 300;
 
-/**
- * 句子模式判"手还在动吗"用的窗口长度。**比 `WINDOW_MS` 短得多，这是必需的。**
- *
- * 句尾判据是「连续静止 `SETTLE_MS`（800ms）」。如果拿 2000ms 的推理窗口去判，
- * 窗口里那 800ms 静止会被前面 1200ms 的动作盖住 —— `judgeWindowMotion` 量的是
- * 整窗的活动量，永远判不出句尾，表现为"打完不收句、一直录到 12s 上限"。
- *
- * 反过来也不能太短：窗口是滑动重叠的，600ms 窗要"整窗都静止"才判静止，
- * 于是实际收句延迟约 600+800 = 1.4s，比 0.8s 长。这个方向是安全的（宁可晚收句，
- * 不要把人打到一半掐掉），所以选择接受它，而不是去调低 `IDLE_ENERGY` 门限 ——
- * 那个门限是两条老链路共用的，为句子模式动它会顺带改坏逐词识别。
- */
-const SENTENCE_MOTION_WINDOW_MS = 600;
-
 export default function Translate() {
-  const [modelMode, setModelMode] = useState<ModelMode>("static");
+  /*
+   * URL 指定了 MODE 就用它，并且**锁住**自动选择 —— 不然自动加载 effect 跑完
+   * （异步，晚于首帧）会把它改掉，用户看到的是先闪一下句子档再跳去时序。
+   */
+  const urlMode = useRef<ModelMode | null>(null);
+  if (urlMode.current === null) urlMode.current = modeFromUrl();
+  const [modelMode, setModelMode] = useState<ModelMode>(
+    urlMode.current ?? "static"
+  );
   const windowBufRef = useRef<SequenceWindowBuffer | null>(null);
   if (windowBufRef.current === null) {
     // 12s **无条件**给到，不按模式分配：切 MODE 时重新 new 一个会把缓冲里的数据丢掉，
@@ -209,6 +255,16 @@ export default function Translate() {
   const bothConnected = gloveLeft.isConnected && gloveRight.isConnected;
   const gloveError = gloveLeft.error || gloveRight.error;
 
+  /*
+   * 底部两个手模视口的驱动。
+   *
+   * hook 留在页面这一层调（而不是塞进 `HandViewport` 里），是因为上方那一行
+   * 连接/标定汇总也要读 `bendCalibrated` / `orientCalibrated`。它自带 rAF、
+   * 写 ref 不触发 React 重渲染，100Hz 的手套数据不会打到这个页面组件上。
+   */
+  const leftHand = useHandModelDrive(gloveLeft, "LH");
+  const rightHand = useHandModelDrive(gloveRight, "RH");
+
   // 状态
   const [staticReady, setStaticReady] = useState(isModelLoaded());
   const [seqReady, setSeqReady] = useState(isSequenceModelLoaded());
@@ -226,9 +282,18 @@ export default function Translate() {
    * 其实已经训好的模型。
    */
   const sentenceModelRef = useRef<LoadedSentenceModel | null>(null);
-  const sentenceCapRef = useRef<SentenceCapture | null>(null);
-  if (sentenceCapRef.current === null) {
-    sentenceCapRef.current = new SentenceCapture();
+  /**
+   * 收句状态机 + 取数，**和采集页 `/collect-sentence` 共用同一个类**
+   * （`sentenceEnvelope.ts`）。两边必须产生同一种时间包络：采集时多录进去的一段静止
+   * 会在重采样到定长 T 时把每个词在归一化时间轴上整体挪位，而这一类偏差合成 val
+   * 和真实 val 都看不出来，只有戴上手套才发现打什么都不准。
+   * 所以这里**不要**把 tick/snapshotAll 拆开重写一份 —— 那就退回"靠人记得对齐"了。
+   *
+   * 缓冲由本页持有（三档共用一个），envelope 只借用。
+   */
+  const sentenceEnvRef = useRef<SentenceEnvelope | null>(null);
+  if (sentenceEnvRef.current === null) {
+    sentenceEnvRef.current = new SentenceEnvelope(windowBufRef.current);
   }
   /** null = 还在探测 / 探测本身失败（看 sentenceError） */
   const [sentenceAvailable, setSentenceAvailable] = useState<boolean | null>(null);
@@ -238,9 +303,40 @@ export default function Translate() {
   const [sentenceWords, setSentenceWords] = useState<string[] | null>(null);
   const [pronOverrides, setPronOverrides] = useState<Record<number, string>>({});
   const [grammarOn, setGrammarOn] = useState(true);
+  /** 收句后自动把顺句结果念出来。默认开 —— 这一档的用途就是"打完让对面听见" */
+  const [autoSpeak, setAutoSpeak] = useState(true);
+  /**
+   * 连续模式：收句后自动成句 + 自动重新等下一句，全程不用碰鼠标。默认开。
+   *
+   * 关掉就退回"一句一次"（每句都要点「开始一句」），采集页不受影响。
+   */
+  const [continuousMode, setContinuousMode] = useState(true);
   const [sentenceHistory, setSentenceHistory] = useState<string[]>([]);
+  /**
+   * 历史里最后一条是不是"当前这一句"（自动成句进去的、还能改）。
+   *
+   * 需要它是因为自动成句发生在解码那一刻，而用户**之后**还会点代词、删词。
+   * 没有这个标记就没法把编辑同步回历史 —— 屏幕上的大字变了、历史里留着错的那个，
+   * 界面上看不出来。手动「成句」= 定版，把它置 false。
+   */
+  const [lastLive, setLastLive] = useState(false);
   const [sentenceNote, setSentenceNote] = useState<string | null>(null);
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus | null>(null);
+
+  /*
+   * 自动朗读要读的两个开关走 **ref**，不直接读 state。
+   *
+   * 念这一步发生在 `decodeUtterance` 里，而那个 callback 在推理循环那个 effect 的
+   * 依赖里。把 `autoSpeak` / `grammarOn` 写进它的 deps，勾一下 checkbox 就会重建
+   * 100ms 定时器 —— 正好会打断当前这一句的收句计时。ref 没这个副作用。
+   */
+  const autoSpeakRef = useRef(autoSpeak);
+  autoSpeakRef.current = autoSpeak;
+  const grammarOnRef = useRef(grammarOn);
+  grammarOnRef.current = grammarOn;
+  /** 同上：`tickSentence` 在定时器里读它决定要不要自动接下一句 */
+  const continuousRef = useRef(continuousMode);
+  continuousRef.current = continuousMode;
 
   const modelReady =
     modelMode === "static"
@@ -253,6 +349,27 @@ export default function Translate() {
     word: string;
     confidence: number;
     allProbabilities: Array<{ label: string; probability: number }>;
+    /**
+     * 本窗口右手拇指压力单点峰值（0-255），-1 = 没有右手数据。
+     *
+     * 显示出来是为了让 `fistGate.THUMB_PEAK_GATE` 这个阈值**能当场校准** ——
+     * 闸门的所有阈值都是从录制数据量的，而模型对录制数据本来就全对，所以录制
+     * 数据证明不了阈值在实时下也对。有这个读数就不用为了调阈值去录一批。
+     */
+    thumbPeak: number;
+    /**
+     * 本窗口右手四元数累计路径转角速率（度/秒），null = 量不出（没有 IMU）。
+     *
+     * 这是 谢谢/难过 那一刀现在的**主判据**（见 rotationRate.ts）。显示出来的
+     * 理由和拇指峰值一样、而且更迫切：50 / 70 这两个阈值是从 30 条录制里量的，
+     * 相邻滑窗重叠 95%，有效样本数接近 30 —— 必须靠这个读数在实时下校准。
+     * 打「谢谢」时这个数该在 30 上下，画圈打「难过」时该到 90 上下。
+     */
+    rotRate: number | null;
+    /** 闸门有没有改掉模型的输出 —— 界面上标一下，免得把闸门的行为当成模型的行为 */
+    gated: boolean;
+    /** 闸门这一次是靠哪个判据下的结论 —— 界面上要说清是转角判的还是拇指判的 */
+    gateReason: string;
   } | null>(null);
   const [history, setHistory] = useState<TranslationEntry[]>([]);
   const [isTranslating, setIsTranslating] = useState(false);
@@ -271,6 +388,8 @@ export default function Translate() {
   const predictionBufferRef = useRef<string[]>([]);
   const lastAddedWordRef = useRef<string>("");
   const lastAddedTimeRef = useRef<number>(0);
+  /** 上一个确认词的置信度。复合词合成后取两段里较小的那个，所以要留着 */
+  const lastAddedConfRef = useRef<number>(0);
   const translateIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const confidenceThresholdRef = useRef(confidenceThreshold);
   const smoothingWindowRef = useRef(smoothingWindow);
@@ -298,6 +417,8 @@ export default function Translate() {
   useEffect(() => {
     let cancelled = false;
     const loaded: string[] = [];
+    /** 部署的词模型读取出错（不是"没部署"）。必须显示出来，见下 */
+    let seqWarn: string | null = null;
 
     // 两条都**先查后判**：已在内存里的模型也要把名字查出来显示在 MODEL INFO 里，
     // 否则"到底在用哪个模型"这个问题在页面上无处可查
@@ -310,14 +431,49 @@ export default function Translate() {
       return model;
     });
 
-    const seqJob = getLatestSequenceModel().then(async (model) => {
-      if (!model) return null;
-      if (!isSequenceModelLoaded()) {
-        await loadSequenceModelFromSaved(model);
-        loaded.push(`时序滑窗 "${model.name}"`);
+    /*
+     * 时序（逐词）这一档有**两个来源**：IndexedDB 里页面内训出来的，
+     * 和 Python 训好、随代码部署在 `/models/seq_student/` 的。
+     *
+     * 为什么必须接上部署这一条：08-28/29 那批词（我/像/笑/太阳/好看/名字）
+     * 只在 Python 侧训过。以前浏览器只认 IndexedDB，用的是更早训的模型，
+     * 那些词**不在标签表里** —— 表现不是"没认出来"，而是稳定输出别的词
+     * （模型对任意输入都会给出一个已知类）。
+     *
+     * 选型沿用本文件既有的"谁更新用谁"：`SavedModel.createdAt` 与
+     * `WordModelMeta.exportedAt` 都是 epoch 毫秒，可以直接比。
+     * 老产物没有 exportedAt（undefined）→ 当 0，让页面内训的赢；
+     * 反过来会让一个不知道多老的产物永久压住用户刚训完的模型。
+     * 但**没有**页面内模型时，部署的照样加载（savedAt = -1）。
+     */
+    const seqJob = (async () => {
+      const [saved, deployed] = await Promise.all([
+        getLatestSequenceModel(),
+        fetchWordModelMeta().catch((e) => {
+          // 404 = 还没跑 export_weights.py。这是正常状态，不打扰
+          if (e instanceof ModelMissingError) return null;
+          // 别的错（500、CORS、代理插一脚）要让人看见 ——
+          // 静默的表现是"我明明导出了，怎么没生效"，无处可查
+          seqWarn = `部署的词模型读不出来（不是"没部署"）：${String(e)}`;
+          return null;
+        }),
+      ]);
+
+      const deployedAt = deployed?.exportedAt ?? 0;
+      if (deployed && deployedAt >= (saved?.createdAt ?? -1)) {
+        if (!isSequenceModelLoaded()) {
+          await loadDeployedWordModel();
+          loaded.push(`时序滑窗 "seq_student(部署)" · ${deployed.labels.length} 词`);
+        }
+        return { name: "seq_student(部署)", createdAt: deployedAt };
       }
-      return model;
-    });
+      if (!saved) return null;
+      if (!isSequenceModelLoaded()) {
+        await loadSequenceModelFromSaved(saved);
+        loaded.push(`时序滑窗 "${saved.name}"`);
+      }
+      return { name: saved.name, createdAt: saved.createdAt };
+    })();
 
     Promise.all([staticJob, seqJob]).then(([staticModel, seqModel]) => {
       if (cancelled) return;
@@ -327,13 +483,20 @@ export default function Translate() {
         static: staticModel?.name ?? null,
         sequence: seqModel?.name ?? null,
       });
-      // 谁的 createdAt 更新就切到谁；只有一个就用那一个
-      if (seqModel && (!staticModel || seqModel.createdAt >= staticModel.createdAt)) {
-        setModelMode("sequence");
-      } else if (staticModel) {
-        setModelMode("static");
+      // URL 明确指定了 MODE 就不抢方向盘。这里的比较只认识静态/时序两条，
+      // 句子模型不在 IndexedDB 里，让它插手会把 ?mode=sentence 覆盖掉
+      if (urlMode.current === null) {
+        // 谁的 createdAt 更新就切到谁；只有一个就用那一个
+        if (seqModel && (!staticModel || seqModel.createdAt >= staticModel.createdAt)) {
+          setModelMode("sequence");
+        } else if (staticModel) {
+          setModelMode("static");
+        }
       }
-      if (loaded.length) setMessage(`✓ 已自动加载：${loaded.join(" · ")}`);
+      const msgs: string[] = [];
+      if (loaded.length) msgs.push(`✓ 已自动加载：${loaded.join(" · ")}`);
+      if (seqWarn) msgs.push(`⚠ ${seqWarn}`);
+      if (msgs.length) setMessage(msgs.join("　|　"));
     });
 
     return () => {
@@ -382,6 +545,12 @@ export default function Translate() {
         sentenceModelRef.current = m;
         setSentenceAvailable(true);
         setSentenceLoaded(true);
+        /*
+         * 趁这里把 TTS 的 voice 列表预热掉。收句后是**自动**朗读，没有"用户点按钮"
+         * 那几秒缓冲，第一句正好会撞在 `getVoices()` 还是空数组的冷启动上，
+         * 退到系统默认（英文）引擎念汉字 → 一串字母音。见 speech.warmUpVoices。
+         */
+        warmUpVoices();
         // synthOnly 一定要说出来：合成句子里没有协同发音，那个 WER 不代表真实表现
         setSentenceNote(
           `✓ 句子模型已加载（${m.meta.labels.length} 类 · T=${m.meta.seqLen}` +
@@ -402,6 +571,19 @@ export default function Translate() {
       cancelled = true;
     };
   }, [modelMode]);
+
+  /*
+   * 连续模式的收句门限。`SentenceEnvelope` 在本页只 new 一次，而这是个 checkbox，
+   * 所以要在运行时改（`setSettle` 只影响下一跳，不打断当前这一句）。
+   *
+   * 一句一次模式一律回到 `SETTLE_MS` + 关自适应 —— 那是采集页的口径，必须逐位一致。
+   */
+  useEffect(() => {
+    sentenceEnvRef.current?.setSettle(
+      continuousMode ? CONTINUOUS_SETTLE_MS : SETTLE_MS,
+      continuousMode
+    );
+  }, [continuousMode]);
 
   // 卸载时释放句子模型的显存。tfjs 的张量不归 GC 管，不 dispose 就一直占着
   useEffect(() => {
@@ -431,7 +613,6 @@ export default function Translate() {
     gatedRef.current = v;
     setGated(v);
   }, []);
-
   /*
    * 捕获状态没法"只在翻转时写"—— 计时是连续变化的，进度条要跟着走。
    * 所以按**桶**发布：状态变了、或已录时长跨过 0.5s、或静止时长跨过 0.2s
@@ -448,23 +629,34 @@ export default function Translate() {
   }, []);
 
   /**
+   * 连续模式：这一句完事了，立刻重新等下一句。
+   *
+   * 自动收句和手动点「结束」**都要走这一个** —— 抄两份很快会走样（比如只在一条路上
+   * 记得"要在解码之后调"）。
+   *
+   * ⚠ **必须在 `decodeUtterance` 之后调**：`rearm` 会清缓冲，先调就把这一句的数据
+   * 清没了（解码读的是同一个缓冲）。
+   */
+  const rearmIfContinuous = useCallback(() => {
+    if (!continuousRef.current) return;
+    const env = sentenceEnvRef.current;
+    if (!env) return;
+    env.rearm(performance.now());
+    publishCapture(env.status());
+  }, [publishCapture]);
+
+  /**
    * 收句 → 出词序列。推理循环和「结束」按钮**共用这一条路径**。
    *
-   * `act` 决定要向缓冲要多长的一段：停手收句时末尾那 800ms 静止要掐掉，
-   * 而手动/超长收句不掐。`captureSpanMs` 与 `settleDropMs` 必须成对传，
-   * 只传前者砍掉的是句子**开头**（缓冲区间贴着尾部对齐），见 sequenceWindow.ts。
+   * 取多长的一段由 `env.take` 决定（span 与 dropTail 在那里成对算出，这里没有机会
+   * 把它们拆开 —— 只缩 span 砍掉的是句子**开头**，见 sentenceEnvelope.ts）。
    */
   const decodeUtterance = useCallback(
     (act: CaptureAction) => {
-      const cap = sentenceCapRef.current;
-      const buf = windowBufRef.current;
-      if (!cap || !buf || act.kind !== "decode") return;
+      const env = sentenceEnvRef.current;
+      if (!env || act.kind !== "decode") return;
 
-      const raw = buf.snapshotAll(
-        cap.captureSpanMs(act),
-        "_sentence",
-        cap.settleDropMs(act)
-      );
+      const raw = env.take(act, "_sentence");
       if (!raw) {
         setSentenceNote("这一段太短，取不出可用的数据段。");
         return;
@@ -480,22 +672,111 @@ export default function Translate() {
       reportMirrored(norm.mirrored);
       try {
         const pred = predictSentence(loadedSent, norm.sample);
-        setSentenceWords(pred.words);
+        /*
+         * 两道后处理（拇指闸门 + 复合词回收）—— 词路径上一直有，句子路径以前
+         * 一道都没走，所以打「你好」会出「你 难过」。见 sentencePostprocess.ts。
+         * **必须用 norm.sample**：闸门读右手 0..12 通道，镜像之前那是小拇指。
+         */
+        const post = postprocessSentence(pred, norm.sample, loadedSent.meta.labels);
+        setSentenceWords(post.words);
         // 上一句的代词选择不能留到这一句：下标对不上，会把这句的某个词改成别的人称
         setPronOverrides({});
-        setSentenceNote(
+        const base =
           act.reason === "maxLength"
             ? `到了 ${MAX_UTTERANCE_MS / 1000}s 上限自动收句 —— 超出的部分没进模型。`
             : act.reason === "manual"
             ? `手动收句 · ${(raw.durationMs / 1000).toFixed(1)}s`
-            : `停手收句 · ${(raw.durationMs / 1000).toFixed(1)}s（末尾静止已掐掉）`
-        );
+            : `停手收句 · ${(raw.durationMs / 1000).toFixed(1)}s（末尾静止已掐掉）`;
+        /*
+         * 后处理改了什么要**说出来**。这两道规则都会把模型的输出改掉，
+         * 不显示的话线上表现是"模型好像认错了/少认了一个词"，而真正动手的是规则。
+         * 拇指峰值一并显示：闸门判错时那个数就是唯一能改的旋钮（THUMB_PEAK_GATE）。
+         */
+        const fixes = [
+          ...post.gated.map((g) => {
+            // 判据要分开说：转角和拇指是两个不同的旋钮，混着写就不知道该调哪个
+            const why = g.reason.startsWith("thumb")
+              ? `拇指峰值 ${g.peak}，阈值 ${THUMB_PEAK_GATE}`
+              : `转角速率判定，阈值 ${ROT_RATE_LO}/${ROT_RATE_HI}°/s`;
+            return `闸门：${getTranslationLabel(g.from)}→${getTranslationLabel(g.to)}（${why}）`;
+          }),
+          ...post.merged.map((w) => `合成：${getTranslationLabel(w)}`),
+          /*
+           * 屏蔽也要报。**这一行是唯一能看出"少了一个词不是模型的锅"的地方** ——
+           * `SUPPRESSED_WORDS` 是权宜表（见 sentencePostprocess.ts 的代价说明），
+           * 不报的话下次没人记得它开着，会去查模型。
+           */
+          ...post.suppressed.map((w) => `已屏蔽：${getTranslationLabel(w)}`),
+        ];
+        /*
+         * ===== 收句后自动朗读 =====
+         *
+         * 时机就是**这一刻**（刚解出来），不是"顺句结果变了就念"。后者会在用户
+         * 点代词、删词、勾顺句规则时每改一下念一遍 —— 吵，而且盖掉他正在读的字。
+         * 要重念有「朗读」按钮。
+         *
+         * 三条不能省：
+         *  1. `post.words.length > 0`。全 blank 时 `speakChinese("")` 返回
+         *     `reason:"没有内容可朗读"`，那句话会挤进下面的提示栏，盖掉
+         *     "这一段没解出任何词"这个真正有用的信息。
+         *  2. overrides 传 `{}` —— `setPronOverrides({})` 就在上面几行，此刻确实是空的。
+         *  3. 失败/降级原因必须并进 `fixes` 显示。静默失败等于让人以为音箱坏了
+         *     （`speakChinese` 返回 `{ok, reason}` 而不抛，就是为了这个）。
+         */
+        if (post.words.length > 0) {
+          const text = resolveSentence(post.words, {}, grammarOnRef.current).text;
+          if (autoSpeakRef.current) {
+            const r = speakChinese(text);
+            if (r.reason) fixes.push(`朗读：${r.reason}`);
+          }
+          /*
+           * ===== 自动成句 =====
+           *
+           * 连续模式下这一步是**必需的**，不是方便功能：不进历史的话，下一句解出来
+           * 会直接 `setSentenceWords` 覆盖，上一句没点过「成句」就永久没了。
+           *
+           * `lastLive` 标记让之后的编辑（改代词/删词）能同步回历史最后一条 ——
+           * 见下面那个 effect。全 blank（`length === 0`）不进历史：一条空记录
+           * 没有信息，只会把历史刷满。
+           */
+          if (continuousRef.current) {
+            setSentenceHistory((prev) => [...prev, text]);
+            setLastLive(true);
+          }
+        }
+        setSentenceNote(fixes.length ? `${base} · ${fixes.join("；")}` : base);
       } catch (e) {
         setSentenceNote(`解码失败：${String(e instanceof Error ? e.message : e)}`);
       }
     },
     [reportMirrored]
   );
+
+  /*
+   * 自动成句之后的编辑要**同步回历史最后一条**。
+   *
+   * 少了这个 effect 的表现：连续模式下打完一句自动进历史，你再把某个「你」改成
+   * 「他」—— 屏幕中间的大字跟着变了，历史里留的还是「你」。两处不一致，而界面上
+   * 完全看不出哪一处才是最终结果。
+   *
+   * `prev[last] === text` 的相等判断是**防死循环**的：这个 effect 自己会
+   * `setSentenceHistory`，不比较就会无限重渲染。
+   */
+  useEffect(() => {
+    if (!lastLive || !sentenceWords) return;
+    if (sentenceWords.length === 0) {
+      // 词被删空了 —— 历史里那条也该撤掉，不能留一句已经不存在的话
+      setSentenceHistory((prev) => prev.slice(0, -1));
+      setLastLive(false);
+      return;
+    }
+    const text = resolveSentence(sentenceWords, pronOverrides, grammarOn).text;
+    setSentenceHistory((prev) =>
+      prev.length === 0 || prev[prev.length - 1] === text
+        ? prev
+        : [...prev.slice(0, -1), text]
+    );
+  }, [lastLive, sentenceWords, pronOverrides, grammarOn]);
 
   // 推理循环 — 使用 ref 读取最新帧，避免闭包陷阱
   useEffect(() => {
@@ -535,27 +816,29 @@ export default function Translate() {
      * 这个物理判据，模型一句只跑一次。
      */
     const tickSentence = () => {
-      const cap = sentenceCapRef.current;
-      const buf = windowBufRef.current;
-      if (!cap || !buf) return;
+      const env = sentenceEnvRef.current;
+      if (!env) return;
 
-      // **必须用 performance.now()**：帧时间戳就是 performance.now()（gloveProtocol.ts），
-      // 混用 Date.now() 会让状态机和缓冲差着一个任意大的常数偏移
-      const now = performance.now();
-      const probe = buf.snapshot(SENTENCE_MOTION_WINDOW_MS, "_sentmotion");
-      // 窗口还没攒满（刚点「开始一句」）时算"没动" —— armed 状态下这是对的：
-      // 它就是在等第一次动作，早一点晚一点只影响起手判定的 600ms 延迟
-      const moving = probe
-        ? judgeWindowMotion(probe, bendRangesRef.current ?? {}).moving
-        : false;
       // 这里**不调 reportGated**：`gated` 那行提示只画在逐词档，
       // 句子档的"手停住了"是由捕获面板的静止进度条说的。多写一份 state
-      // 只会每次起手/停手都触发一次整页重渲染，而且没人读
-
-      const act = cap.tick(now, moving);
-      publishCapture(cap.status());
+      // 只会每次起手/停手都触发一次整页重渲染，而且没人读。
+      //
+      // 量程传**镜像之前**的（`bendRangesRef` 就是原始的两只手量程）：镜像后左手数据
+      // 配的是右手量程，动作能量的分母就错了。镜像发生在 decode 那一步、tick 之后
+      const act = env.tick(performance.now(), bendRangesRef.current ?? {});
+      publishCapture(env.status());
       if (act.kind === "none") return;
       if (act.kind === "abort") {
+        /*
+         * 连续模式下"等太久"不是错误 —— 你只是还没开始打下一句。
+         * `keepWaiting` 不清缓冲（见 sentenceEnvelope）：清了会每 8 秒造一个
+         * 600ms 探测盲区，正好在那时起手就吃掉句首。
+         */
+        if (continuousRef.current && act.reason === "armTimeout") {
+          env.keepWaiting(performance.now());
+          publishCapture(env.status());
+          return;
+        }
         setSentenceNote(
           act.reason === "armTimeout"
             ? "等了 8 秒没见到动作，这一句取消了。再点「开始一句」。"
@@ -564,6 +847,12 @@ export default function Translate() {
         return;
       }
       decodeUtterance(act);
+      /*
+       * 接成环。`rearmIfContinuous` 刻意**不调** `stopSpeaking()` /
+       * `dominanceRef.reset()`：手动 `armSentence` 那条路有这两行，抄过来的后果
+       * 分别是"每句话刚念一个字就被自己掐掉"和"左手用户每句句首按右手口径归一化"。
+       */
+      rearmIfContinuous();
     };
 
     translateIntervalRef.current = setInterval(() => {
@@ -582,6 +871,18 @@ export default function Translate() {
             allProbabilities: Array<{ label: string; probability: number }>;
           }
         | null = null;
+      /**
+       * 本窗口的右手拇指压力单点峰值，给 `fistGate` 用。
+       * -1 = 还没量（静态档不走滑窗，没有窗口可量）—— 闸门收到 -1 会自己不介入。
+       */
+      let thumbPeakValue = -1;
+      /**
+       * 本窗口的右手转角速率读数，给 `fistGate` 当主判据用。
+       * null = 静态档（不走滑窗，量不到）—— 闸门收到 null 会退回纯拇指行为。
+       */
+      let rotReading: RotationReading | null = null;
+      let gatedThisTick = false;
+      let gateReasonThisTick = "";
 
       if (modelMode === "static") {
         // 从左右手全速 ref 读取，构建双手触觉输入
@@ -636,6 +937,15 @@ export default function Translate() {
         // 那半边，输出会塌到某一个固定的词上（见 handMirror.ts 顶部）
         const norm = normalizeHandedness(raw, dominant);
         reportMirrored(norm.mirrored);
+        // **必须用归一化之后的样本**：左手的 137 维指序与右手相反，镜像之前
+        // 读 0-11 会读到小拇指的压力（见 fistGate.thumbPeak 的注释）
+        thumbPeakValue = thumbPeak(norm.sample);
+        /*
+         * 转角速率同样**必须用归一化之后的样本** —— 不是因为镜像会改变转角大小
+         * （反射保持角度绝对值，不会），而是因为左手数据镜像前放在 `leftImu`
+         * 槽位里，`rotationRate` 只读 `rightImu`，不归一化直接读不到东西。
+         */
+        rotReading = rotationRate(norm.sample);
         result = predictSequence(norm.sample);
       }
 
@@ -643,6 +953,51 @@ export default function Translate() {
         console.warn("[Translate] predict() returned null");
         return;
       }
+
+      /*
+       * 谢谢 / 难过 这一刀不让网络判，用物理量判（见 fistGate.ts）。
+       *
+       * **主判据是四元数累计路径转角速率**：谢谢整只手不动（2000ms 窗速率中位
+       * 33°/s、最大 57），难过掌心朝胸口画圈（中位 90）。实测分对 97.7%。
+       * 速率落在中间带 [50,70) 时才问拇指 —— 谢谢要「大拇指下压一次」，拇指必然
+       * 吃力（单点峰值中位 12，208 个窗没有一个低于 5）；难过是**虚握**拳，
+       * 拇指全程不吃力（中位 0）。拇指单独用只有 88.2%。
+       *
+       * 两条都只在模型自己的 top-2 恰好是这一对时介入。
+       *
+       * **必须放在这里** —— 在 setCurrentPrediction 和平滑缓冲之前。放在后面的话
+       * 平滑缓冲攒的是未修正的标签，确认出来的词还是错的；而且复合词规则
+       * （你+谢谢→你好）读的也是修正后的标签，靠它把「你好」的第二段扳回谢谢。
+       */
+      const gate = applyFistGate(
+        result.label,
+        result.allProbabilities[1]?.label,
+        thumbPeakValue,
+        THUMB_PEAK_GATE,
+        rotReading
+      );
+      gateReasonThisTick = gate.reason;
+      if (gate.changed) {
+        gatedThisTick = true;
+        result = {
+          label: gate.label,
+          /*
+           * 置信度**沿用原来第一名的值**，不换成被改判那个词自己的概率。
+           * 换了的话（比如谢谢 0.9 / 难过 0.08）置信度阈值会把这个词卡掉，
+           * 结果是"不再认错，但也什么都不出" —— 那不是修好。
+           * 这个数的正确读法是"模型有多确定它是这一对里的某一个",
+           * 由闸门决定是哪一个 —— 闸门在这一刀上比模型更可靠（实测 0/208 误伤）。
+           */
+          confidence: result.confidence,
+          // 只重排、不改数值：界面上会看到「难过 8%」排在「谢谢 90%」前面，
+          // 看着别扭但是真话，而且一眼就能看出闸门介入了
+          allProbabilities: [
+            ...result.allProbabilities.filter((p) => p.label === gate.label),
+            ...result.allProbabilities.filter((p) => p.label !== gate.label),
+          ],
+        };
+      }
+
       // 收敛成 const，下面的闭包（.every）里才能保持非空收窄
       const pred = result;
 
@@ -655,12 +1010,33 @@ export default function Translate() {
         return;
       }
 
-      const word = getWordById(pred.label);
+      /*
+       * 屏蔽表命中 → 和 `IDLE_LABEL` 同一种处理：整个丢掉这一跳，
+       * 既不显示大字、也不进历史。
+       *
+       * 为什么不是"显示但不进历史"：那样屏幕上照样在吐「吃」，
+       * 而用户要的就是不看见它（`suppressedWords.ts` 里有代价说明）。
+       * 清平滑缓冲的理由同 idle —— 留着的话下一跳的多数投票还带着这个词。
+       */
+      if (isSuppressed(pred.label)) {
+        setCurrentPrediction(null);
+        predictionBufferRef.current = [];
+        return;
+      }
+
+      // 合并类（merged_pron_sg）不在词表里，`getWordById` 查不到 —— 直接用
+      // pred.label 兜底会把 `merged_pron_sg` 这个原始 id 露到界面上
       setCurrentPrediction({
         label: pred.label,
-        word: word?.label ?? pred.label,
+        word: getTranslationLabel(pred.label),
         confidence: pred.confidence,
         allProbabilities: pred.allProbabilities.slice(0, 5),
+        thumbPeak: thumbPeakValue,
+        // 速率算不出来时给 null，**不要给 0** —— 0 的含义是"手完全没动"，
+        // 会让人以为闸门读到了"静止"，而实际上是根本没量到
+        rotRate: rotReading ? rotReading.ratePerSec : null,
+        gated: gatedThisTick,
+        gateReason: gateReasonThisTick,
       });
 
       // 平滑处理：连续 N 帧相同结果才确认
@@ -683,9 +1059,42 @@ export default function Translate() {
           (pred.label !== lastAddedWordRef.current ||
             now - lastAddedTimeRef.current > 2000) // 同一个词至少间隔2秒
         ) {
+          /*
+           * 复合词回收：你 → 谢谢 实际上是「你好」的两段（第二段的竖大拇指在纯
+           * 触觉特征上与「谢谢」同型，模型没有通道能分开 —— 见 compoundWords.ts）。
+           *
+           * 命中时**替换历史里最后一条**，而不是延迟出词：延迟会让所有词都慢半拍，
+           * 而这里只有两条规则。代价是界面上先出「你」再变成「你好」，闪一下。
+           */
+          const compound = matchCompound(
+            lastAddedWordRef.current,
+            lastAddedTimeRef.current,
+            pred.label,
+            now
+          );
+          if (compound) {
+            const merged: TranslationEntry = {
+              word: getTranslationLabel(compound.word),
+              label: compound.word,
+              // 两段各自的置信度都不代表整体，取较小的那个（更保守的读数）
+              confidence: Math.min(pred.confidence, lastAddedConfRef.current),
+              timestamp: now,
+            };
+            // 只替换最后一条。历史为空时（理论上不该发生：能命中说明刚加过一条）
+            // 退化成追加，不静默丢词
+            setHistory((prev) =>
+              prev.length ? [...prev.slice(0, -1), merged] : [merged]
+            );
+            lastAddedWordRef.current = compound.word;
+            lastAddedTimeRef.current = now;
+            lastAddedConfRef.current = merged.confidence;
+            predictionBufferRef.current = [];
+            return;
+          }
+
           // 确认识别结果
           const entry: TranslationEntry = {
-            word: word?.label ?? pred.label,
+            word: getTranslationLabel(pred.label),
             label: pred.label,
             confidence: pred.confidence,
             timestamp: now,
@@ -693,6 +1102,7 @@ export default function Translate() {
           setHistory((prev) => [...prev, entry]);
           lastAddedWordRef.current = pred.label;
           lastAddedTimeRef.current = now;
+          lastAddedConfRef.current = pred.confidence;
           predictionBufferRef.current = [];
         }
       }
@@ -747,10 +1157,13 @@ export default function Translate() {
     setDominance(null);
     // 切档时正在录的那一句作废：缓冲刚被清掉，它的数据已经不在了。
     // 不 cancel 的话状态机还停在 capturing，切回来会拿一段跨越切档的残缺数据去解码
-    sentenceCapRef.current?.cancel();
+    sentenceEnvRef.current?.cancel();
     setCaptureStatus(null);
     lastStatusKeyRef.current = "";
     stopSpeaking();
+    // 历史里那条"当前这一句"就此定版：切档之后 sentenceWords 还在，
+    // 但已经不该再跟着编辑同步了（这一句的采集已经作废）
+    setLastLive(false);
     /*
      * 切档一律停掉推理循环。
      *
@@ -769,34 +1182,69 @@ export default function Translate() {
    * 「开始翻译」按钮。两个开关会让人点了一个不管用，而这一档本来就是"一句一次"的。
    */
   const armSentence = useCallback(() => {
-    // 缓冲必须清：里面可能有上一句的尾巴，`snapshotAll` 是"有多少取多少"，
-    // 不清的话上一句会被接到这一句前面一起解码
-    windowBufRef.current?.clear();
+    // `env.arm` 里会清缓冲（里面可能有上一句的尾巴，`snapshotAll` 是"有多少取多少"）。
+    // 缓冲清空后主手判定的依据也就没了，留着上次的结论会在预热期误导人
+    sentenceEnvRef.current?.arm(performance.now());
     dominanceRef.current?.reset();
     setDominance(null);
-    sentenceCapRef.current?.arm(performance.now());
-    setCaptureStatus(sentenceCapRef.current?.status() ?? null);
+    setCaptureStatus(sentenceEnvRef.current?.status() ?? null);
     setSentenceWords(null);
     setPronOverrides({});
     setSentenceNote(null);
     stopSpeaking();
+    // 上一句在历史里就此定版：words 已经清了，同步 effect 再跑一次会把
+    // 历史最后一条重写成空的当前句
+    setLastLive(false);
     setIsTranslating(true);
   }, []);
 
   const finishSentence = useCallback(() => {
-    const cap = sentenceCapRef.current;
-    if (!cap) return;
-    const act = cap.finish();
-    setCaptureStatus(cap.status());
+    const env = sentenceEnvRef.current;
+    if (!env) return;
+    const act = env.finish();
+    setCaptureStatus(env.status());
     lastStatusKeyRef.current = "";
     if (act.kind === "abort") {
       setSentenceNote("还没录到动作就结束了，没有送去解码。");
+      // 手动「结束」在连续模式下也要接回环：没录到动作时状态机已经被
+      // finish() 打回 idle，不 rearm 的话面板停在"未开始"，再起手不会开始
+      rearmIfContinuous();
       return;
     }
     // 不能"等下一跳 tick 去解码"：finish() 已经把状态机打回 idle，
-    // 下一跳只会返回 none，这一句就永远不解了。走的是与 tick 同一个 decodeUtterance
+    // 下一跳只会返回 none，这一句就永远不解了
     decodeUtterance(act);
-  }, [decodeUtterance]);
+    // 顺序不能反：rearm 会清缓冲，先 rearm 就把这一句的数据清没了
+    rearmIfContinuous();
+  }, [decodeUtterance, rearmIfContinuous]);
+
+  /**
+   * 连续模式的「停止」。
+   *
+   * `cancel()` 而不是 `finish()`：停止的意思是"别再录了"，不是"把手头这半句解出来"。
+   * 正在录到一半时按停止，那半句本来就不完整，解出来只会往历史里塞一条乱句。
+   *
+   * **不清 `sentenceWords`** —— 停下来之后用户往往还要改代词、点朗读。
+   * 但 `lastLive` 要清：采集已经结束，历史里那条不该再跟着编辑动。
+   */
+  const stopSentence = useCallback(() => {
+    sentenceEnvRef.current?.cancel();
+    setCaptureStatus(sentenceEnvRef.current?.status() ?? null);
+    lastStatusKeyRef.current = "";
+    setLastLive(false);
+    setIsTranslating(false);
+    setSentenceNote("已停止。点「开始」继续。");
+  }, []);
+
+  /**
+   * 清历史。**必须一起清 `lastLive`** —— 不清的话同步 effect 下一跳会看到
+   * "历史为空但 lastLive 为真"，把当前这句又写回一条空历史里
+   * （effect 里对 `prev.length === 0` 有兜底，但语义上这一句已经不在历史里了）
+   */
+  const clearSentenceHistory = useCallback(() => {
+    setSentenceHistory([]);
+    setLastLive(false);
+  }, []);
 
   const setOverride = useCallback((index: number, member: string) => {
     setPronOverrides((prev) => ({ ...prev, [index]: member }));
@@ -823,7 +1271,24 @@ export default function Translate() {
     });
   }, []);
 
+  /**
+   * 「成句」按钮。**两档语义不同。**
+   *
+   * 一句一次模式：把这一句加进历史（用户没点就不进）。
+   *
+   * 连续模式：这一句在解出来的那一刻就已经自动进历史了（否则下一句的
+   * `setSentenceWords` 会把它覆盖掉、永久丢失）。所以这里**不能再追加** ——
+   * 那会让同一句进两遍。它的含义变成**定版**：解除"历史最后一条跟着编辑同步"，
+   * 之后改代词/删词不再影响已经记下的那条。
+   */
   const commitSentence = useCallback((text: string) => {
+    if (continuousRef.current) {
+      setLastLive(false);
+      setSentenceWords(null);
+      setPronOverrides({});
+      setSentenceNote("已定版。接着打下一句就行，不用点按钮。");
+      return;
+    }
     setSentenceHistory((prev) => [...prev, text]);
     setSentenceWords(null);
     setPronOverrides({});
@@ -960,13 +1425,19 @@ export default function Translate() {
                   onDeleteWord={deleteSentenceWord}
                   grammarOn={grammarOn}
                   onToggleGrammar={setGrammarOn}
+                  autoSpeak={autoSpeak}
+                  onToggleAutoSpeak={setAutoSpeak}
+                  continuous={continuousMode}
+                  onToggleContinuous={setContinuousMode}
                   status={captureStatus}
                   note={sentenceNote}
                   onArm={armSentence}
+                  onStop={stopSentence}
                   onFinish={finishSentence}
                   onCommit={commitSentence}
                   history={sentenceHistory}
-                  onClearHistory={() => setSentenceHistory([])}
+                  onClearHistory={clearSentenceHistory}
+                  running={isTranslating}
                   disabled={!modelReady || !isConnected}
                 />
               )}
@@ -985,13 +1456,13 @@ export default function Translate() {
                             color:
                               currentPrediction.confidence >= confidenceThreshold
                                 ? getCategoryColor(
-                                    getWordById(currentPrediction.label)?.category ?? ""
+                                    getWordById(resolveToMember(currentPrediction.label))?.category ?? ""
                                   )
                                 : "#556677",
                             textShadow:
                               currentPrediction.confidence >= confidenceThreshold
                                 ? `0 0 30px ${getCategoryColor(
-                                    getWordById(currentPrediction.label)?.category ?? ""
+                                    getWordById(resolveToMember(currentPrediction.label))?.category ?? ""
                                   )}40`
                                 : "none",
                             opacity:
@@ -1021,8 +1492,79 @@ export default function Translate() {
                           <div className="text-[10px] font-mono text-[#556677] text-center">
                             置信度: {(currentPrediction.confidence * 100).toFixed(1)}%
                           </div>
+                          {/*
+                            转角速率读数 —— 谢谢/难过 那条闸门现在的**主判据**
+                            （见 rotationRate.ts）。50 / 70 这两个阈值是从 30 条录制
+                            量的，相邻滑窗重叠 95%，有效样本数接近 30 —— 所以这个
+                            读数不是"顺便显示一下"，是校准这两个常量的唯一手段。
+                            打「谢谢」时该在 30 上下，画圈打「难过」时该到 90 上下。
+                          */}
+                          {currentPrediction.rotRate !== null && (
+                            <div className="text-[10px] font-mono text-center text-[#556677]">
+                              转角速率{" "}
+                              <span
+                                className={
+                                  currentPrediction.rotRate >= ROT_RATE_HI
+                                    ? "text-[#f59e0b]"
+                                    : currentPrediction.rotRate < ROT_RATE_LO
+                                      ? "text-[#00e5a0]"
+                                      : "text-[#7788aa]"
+                                }
+                              >
+                                {currentPrediction.rotRate.toFixed(0)}
+                              </span>
+                              <span className="text-[#334455]">
+                                {" "}
+                                °/s · 静止&lt;{ROT_RATE_LO} / 画圈≥{ROT_RATE_HI}
+                              </span>
+                              {/* 中间带要明说，否则读数在 50~70 之间时看不出是谁在做决定 */}
+                              {currentPrediction.rotRate >= ROT_RATE_LO &&
+                                currentPrediction.rotRate < ROT_RATE_HI && (
+                                  <span className="ml-1 text-[#7788aa]">
+                                    中间带→看拇指
+                                  </span>
+                                )}
+                            </div>
+                          )}
+                          {/*
+                            拇指压力读数 —— 原来是这条闸门的唯一判据，现在降级成
+                            中间带的仲裁 + 短区间（句子路径）的唯一判据。
+                            显示出来同样是为了让阈值能当场校准：闸门的阈值全是从录制数据
+                            量的，而模型对录制数据本来就全对，所以录制数据证明不了阈值
+                            在实时下也对。握拳时这个数该接近 0，点拇指时该跳到 12 上下。
+                            只在逐词档显示（静态档不走滑窗，量不到）。
+                          */}
+                          {currentPrediction.thumbPeak >= 0 && (
+                            <div className="text-[10px] font-mono text-center text-[#556677]">
+                              拇指压力峰值{" "}
+                              <span
+                                className={
+                                  currentPrediction.thumbPeak >= THUMB_PEAK_GATE
+                                    ? "text-[#00e5a0]"
+                                    : "text-[#334455]"
+                                }
+                              >
+                                {currentPrediction.thumbPeak}
+                              </span>
+                              <span className="text-[#334455]">
+                                {" "}
+                                / 闸门 {THUMB_PEAK_GATE}
+                              </span>
+                              {/* 改判了要说清是**哪个判据**改的，否则调阈值时不知道该调哪一个 */}
+                              {currentPrediction.gated && (
+                                <span className="ml-1 text-[#f59e0b]">
+                                  已改判（
+                                  {currentPrediction.gateReason.startsWith("thumb")
+                                    ? "拇指"
+                                    : "转角"}
+                                  ）
+                                </span>
+                              )}
+                            </div>
+                          )}
                         </div>
                       </>
+
                     ) : isTranslating ? (
                       /* 这两种"空着"要分开说：闸门拦着 = 一切正常、在等你起手；
                          没拦着还空着 = 窗口在攒 或 模型没给出稳定结论。
@@ -1128,11 +1670,16 @@ export default function Translate() {
             </div>
           </div>
 
-          {/* 双手 3D 手模条：与识别链路完全无关，只反映手套原始数据。
-              高度按视口比例给、并封顶：写死 300px 时矮屏幕上会把上面的识别结果挤没 */}
+          {/* 手模区：一手一格，与识别链路完全无关，只反映手套原始数据。
+              高度按视口比例给、并封顶：写死像素值时矮屏幕上会把上面的识别结果挤没。
+
+              比例比舞台版**放大了**（32vh/300px → 46vh/460px）：手模的框取景是
+              竖直 FOV 34° @ 距离 17，半高 5.20 而手从腕到指尖 5.51 —— 手是**撑满
+              竖直方向**的，所以这一块有多高就直接决定手有多大，横向加宽不起作用。
+              下限也一起抬（170 → 240），否则矮屏上两格并排会各自缩成一小块。 */}
           <div
             className={`shrink-0 border-t border-[#00f0ff]/15 px-3 pt-1.5 pb-2 flex flex-col ${
-              showHands ? "h-[32vh] min-h-[170px] max-h-[300px]" : ""
+              showHands ? "h-[46vh] min-h-[240px] max-h-[460px]" : ""
             }`}
           >
             <div className="flex items-center justify-between shrink-0 pb-1">
@@ -1144,7 +1691,7 @@ export default function Translate() {
                 className="text-[9px] font-mono text-[#556677] hover:text-[#00f0ff] flex items-center gap-1 transition-colors"
                 title={
                   showHands
-                    ? "隐藏手模（两个 3D 画面和推理抢同一块 GPU，机器吃力时可以关掉）"
+                    ? "隐藏手模（3D 画面和推理抢同一块 GPU，机器吃力时可以关掉）"
                     : "显示手模"
                 }
               >
@@ -1163,9 +1710,27 @@ export default function Translate() {
             </div>
             {/* 关掉时是真卸载 Canvas，不是 hidden —— 隐藏的 WebGL 画面照样在渲染 */}
             {showHands && (
-              <div className="flex-1 min-h-0 flex gap-3 justify-center">
-                <HandStripItem channel={gloveLeft} handKey="LH" label="LH · 左手" />
-                <HandStripItem channel={gloveRight} handKey="RH" label="RH · 右手" />
+              /* 左手在左、右手在右 —— 第一人称（照镜子）。和第 1 步自检的四格布局
+                 同一个顺序，两页对照时不用在脑子里翻一次。
+                 各占一半宽：单手视口的取景是竖直方向撑满的（见上面那段注释），
+                 横向多出来的空间本来就是白送的。 */
+              <div className="flex-1 min-h-0 flex gap-2">
+                <HandViewport
+                  label="LH · 左手"
+                  side="left"
+                  channel={gloveLeft}
+                  driveRef={leftHand.driveRef}
+                  bendCalibrated={leftHand.bendCalibrated}
+                  orientCalibrated={leftHand.orientCalibrated}
+                />
+                <HandViewport
+                  label="RH · 右手"
+                  side="right"
+                  channel={gloveRight}
+                  driveRef={rightHand.driveRef}
+                  bendCalibrated={rightHand.bendCalibrated}
+                  orientCalibrated={rightHand.orientCalibrated}
+                />
               </div>
             )}
           </div>
@@ -1281,7 +1846,7 @@ export default function Translate() {
             <Section title="CANDIDATES">
               <div className="space-y-1">
                 {currentPrediction.allProbabilities.map((p, i) => {
-                  const word = getWordById(p.label);
+                  const word = getTranslationLabel(p.label);
                   return (
                     <div
                       key={p.label}
@@ -1297,7 +1862,7 @@ export default function Translate() {
                                 : "#556677",
                           }}
                         >
-                          {word?.label ?? p.label}
+                          {word}
                         </span>
                       </div>
                       <span
@@ -1397,7 +1962,7 @@ export default function Translate() {
                   Vocab:{" "}
                   <span className="text-[#8899aa]">
                     {activeLabels
-                      .map((l) => getWordById(l)?.label ?? l)
+                      .map(getDisplayLabel)
                       .slice(0, 8)
                       .join(", ")}
                     {activeLabels.length > 8 ? "..." : ""}
@@ -1504,18 +2069,33 @@ function SentenceModelMissing({
         <>
           <p className="text-sm text-[#556677]">还没有句子模型</p>
           <div className="text-[10px] font-mono text-[#556677] leading-relaxed text-left inline-block space-y-1">
+            {/* 这条警告要留着：两个模型长得像但不通用，指错一次就是白训一轮 */}
             <p className="text-[#f59e0b]">
-              注意：这一档要的**不是** /train-seq 训的那个模型（那是逐词滑窗、存在
-              IndexedDB 里）。句子模型在 python_train 里训，是一份静态文件：
+              注意：这一档要的<b>不是</b> /train-seq 训的那个模型（那是逐词滑窗、存在
+              IndexedDB 里）。句子模型在本机 Python 里训，是一份静态文件。
             </p>
-            <p>1. 在 /train-seq 点「导出数据集给 Python」</p>
-            <p>2. venv 里 `python synth_sentences.py`（用孤立词合成句子）</p>
-            <p>3. `python train_seq.py --ctc --seq-len 128`</p>
-            <p>4. `python export_weights.py`（默认就导到 public{SENTENCE_MODEL_DIR}/）</p>
             <p className="text-[#334455]">
-              导完刷新本页即可。缺的文件是 {SENTENCE_MODEL_DIR}/weights.json
+              缺的文件是 {SENTENCE_MODEL_DIR}/weights.json
             </p>
           </div>
+          {/*
+            原来这里列的是四条手敲命令（导数据集 → synth_sentences → train_seq --ctc
+            → export_weights）。/train-sentence 现在把这一整圈做成了按钮，
+            照抄命令行会把人引去做已经不必要的事。
+            命令行仍然可用，所以下面那句保留 —— 训练桥只在 npm run dev 存在
+          */}
+          <Link
+            href="/train-sentence"
+            className="cyber-btn px-4 py-2 rounded-sm text-xs inline-flex items-center gap-2"
+            style={{ borderColor: "rgba(168,85,247,0.5)", color: "#a855f7" }}
+          >
+            前往句子训练 →
+          </Link>
+          <p className="text-[9px] font-mono text-[#334455] leading-relaxed">
+            那页负责送数据、开训、看曲线、把权重导到这里。
+            它要本机的 python_train/.venv，且只在 npm run dev 下可用；
+            部署环境里仍然只能靠命令行跑 train_seq.py --ctc + export_weights.py。
+          </p>
         </>
       )}
     </div>
@@ -1523,58 +2103,66 @@ function SentenceModelMissing({
 }
 
 /**
- * 底部手模条里的一只手。
+ * 一只手的手模视口：标题行（FPS + 标定状态）+ 一个 `HandModel` Canvas。
  *
- * 标定是**只读**的：连接与标定的唯一入口在第 1 步（/mocap），这里改标定只会让
- * 两页说法不一致。所以未标定时不给按钮，只给一条"去第 1 步标定"的提示 ——
- * 未标定的手模最多弯到 0.42（柔和预览），拿它判断手型会得出错误结论，必须标死。
+ * 与第 1 步 /mocap 自检里的那格**刻意长得一样** —— 同一个 `HandModel`、
+ * 同一个相机、同一份标定。两页看到的手必须是同一只手，否则用户没法拿自检那页
+ * 当基准来判断"这一页的手模是不是不对"。
+ *
+ * 标定是**只读**的：连接与标定的唯一入口在第 1 步，这里改标定只会让两页说法不
+ * 一致。所以未标定时不给按钮，只给提示 —— 未标定的手模最多弯到 0.42（柔和预览），
+ * 拿它判断手型会得出错误结论，必须标死在画面里。
  */
-function HandStripItem({
-  channel,
-  handKey,
+function HandViewport({
   label,
+  side,
+  channel,
+  driveRef,
+  bendCalibrated,
+  orientCalibrated,
 }: {
-  channel: HandChannel;
-  handKey: HandKey;
   label: string;
+  side: "left" | "right";
+  channel: HandChannel;
+  driveRef: RefObject<HandDrive>;
+  bendCalibrated: boolean;
+  orientCalibrated: boolean;
 }) {
-  const { driveRef, bendCalibrated, orientCalibrated } = useHandModelDrive(
-    channel,
-    handKey
-  );
   const connected = channel.isConnected;
-
-  // aspect-[4/3] w-auto：fiber 只按容器**垂直** FOV 取景，容器越扁手就被上下切得越多
-  // （实测 610×208 的扁盒子里手腕直接出画）。所以让高度决定宽度、左右留白，
-  // 取景与 /mocap 上那两块保持一致
   return (
-    <div className="h-full aspect-[4/3] min-w-0 flex flex-col gap-1">
-      <div className="flex items-center justify-between text-[9px] font-mono">
+    <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-1">
+      <div className="shrink-0 flex items-center gap-1.5 px-0.5 text-[9px] font-mono">
         <span className="tracking-widest text-[#f59e0b]">{label}</span>
         <span className={connected ? "text-[#00e5a0]" : "text-[#556677]"}>
-          {connected
-            ? `${channel.gloveFps.toFixed(0)} FPS`
-            : "未连接"}
-          {connected && !bendCalibrated && (
-            <span className="ml-1.5 text-[#f59e0b]">未标定弯折</span>
-          )}
-          {connected && bendCalibrated && !orientCalibrated && (
-            <span className="ml-1.5 text-[#556677]">朝向未标定</span>
-          )}
+          {connected ? `${channel.gloveFps.toFixed(0)} FPS` : "未连接"}
         </span>
+        {connected && bendCalibrated && !orientCalibrated && (
+          <span className="text-[#556677]">朝向未标定</span>
+        )}
       </div>
-      <div className="relative flex-1 min-h-0 rounded-sm border border-[#00f0ff]/15 overflow-hidden bg-[#070a13]">
-        <HandModel driveRef={driveRef} side={handKey === "LH" ? "left" : "right"} />
+      <div
+        className="relative flex-1 min-h-0 rounded-sm border overflow-hidden bg-[#070a13]"
+        style={{
+          borderColor: connected
+            ? "rgba(0,240,255,0.15)"
+            : "rgba(85,102,119,0.2)",
+        }}
+      >
+        <HandModel driveRef={driveRef} side={side} />
         {!connected && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#070a13]/70">
+          <div className="absolute inset-0 flex items-center justify-center bg-[#070a13]/70 pointer-events-none">
             <span className="px-2 py-1 rounded-sm bg-[#0a0e1a]/90 border border-[#00f0ff]/15 text-[10px] font-mono text-[#8899aa]">
-              这只手没连接
+              这只手套没连接，去第 1 步
             </span>
           </div>
         )}
+        {/* 未标定这条必须压在画面里，不能只写在标题行：这个状态下握拳只弯到约
+            42%，看起来就是"手模坏了"或"模型不准"，而其实只是没跑标定 */}
         {connected && !bendCalibrated && (
-          <div className="absolute bottom-1 left-1 right-1 text-[9px] font-mono text-[#f59e0b]/90 text-center">
-            未标定：手指最多弯到 42%，去第 1 步跑一遍向导
+          <div className="absolute bottom-1.5 left-1.5 right-1.5 px-2 py-1 rounded-sm pointer-events-none bg-[#f59e0b]/12 border border-[#f59e0b]/35">
+            <span className="text-[9px] font-mono text-[#f59e0b] leading-relaxed">
+              未标定弯折 · 满量程也只弯约 42%，握拳不会成形。去第 1 步跑向导
+            </span>
           </div>
         )}
       </div>

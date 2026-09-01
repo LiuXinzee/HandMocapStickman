@@ -4,11 +4,16 @@ import {
   assembleOrientationCalib,
   averageQuaternions,
   axisMapFailReason,
+  axisQualityWarning,
   axisSeparationDeg,
   buildAxisMap,
+  FLIP_RISK_DEG,
   loadOrientationCalib,
+  MIN_MOTION_DEG,
+  MIN_SEPARATION_DEG,
   multiplyQuat,
   relativeAxisAngle,
+  TARGET_MOTION_DEG,
   type Quat,
   type Vec3,
 } from "./orientationCalib";
@@ -173,6 +178,24 @@ describe("assembleOrientationCalib", () => {
     expect(axisMapFailReason(smallSwing)).toMatch(/手心相对/);
   });
 
+  /*
+   * 这条锁的是"门限不能再被调松"。曾经是 15°/25°，实测放行过一份
+   * 偏摆 40° / 分离 61° 的标定 —— 界面显示✓、手模跟着动，但方位分不出来。
+   * `buildAxisMap` 是强制贴合的，永远返回合法矩阵，所以门限是唯一的防线。
+   */
+  it("门限不低于参考实现的 40° / 30°", () => {
+    expect(MIN_MOTION_DEG).toBeGreaterThanOrEqual(40);
+    expect(MIN_SEPARATION_DEG).toBeGreaterThanOrEqual(30);
+    expect(FLIP_RISK_DEG).toBeLessThan(180);
+  });
+
+  it("旧门限（15~40°）之间的动作现在会被拒收", () => {
+    const marginal = assembleOrientationCalib("LH", zero, flat, quatAbout(Y, 30))!;
+    expect(marginal.axisQuality!.swingDeg).toBeCloseTo(30, 3);
+    expect(marginal.axisMap).toBeUndefined();
+    expect(axisMapFailReason(marginal)).toMatch(/手心相对/);
+  });
+
   it("两个动作转轴几乎重合时只留零位（做成了同一个方向）", () => {
     const calib = assembleOrientationCalib(
       "LH",
@@ -181,8 +204,58 @@ describe("assembleOrientationCalib", () => {
       quatAbout([0, 0.2, 1], 90)
     )!;
     expect(calib.axisMap).toBeUndefined();
-    expect(calib.axisQuality!.separationDeg).toBeLessThan(25);
+    expect(calib.axisQuality!.separationDeg).toBeLessThan(MIN_SEPARATION_DEG);
     expect(axisMapFailReason(calib)).toMatch(/转轴/);
+  });
+});
+
+/*
+ * `axisQualityWarning` 管的是"过了门限但仍不好使" —— 这是实际踩到的坑：
+ * 过门限后界面只显示一个绿色✓，一份拧歪的矩阵没有任何线索能被发现。
+ * 与 `axisMapFailReason` 互斥：矩阵没写入时它必须闭嘴，否则两条提示会打架。
+ */
+describe("axisQualityWarning", () => {
+  const zero = IDENTITY;
+  const flat = quatAbout(Z, 90);
+
+  it("三项都接近 90° 时不报警", () => {
+    const good = assembleOrientationCalib("LH", zero, flat, quatAbout(Y, 90))!;
+    expect(good.axisMap).toBeDefined();
+    expect(axisQualityWarning(good)).toBeNull();
+  });
+
+  it("转角接近 180° 时报符号不稳 —— 绕 n 转 180° ≡ 绕 −n 转 180°", () => {
+    const flip = assembleOrientationCalib("LH", zero, flat, quatAbout(Y, 172))!;
+    expect(flip.axisMap).toBeDefined(); // 过了门限，确实写进去了
+    expect(axisQualityWarning(flip)).toMatch(/180°|正负号/);
+  });
+
+  it("转过头但还没到翻转带时，报的是精度而不是符号", () => {
+    const over = assembleOrientationCalib("LH", zero, flat, quatAbout(Y, 150))!;
+    expect(over.axisQuality!.swingDeg).toBeGreaterThan(TARGET_MOTION_DEG + 30);
+    expect(over.axisQuality!.swingDeg).toBeLessThan(FLIP_RISK_DEG);
+    const warn = axisQualityWarning(over)!;
+    expect(warn).toMatch(/偏远/);
+    expect(warn).not.toMatch(/正负号/);
+  });
+
+  it("轴分离偏小时点出矩阵有一部分是补出来的", () => {
+    // 分离约 45°：过了 30° 门限，但 Gram-Schmidt 要扣掉相当一部分实测方向
+    const skew = assembleOrientationCalib(
+      "LH",
+      zero,
+      flat,
+      quatAbout([0, 1, 1], 90)
+    )!;
+    expect(skew.axisMap).toBeDefined();
+    expect(axisQualityWarning(skew)).toMatch(/正交化|分开/);
+  });
+
+  it("矩阵没写入时不报警（该由 axisMapFailReason 说话，两条提示不能打架）", () => {
+    const failed = assembleOrientationCalib("LH", zero, flat, quatAbout(Y, 8))!;
+    expect(failed.axisMap).toBeUndefined();
+    expect(axisQualityWarning(failed)).toBeNull();
+    expect(axisMapFailReason(failed)).not.toBeNull();
   });
 });
 

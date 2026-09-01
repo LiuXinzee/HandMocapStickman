@@ -38,33 +38,20 @@ import {
 import {
   addSequence,
   deleteSequence,
+  deleteWordSequencesByLabel,
   getSequenceStats,
   getSequencesByLabel,
   type SequenceSample,
   type SequenceStats,
 } from "@/lib/datasetStore";
 import { motionEnergy, visionCoverage } from "@/lib/sequenceFeatures";
+// 质检显示件与句子采集页共用（见 SampleQc.tsx 顶部：抄一份的话门限会走样）
 import {
-  analyzeSequenceImu,
-  worstVerdict,
-  type ImuHealthReport,
-  type ImuVerdict,
-} from "@/lib/imuHealth";
-
-/** verdict → 中文 / 颜色。ok 用青色（与其他指标一致），warn 琥珀，bad 品红 */
-const IMU_VERDICT_TEXT: Record<ImuVerdict, string> = {
-  ok: "正常",
-  warn: "可疑",
-  bad: "不可用",
-  unknown: "未知",
-};
-const IMU_VERDICT_COLOR: Record<ImuVerdict, string> = {
-  ok: "#00f0ff",
-  warn: "#f59e0b",
-  bad: "#ff2d7b",
-  unknown: "#556677",
-};
-const IMU_RANK: Record<ImuVerdict, number> = { ok: 0, unknown: 1, warn: 2, bad: 3 };
+  EnergyChart,
+  ImuHealthLine,
+  Metric,
+  useSampleImuVerdict,
+} from "@/components/SampleQc";
 
 /** idle 伪类在词表里的展示条目 */
 const IDLE_WORD: SignWord = {
@@ -239,6 +226,38 @@ export default function SequenceCollect() {
     [lastSampleId, refreshStats, refreshLabelSamples, selectedWord.id]
   );
 
+  /**
+   * 删掉当前词的全部孤立词样本。
+   *
+   * 为什么要有这个（而不是点 N 次单条删除）：**换打法重录**时旧样本必须先清空。
+   * 同一个词的两种打法混进一个类 = 人为造一个双峰类，模型分不开，而且会得出
+   * "这个词本来就不可分"的错误结论。典型场景是「我」—— 它有两种打法，选带身体
+   * 接触的那种才能和「你/他」分开（见 labelMerge.ts）。
+   *
+   * 二次确认里把条数**和合成条数分开报**：合成件是从录制派生的，一起删是对的，
+   * 但用户得先知道那些也会没。句子样本不在删除范围内（见 deleteWordSequencesByLabel）。
+   */
+  const handleDeleteAllOfWord = useCallback(async () => {
+    const c = stats?.labelCounts[selectedWord.id];
+    const recorded = c?.recorded ?? 0;
+    const synth = c?.synthesized ?? 0;
+    if (recorded + synth === 0) return;
+    const detail = synth > 0 ? `${recorded} 条录制 + ${synth} 条合成` : `${recorded} 条录制`;
+    if (
+      !confirm(
+        `删除「${getDisplayLabel(selectedWord.id)}」的全部 ${detail}？\n\n` +
+          `以这个词开头的句子样本不会被删。\n此操作不可撤销。`
+      )
+    )
+      return;
+    const n = await deleteWordSequencesByLabel(selectedWord.id);
+    setLastSample(null);
+    setLastSampleId(null);
+    await refreshStats();
+    await refreshLabelSamples(selectedWord.id);
+    setMessage(`已删除「${getDisplayLabel(selectedWord.id)}」的 ${n} 条样本`);
+  }, [stats, selectedWord.id, refreshStats, refreshLabelSamples]);
+
   // ===== 词表 =====
 
   const words = useMemo(() => {
@@ -261,47 +280,16 @@ export default function SequenceCollect() {
     () => (lastSample ? visionCoverage(lastSample) : 0),
     [lastSample]
   );
-  /**
-   * 这条的 IMU 健康度。录制器停止时已 post-hoc 算好写进样本；
-   * 万一拿到的是没有该字段的旧样本，就地从 leftImu/rightImu 重算——数据本来就都在。
-   * detail 取两只手里更差的那份，用来显示倾角数值和中文原因。
-   */
-  const imu = useMemo(() => {
-    if (!lastSample) return null;
-    const h =
-      lastSample.imuHealth ??
-      {
-        // 没戴的那只手给 null，而不是让它产出一份 unknown 报告去污染结论
-        left: lastSample.leftImu
-          ? analyzeSequenceImu(
-              lastSample.leftImu,
-              lastSample.frameCount,
-              lastSample.timestamps
-            )
-          : null,
-        right: lastSample.rightImu
-          ? analyzeSequenceImu(
-              lastSample.rightImu,
-              lastSample.frameCount,
-              lastSample.timestamps
-            )
-          : null,
-      };
-    const reports = [h.left, h.right].filter(Boolean) as ImuHealthReport[];
-    if (reports.length === 0) return null;
-    const detail = reports.reduce((worst, r) =>
-      IMU_RANK[r.verdict] > IMU_RANK[worst.verdict] ||
-      (IMU_RANK[r.verdict] === IMU_RANK[worst.verdict] &&
-        r.tiltInconsistencyDeg > worst.tiltInconsistencyDeg)
-        ? r
-        : worst
-    );
-    return { verdict: worstVerdict(h.left, h.right), detail };
-  }, [lastSample]);
+  const imu = useSampleImuVerdict(lastSample);
 
+  /*
+   * `h-screen` 而不是 `min-h-screen`（/collect-sentence 同款，两页要一致）：min-h 下
+   * 这一层会被内容顶高，`flex-1` 那行跟着长高，三列的 `overflow-y-auto` 永远不触发 ——
+   * 滚的是整个文档，翻词表就得连摄像头一起推走。
+   */
   return (
     <div
-      className="min-h-screen flex flex-col"
+      className="h-screen overflow-hidden flex flex-col"
       style={{ backgroundColor: "#0a0e1a" }}
     >
       <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
@@ -449,7 +437,7 @@ export default function SequenceCollect() {
         </div>
 
         {/* 中：预览 + 录制 */}
-        <div className="flex-1 flex flex-col p-4 gap-3 overflow-y-auto">
+        <div className="flex-1 min-h-0 flex flex-col p-4 gap-3 overflow-y-auto">
           <div className="cyber-panel p-3 rounded-sm">
             <div className="flex items-center justify-between mb-2">
               <span className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
@@ -584,46 +572,27 @@ export default function SequenceCollect() {
                   warn={coverage < 0.8}
                 />
               </div>
-              {/*
-                IMU 陀螺漂移。这一行存在的理由：漂移状态下录的序列，帧数、时长、
-                运动能量曲线全都正常，四元数通道却已经废了——不显示出来就没有
-                任何一处能发现。
-              */}
-              {imu && (
-                <div className="mt-2 pt-2 border-t border-[#00f0ff]/10 font-mono">
-                  <div
-                    className="text-[10px]"
-                    style={{ color: IMU_VERDICT_COLOR[imu.verdict] }}
-                  >
-                    IMU 陀螺漂移：{IMU_VERDICT_TEXT[imu.verdict]}
-                    {imu.detail.usableFrames > 0 && (
-                      <span className="text-[#556677] ml-2">
-                        倾角偏差 {imu.detail.tiltInconsistencyDeg.toFixed(1)}° ·
-                        可用帧 {imu.detail.usableFrames}
-                      </span>
-                    )}
-                  </div>
-                  {imu.verdict !== "ok" && (
-                    <div className="text-[9px] text-[#556677] mt-0.5 leading-relaxed">
-                      {imu.detail.reason}
-                      {imu.verdict === "bad" && (
-                        <span className="text-[#ff2d7b]">
-                          {" "}
-                          建议删掉重录：把手套放平不动，短按主控按键做陀螺校准后再录。
-                        </span>
-                      )}
-                    </div>
-                  )}
-                </div>
-              )}
+              {imu && <ImuHealthLine imu={imu} />}
             </div>
           )}
         </div>
 
         {/* 右：该词已有样本 */}
         <div className="w-72 border-l border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
-            {getDisplayLabel(selectedWord.id)} — {labelSamples.length} 条
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+              {getDisplayLabel(selectedWord.id)} — {labelSamples.length} 条
+            </div>
+            {/* 只在真有样本时出现：空列表上摆一个"全删"只会让人误点 */}
+            {labelSamples.length > 0 && (
+              <button
+                onClick={handleDeleteAllOfWord}
+                className="text-[9px] font-mono text-[#556677] hover:text-[#ff2d7b] transition-colors shrink-0"
+                title="删除这个词的全部样本（换打法重录时用）"
+              >
+                全部删除
+              </button>
+            )}
           </div>
           {labelSamples.length === 0 && (
             <div className="text-[10px] text-[#334455] font-mono">
@@ -682,63 +651,5 @@ function CategoryChip({
     >
       {label}
     </button>
-  );
-}
-
-function Metric({
-  label,
-  value,
-  warn,
-}: {
-  label: string;
-  value: string;
-  warn?: boolean;
-}) {
-  return (
-    <div>
-      <div className="text-[#556677] uppercase text-[8px]">{label}</div>
-      <div style={{ color: warn ? "#f59e0b" : "#00f0ff" }}>{value}</div>
-    </div>
-  );
-}
-
-/**
- * 运动能量折线。静止误录会是一条贴地直线——这是最快的质检手段，
- * 比事后看混淆矩阵早了整整一轮训练。
- */
-function EnergyChart({ energy }: { energy: Float32Array }) {
-  const W = 600;
-  const H = 60;
-  const max = Math.max(...Array.from(energy), 1e-6);
-  const pts = Array.from(energy)
-    .map((v, i) => {
-      const x = (i / Math.max(1, energy.length - 1)) * W;
-      const y = H - (v / max) * (H - 4) - 2;
-      return `${x.toFixed(1)},${y.toFixed(1)}`;
-    })
-    .join(" ");
-  const nearlyStatic = max < 0.002;
-
-  return (
-    <div>
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="w-full"
-        style={{ height: H }}
-        preserveAspectRatio="none"
-      >
-        <polyline
-          points={pts}
-          fill="none"
-          stroke={nearlyStatic ? "#f59e0b" : "#00f0ff"}
-          strokeWidth="1.5"
-        />
-      </svg>
-      {nearlyStatic && (
-        <div className="text-[9px] text-[#f59e0b] font-mono mt-1">
-          几乎没有运动 —— 如果这是动态词，很可能录废了
-        </div>
-      )}
-    </div>
   );
 }

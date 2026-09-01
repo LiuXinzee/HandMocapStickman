@@ -61,6 +61,70 @@ export function greedyDecode(
   return out;
 }
 
+/** `greedyDecodeSpans` 的一项：解出来的一个词，以及它占了哪几个输出帧。 */
+export interface DecodedSpan {
+  index: number;
+  /** 这个词的 argmax 连续段，闭开区间 `[startFrame, endFrame)`，单位是**输出帧**（T/4） */
+  startFrame: number;
+  endFrame: number;
+  /** 段内该类别概率最高的那一帧。要看"这个词最像的时刻"的逐帧概率时用它 */
+  peakFrame: number;
+}
+
+/**
+ * 带帧区间的 greedy 解码。**索引序列与 `greedyDecode` 必须逐项相同**
+ * （`ctcDecode.test.ts` 拿同一批输入对照两者，锁死这一条）。
+ *
+ * 为什么需要区间：拇指压力闸门（`fistGate.ts`）要判的是"**这个词**打的时候拇指
+ * 有没有吃力"。整句取一个全局峰值是错的 —— 实测「好看」全段拇指峰值中位 26，
+ * 一句「你真好看」里只要出现「难过」，全局峰值就会把它翻成「谢谢」。
+ * 逐词区间不是精细化，是这条闸门在句子路径上成立的前提。
+ *
+ * 区间取的是**折叠前的 argmax 连续段**：`[a,a,blank,a]` 解出两个 a，
+ * 区间分别是 `[0,2)` 和 `[3,4)`。
+ */
+export function greedyDecodeSpans(
+  probs: Float32Array | number[],
+  frames: number,
+  numClasses: number,
+  blank: number
+): DecodedSpan[] {
+  if (frames <= 0 || numClasses <= 0) return [];
+  if (probs.length < frames * numClasses) {
+    throw new Error(
+      `greedyDecodeSpans: 概率长度 ${probs.length} 不够 ${frames}×${numClasses}=${frames * numClasses}`
+    );
+  }
+  const out: DecodedSpan[] = [];
+  let prev = -1;
+  for (let t = 0; t < frames; t++) {
+    const base = t * numClasses;
+    let best = 0;
+    let bestP = probs[base];
+    for (let c = 1; c < numClasses; c++) {
+      const p = probs[base + c];
+      if (p > bestP) {
+        bestP = p;
+        best = c;
+      }
+    }
+    if (best === prev) {
+      // 同一个 argmax 连续段：延长上一项，并在段内追峰值帧。
+      // blank 段没有对应的输出项，所以只在 out 非空且末项就是这个类别时才延长
+      const last = out[out.length - 1];
+      if (last && last.index === best && last.endFrame === t) {
+        last.endFrame = t + 1;
+        const pk = probs[last.peakFrame * numClasses + best];
+        if (bestP > pk) last.peakFrame = t;
+      }
+    } else if (best !== blank) {
+      out.push({ index: best, startFrame: t, endFrame: t + 1, peakFrame: t });
+    }
+    prev = best;
+  }
+  return out;
+}
+
 /** 把解码出来的类别下标翻成词。下标越界时抛错而不是静默跳过：越界意味着 blank 约定错了。 */
 export function decodeToWords(indices: number[], labels: string[]): string[] {
   return indices.map((i) => {

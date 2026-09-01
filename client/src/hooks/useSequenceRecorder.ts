@@ -22,6 +22,7 @@ import {
   type SequenceSample,
 } from "@/lib/datasetStore";
 import { analyzeSequenceImu } from "@/lib/imuHealth";
+import { extractHandLandmarks } from "@/lib/visionLandmarks";
 
 export interface SequenceRecorderOptions {
   /** 公共重采样栅格频率 */
@@ -64,24 +65,10 @@ const DEFAULTS = {
   visionMaxGapMs: 50,
 };
 
-/** 从 HandResult 抽出指定手的 63 维关键点，没有则 null */
-function extractHandLandmarks(
-  result: HandResult | null,
-  which: "Left" | "Right"
-): Float32Array | null {
-  if (!result?.landmarks?.length) return null;
-  const idx = result.handedness.findIndex((h) => h === which);
-  if (idx < 0) return null;
-  const lms = result.landmarks[idx];
-  if (!lms || lms.length !== 21) return null;
-  const out = new Float32Array(SEQ_LANDMARK_N);
-  for (let i = 0; i < 21; i++) {
-    out[i * 3] = lms[i].x;
-    out[i * 3 + 1] = lms[i].y;
-    out[i * 3 + 2] = lms[i].z;
-  }
-  return out;
-}
+/*
+ * `extractHandLandmarks` 原来是这里的私有函数，已搬到 `lib/visionLandmarks.ts` ——
+ * 句子采集页（`/collect-sentence`）也要用同一份，两边排布必须逐位相同。
+ */
 
 /**
  * 游标式最近邻查找：buffer 按时间递增，startIdx 从上次结果继续，

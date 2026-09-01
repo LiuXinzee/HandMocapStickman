@@ -2,10 +2,15 @@ import { describe, it, expect } from "vitest";
 import {
   DEFAULT_TRIM,
   detectSignSpan,
+  leadingStillMs,
   spanToGridBounds,
   summarizeTrim,
+  trailingStillMs,
+  trimSpanForExport,
+  visibleRuns,
   type TrimConfig,
 } from "./sequenceTrim";
+import type { BendRange } from "./bendRange";
 import {
   SEQ_SENSOR_N,
   SEQ_IMU_N,
@@ -99,6 +104,19 @@ function makeSample(opts: FixtureOptions): SequenceSample {
 
 /** 默认判据但不留白 —— 留白会让"裁到哪一帧"依赖 fps，多数断言里是噪声 */
 const NO_PAD: TrimConfig = { ...DEFAULT_TRIM, padMs: 0 };
+
+/*
+ * 第三层（触觉静止段）的门票：**量程真的齐**。
+ *
+ * 夹具只给左手传感器（`rightSensor: null`），所以只标左手就满足
+ * `sampleEnergies().calibrated` 的量程对称性守则 —— 没有数据的那只手不需要标定。
+ * 只要不传 `ranges`，下面所有旧断言里第三层都不参与。
+ */
+const CAL: { LH: BendRange } = {
+  LH: { open: [40, 40, 40, 40, 40], fist: [160, 160, 160, 160, 160] },
+};
+/** 带标定的判据。三层都开 */
+const WITH_CAL: TrimConfig = { ...NO_PAD, ranges: CAL };
 
 // ===== detectSignSpan =====
 
@@ -387,10 +405,16 @@ describe("detectSignSpan —— 到位检测", () => {
     expect(span.startFrame).toBeLessThanOrEqual(13);
   });
 
-  it("整条没有视觉时这一层不参与（arrival 为 null，不是硬报错）", () => {
+  it("整条没有视觉时这一层判 no_landmarks 而不是硬报错（第三层还要接着跑）", () => {
+    // 补了第三层之后，detectSignSpan 不再在"没有关键点"时提前返回 ——
+    // 提前返回会让触觉兜底永远没机会运行。所以这里 arrival 是一个**有理由的结论**，
+    // 不是 null（null 专门留给 `cfg.arrival === null`，即整层被显式关掉）
     const span = detectSignSpan(makeSample({ T: 30 }), NO_PAD);
     expect(span.reason).toBe("no_vision");
-    expect(span.arrival).toBeNull();
+    expect(span.arrival?.reason).toBe("no_landmarks");
+    expect(span.arrival!.droppedFrames).toBe(0);
+    expect(span.startFrame).toBe(0);
+    expect(span.endFrame).toBe(30);
   });
 
   it("丢帧时速度按时间戳算 —— 帧号口径会把慢动作误判成到位", () => {
@@ -407,6 +431,392 @@ describe("detectSignSpan —— 到位检测", () => {
     const slow = detectSignSpan(s, NO_PAD);
     // 拉长尾部不该改变前半段的到位判断
     expect(slow.startFrame).toBe(fast.startFrame);
+  });
+});
+
+// ===== 第三层：触觉静止段 =====
+
+/*
+ * 这一层存在的理由是两个视觉判据判不出来的缺口：
+ *  - 手全程在画面里（159/364 条 `full_span`）—— 没有入画时刻，也没有向上冲程；
+ *  - 整批没开摄像头 —— 视觉那两层一行都跑不了。
+ * 而它是**唯一**会动尾巴的一层：可见段的 `end` 是"最后一个可见帧"，手不出画就是整条。
+ */
+describe("detectSignSpan —— 触觉静止段", () => {
+  /** 前 `holdTo` 帧弯折恒定（静止），之后按 6 ADC/帧线性拉开 */
+  const stillThenMove = (holdTo: number) => (t: number) =>
+    t <= holdTo ? 20 : Math.min(255, 20 + (t - holdTo) * 6);
+
+  it("trailingStillMs：末尾弯折恒定 → 量到那一段；一路动到最后 → 0", () => {
+    const tail = makeSample({
+      T: 60,
+      leftBend: (t) => (t < 30 ? 10 + t * 6 : 190),
+    });
+    // 后 30 帧恒定（≈1000ms）。扫描步长 ONSET_PROBE_MS，所以是量级相符而非精确值
+    expect(trailingStillMs(tail, CAL)).toBeGreaterThan(800);
+    expect(trailingStillMs(tail, CAL)).toBeLessThan(1200);
+
+    const moving = makeSample({ T: 60, leftBend: (t) => 10 + t * 3 });
+    expect(trailingStillMs(moving, CAL)).toBe(0);
+  });
+
+  it("leadingStillMs 与 trailingStillMs 在时间上互为镜像", () => {
+    const head = makeSample({ T: 60, leftBend: stillThenMove(29) });
+    const tail = makeSample({ T: 60, leftBend: (t) => stillThenMove(29)(59 - t) });
+    expect(leadingStillMs(head, CAL)).toBeCloseTo(trailingStillMs(tail, CAL), 5);
+    expect(trailingStillMs(head, CAL)).toBe(0);
+    expect(leadingStillMs(tail, CAL)).toBe(0);
+  });
+
+  it("整段一动不动 → 量到的静止段就是整条时长（交给 minKept 守则去否掉）", () => {
+    const s = makeSample({ T: 60, leftBend: () => 128 });
+    expect(leadingStillMs(s, CAL)).toBeCloseTo(s.durationMs, 5);
+    expect(trailingStillMs(s, CAL)).toBeCloseTo(s.durationMs, 5);
+  });
+
+  it("「手举着等着」型录制：视觉两层都判不出来，第三层把起点推后", () => {
+    // 手全程在画面里且不动 → 可见性无从下手（full_span）、到位检测判 no_rise。
+    // 这正是那 159 条的形状
+    const s = makeSample({
+      T: 60,
+      leftVisible: () => true,
+      leftBend: stillThenMove(20),
+    });
+
+    expect(detectSignSpan(s, NO_PAD).reason).toBe("full_span"); // 没标定 = 今天的行为
+
+    const span = detectSignSpan(s, WITH_CAL);
+    expect(span.arrival?.reason).toBe("no_rise");
+    expect(span.tactile!.ran).toBe(true);
+    expect(span.applied).toBe(true);
+    expect(span.tactile!.headFrames).toBeGreaterThan(0);
+    expect(span.startFrame).toBeGreaterThan(14);
+    expect(span.endFrame).toBe(60); // 一路动到最后，尾巴没得裁
+  });
+
+  it("无视觉样本靠触觉裁到 —— 那 3 条 no_vision 的修法", () => {
+    const s = makeSample({ T: 60, leftBend: stillThenMove(20) });
+    expect(detectSignSpan(s, NO_PAD).reason).toBe("no_vision");
+
+    const span = detectSignSpan(s, WITH_CAL);
+    expect(span.applied).toBe(true);
+    expect(span.reason).toBe("applied");
+    expect(span.arrival?.reason).toBe("no_landmarks");
+    expect(span.tactile!.headFrames).toBeGreaterThan(0);
+    expect(span.startFrame).toBeGreaterThan(14);
+  });
+
+  it("尾部静止被收回 —— 前两层从来不裁尾", () => {
+    const s = makeSample({
+      T: 60,
+      leftVisible: () => true, // 手不出画：可见段的 end 恒等于整条
+      leftBend: (t) => (t < 30 ? 10 + t * 6 : 190),
+    });
+    expect(detectSignSpan(s, NO_PAD).endFrame).toBe(60);
+
+    const span = detectSignSpan(s, WITH_CAL);
+    expect(span.tactile!.tailFrames).toBeGreaterThan(0);
+    expect(span.endFrame).toBeLessThan(45);
+  });
+
+  it("第二层已给出结论时不再用触觉推头（速度谷底更准，且钳位已做过保守修正）", () => {
+    const s = makeSample({
+      T: 40,
+      leftVisible: () => true,
+      leftWrist: riseThenHold(0, 16),
+      leftBend: stillThenMove(8),
+    });
+    const span = detectSignSpan(s, WITH_CAL);
+    expect(span.arrival?.reason).toBe("applied");
+    expect(span.tactile!.ran).toBe(true);
+    expect(span.tactile!.leadingMs).toBeGreaterThan(0); // 量到了
+    expect(span.tactile!.headFrames).toBe(0); // 但没采用
+    expect(span.startFrame).toBe(span.arrival!.frame);
+  });
+
+  it("两端都裁完剩不下 minKeptMs → 整条不裁，但测量值照样报出来", () => {
+    // 中间只有 4 帧在动的录制。裁完只剩约 100ms，低于 minKeptMs=250
+    const s = makeSample({
+      T: 40,
+      leftBend: (t) => (t >= 18 && t <= 21 ? 200 : 20),
+    });
+    const span = detectSignSpan(s, WITH_CAL);
+    expect(span.reason).toBe("too_short");
+    expect(span.applied).toBe(false);
+    expect(span.startFrame).toBe(0);
+    expect(span.endFrame).toBe(40);
+    // 判据跑过这件事必须留痕 —— 否则界面上分不清"不该裁"和"没跑"
+    expect(span.tactile!.ran).toBe(true);
+    expect(span.tactile!.leadingMs).toBeGreaterThan(0);
+    expect(span.tactile!.trailingMs).toBeGreaterThan(0);
+  });
+
+  it("不给 ranges 时与今天逐位相同（防默认值漂移）", () => {
+    const cases: SequenceSample[] = [
+      makeSample({ T: 60, leftBend: stillThenMove(20) }),
+      makeSample({ T: 60, leftVisible: () => true, leftBend: stillThenMove(20) }),
+      makeSample({ T: 40, leftVisible: (t) => t >= 10, leftWrist: riseThenHold(10, 25) }),
+    ];
+    for (const s of cases) {
+      const off = detectSignSpan(s, { ...NO_PAD, ranges: null });
+      const dflt = detectSignSpan(s, NO_PAD);
+      expect(dflt.startFrame).toBe(off.startFrame);
+      expect(dflt.endFrame).toBe(off.endFrame);
+      expect(dflt.reason).toBe(off.reason);
+      expect(dflt.tactile!.ran).toBe(false);
+      expect(dflt.tactile!.headFrames).toBe(0);
+      expect(dflt.tactile!.tailFrames).toBe(0);
+    }
+  });
+
+  it("只标了一只手但两只手都有数据 → 整层不跑（兜底量程会让静止段偏短）", () => {
+    const s = makeSample({ T: 60, leftBend: stillThenMove(20) });
+    // 右手也有数据了，但 CAL 只有 LH → calibrated 为假
+    s.rightSensor = s.leftSensor;
+    const span = detectSignSpan(s, WITH_CAL);
+    expect(span.tactile!.ran).toBe(false);
+    expect(span.reason).toBe("no_vision");
+  });
+});
+
+// ===== visibleRuns =====
+
+describe("visibleRuns", () => {
+  it("全程可见 = 一段，覆盖整条", () => {
+    const v = visibleRuns(makeSample({ T: 30, leftVisible: () => true }));
+    expect(v.runs).toEqual([{ start: 0, end: 30 }]);
+    expect(v.visibleFrames).toBe(30);
+    expect(v.totalFrames).toBe(30);
+  });
+
+  it("中途掉手切成多段，段界是半开区间", () => {
+    // 可见 [0,10) + [20,30)，中间 10 帧掉手
+    const v = visibleRuns(
+      makeSample({ T: 30, leftVisible: (t) => t < 10 || t >= 20 })
+    );
+    expect(v.runs).toEqual([
+      { start: 0, end: 10 },
+      { start: 20, end: 30 },
+    ]);
+    expect(v.visibleFrames).toBe(20);
+  });
+
+  it("短于 minRunFrames 的段被滤掉，但仍计入 visibleFrames", () => {
+    // visibleFrames 统计的是"摄像头到底看见了多少帧"，滤掉的是"够不够格定边界"。
+    // 两个数混成一个的话，界面上就分不出"掉手很多"和"误检很多"
+    const s = makeSample({ T: 30, leftVisible: (t) => t < 2 || t >= 20 });
+    const v = visibleRuns(s, 3);
+    expect(v.runs).toEqual([{ start: 20, end: 30 }]);
+    expect(v.visibleFrames).toBe(12); // 2 + 10
+  });
+
+  it("双手取并集（单手词的另一只手整条不可见，取交集等于关掉裁剪）", () => {
+    const s = makeSample({
+      T: 30,
+      leftVisible: (t) => t < 10,
+      rightVisible: (t) => t >= 20,
+    });
+    expect(visibleRuns(s).runs).toEqual([
+      { start: 0, end: 10 },
+      { start: 20, end: 30 },
+    ]);
+  });
+
+  it("两只手都没有关键点数组 → 零段", () => {
+    const s = makeSample({ T: 30, leftVisible: null, rightVisible: null });
+    const v = visibleRuns(s);
+    expect(v.runs).toEqual([]);
+    expect(v.visibleFrames).toBe(0);
+    expect(v.totalFrames).toBe(30);
+  });
+});
+
+// ===== trimSpanForExport：句子样本的两处分流 =====
+
+/*
+ * 句子采集页开了摄像头之后，句子录制第一次带上关键点 —— 于是**第一层和第二层
+ * 都第一次在句子上真的跑起来**，而两层的默认口径都假设「这一条里只有一个手势」：
+ *
+ * - 第二层（到位检测）找第一个速度谷底，认定那之前都是抬手 transport。
+ *   一条句子里那个谷底是**第 1 个词打完的位置**，采用它等于把第一个词整个切掉。
+ * - 第一层默认取**最长连续可见段**（`longest_run`）。句子 4~7 秒，MediaPipe 中途
+ *   掉一次手就把录制劈成两段，较短的那半整段被丢掉。实测 45 条真实句里 13 条被
+ *   打断成 2~4 段，最坏的一条 301 个可见帧只留下 96 个 —— 前 4 秒的动作全没了。
+ *   （最初这里写的是「第一层对句子是安全的，只切没看见手的两头」，那是错的：
+ *   它不是首尾裁剪。这段注释本身就曾经掩护过这个 bug。）
+ *
+ * 两者的症状都是「句首照样错」—— 与这一轮改动的靶子（句首错误）完全重合，
+ * 事后几乎不可能想到是裁剪把第一个词吃掉了。所以这里把两处分流都锁死。
+ *
+ * 第三层（触觉静止段）对句子确实安全：只切真正没人动的两头，不假设手势个数。
+ */
+describe("trimSpanForExport —— 句子样本的两处分流", () => {
+  /** 同一条录制，只把 segments 换成多词 —— `isSentenceSample` 只看这一个字段 */
+  const asSentence = (s: SequenceSample): SequenceSample => ({
+    ...s,
+    segments: [
+      { label: "i", startFrame: 0, endFrame: 13 },
+      { label: "help", startFrame: 13, endFrame: 26 },
+      { label: "you", startFrame: 26, endFrame: s.frameCount },
+    ],
+  });
+
+  it("同一条录制：当词裁掉抬手段，当句子一帧不裁", () => {
+    // 手全程在画面里、前 16 帧在上抬 —— 第二层唯一能处理的形状。
+    // 当成句子时那 16 帧就是「第 1 个词」，切掉它就是本模块最怕的那种静默错误
+    const word = makeSample({
+      T: 40,
+      leftVisible: () => true,
+      leftWrist: riseThenHold(0, 16),
+    });
+
+    const w = trimSpanForExport(word);
+    expect(w.applied).toBe(true);
+    expect(w.reason).toBe("applied");
+    expect(w.startFrame).toBeGreaterThanOrEqual(15);
+
+    const s = trimSpanForExport(asSentence(word));
+    expect(s.startFrame).toBe(0);
+    expect(s.endFrame).toBe(40);
+    expect(s.applied).toBe(false);
+    // full_span 而不是 no_vision —— 第一层确实跑过，只是这条没什么可裁
+    expect(s.reason).toBe("full_span");
+  });
+
+  it("句子仍然吃第一层：画面外那半截照样裁掉", () => {
+    // 关掉的只有第二层。可见性不假设手势个数，对句子照样成立
+    const s = asSentence(
+      makeSample({ T: 40, leftVisible: (t) => t >= 10, leftWrist: riseThenHold(10, 25) })
+    );
+    const span = trimSpanForExport(s);
+    expect(span.applied).toBe(true);
+    // padMs=100 @30fps ≈ 3 帧留白，所以停在 10 之前几帧而不是 10。
+    // 恰好 100.0 的那一帧取不取，取决于 Float32 时间戳的舍入 —— 锁区间不锁帧号
+    expect(span.startFrame).toBeGreaterThanOrEqual(7);
+    expect(span.startFrame).toBeLessThanOrEqual(8);
+    expect(span.endFrame).toBe(40);
+  });
+
+  it("句子仍然吃第三层：尾部静止照样裁掉（唯一裁尾的一层）", () => {
+    // 「打完了还举着等按键」那一段在句子上尤其长（要等收句判据），不裁就是
+    // 训练和 sentenceEnvelope 两种时间口径
+    const base = makeSample({
+      T: 60,
+      leftVisible: () => true,
+      leftBend: (t) => (t < 30 ? 10 + t * 6 : 190),
+    });
+    const s = asSentence(base);
+    expect(trimSpanForExport(s).endFrame).toBe(60); // 不给标定 → 第三层不跑
+    const span = trimSpanForExport(s, CAL);
+    expect(span.tactileRan).toBe(true);
+    expect(span.applied).toBe(true);
+    expect(span.endFrame).toBeLessThan(50);
+    expect(span.startFrame).toBe(0); // 头上没有静止段，别顺手裁头
+  });
+
+  /*
+   * 下面三条锁的是第一层的分流。夹具形状都是「入画晚 + 中途掉一次手」，
+   * 这是 45 条真实句里 13 条的真实形状，不是编出来的边角情形。
+   *
+   * padMs=100 @30fps ≈ 3 帧，而恰好 100.0 的那一帧取不取取决于 Float32 时间戳的
+   * 舍入 —— 所以起止都锁区间不锁帧号（与本文件其它留白断言同口径）。
+   */
+
+  it("掉手把录制劈开：词只留最长段，句子跨过空洞", () => {
+    // 可见 [10,27) 17 帧 + 掉手 10 帧 + 可见 [37,60) 23 帧。
+    // longest_run 会选后一段，把前 17 帧**可见的打手语动作**整段丢掉 ——
+    // 那 17 帧里装着句子的第 1 个词
+    const dropout = makeSample({
+      T: 60,
+      leftVisible: (t) => (t >= 10 && t < 27) || t >= 37,
+    });
+
+    const w = trimSpanForExport(dropout);
+    expect(w.applied).toBe(true);
+    expect(w.startFrame).toBeGreaterThanOrEqual(34); // 前一段整个不要了
+    expect(w.endFrame).toBe(60);
+
+    const s = trimSpanForExport(asSentence(dropout));
+    expect(s.applied).toBe(true);
+    expect(s.reason).toBe("applied");
+    expect(s.startFrame).toBeGreaterThanOrEqual(7);
+    expect(s.startFrame).toBeLessThanOrEqual(8);
+    expect(s.endFrame).toBe(60); // 空洞留在区间里
+  });
+
+  it("短段在后也一样（不依赖哪一段更长的先后）", () => {
+    // 与上一条把两段长度对调：longest_run 这次砍的是**尾**。
+    // `bestLen > len` 的严格大于让等长时取靠前那段，方向依赖必须两头都锁
+    const dropout = makeSample({
+      T: 60,
+      leftVisible: (t) => (t >= 10 && t < 33) || t >= 43,
+    });
+
+    const w = trimSpanForExport(dropout);
+    expect(w.applied).toBe(true);
+    expect(w.endFrame).toBeLessThanOrEqual(36); // 后一段整个不要了
+
+    const s = trimSpanForExport(asSentence(dropout));
+    expect(s.startFrame).toBeGreaterThanOrEqual(7);
+    expect(s.startFrame).toBeLessThanOrEqual(8);
+    expect(s.endFrame).toBe(60);
+  });
+
+  it("句首的孤立误检帧不能定起点", () => {
+    // `first_to_last` 取的是"第一段"，所以必须先过 minRunFrames —— 否则抬手途中
+    // 被摄像头扫到的两帧就成了句子起点，等于整条不裁。这正是当初"取最长而不是
+    // 第一段"想防的事，靠过滤防住，不靠取最长
+    const s = asSentence(
+      makeSample({ T: 60, leftVisible: (t) => t < 2 || t >= 15 })
+    );
+    const span = trimSpanForExport(s);
+    expect(span.applied).toBe(true);
+    expect(span.startFrame).toBeGreaterThanOrEqual(12);
+    expect(span.startFrame).toBeLessThanOrEqual(13);
+  });
+});
+
+// ===== visibleSpan / visibleRunCount =====
+
+describe("detectSignSpan —— visibleSpan 与 visibleRunCount", () => {
+  const dropout = () =>
+    makeSample({ T: 60, leftVisible: (t) => t < 15 || (t >= 25 && t < 40) });
+
+  it("默认值仍是 longest_run", () => {
+    // 翻掉这个默认值会静默改变**全部 399 条词录制**的裁剪，从而改变词模型准确率，
+    // 而症状只是"这次训出来的数字和上次不一样"
+    expect(DEFAULT_TRIM.visibleSpan).toBe("longest_run");
+  });
+
+  it("同一条录制，两种模式给出不同区间", () => {
+    // 可见 [0,15) 与 [25,40)，两段等长 → longest_run 取靠前那段
+    const longest = detectSignSpan(dropout(), NO_PAD);
+    expect(longest.startFrame).toBe(0);
+    expect(longest.endFrame).toBe(15);
+
+    const spanning = detectSignSpan(dropout(), {
+      ...NO_PAD,
+      visibleSpan: "first_to_last",
+    });
+    expect(spanning.startFrame).toBe(0);
+    expect(spanning.endFrame).toBe(40);
+  });
+
+  it("visibleRunCount 报出可见段个数（掉手的唯一可观测量）", () => {
+    expect(detectSignSpan(dropout(), NO_PAD).visibleRunCount).toBe(2);
+    expect(
+      detectSignSpan(makeSample({ T: 30, leftVisible: () => true }), NO_PAD)
+        .visibleRunCount
+    ).toBe(1);
+  });
+
+  it("没有关键点时 visibleRunCount 为 0（不是 1）", () => {
+    // 0 = "第一层没跑过"，1 = "跑过，手全程在画面里"。混成一个数的话，
+    // 界面上就没法区分"没开摄像头"和"录得很干净"
+    const s = makeSample({ T: 30, leftVisible: null, rightVisible: null });
+    const span = detectSignSpan(s, NO_PAD);
+    expect(span.visibleRunCount).toBe(0);
+    expect(span.reason).toBe("no_vision");
   });
 });
 

@@ -12,7 +12,9 @@ import Translate from "./pages/Translate";
 import TrainSkeleton from "./pages/TrainSkeleton";
 import VirtualMocap from "./pages/VirtualMocap";
 import SequenceCollect from "./pages/SequenceCollect";
+import CollectSentence from "./pages/CollectSentence";
 import TrainSequence from "./pages/TrainSequence";
+import TrainSentence from "./pages/TrainSentence";
 
 function Router() {
   return (
@@ -20,8 +22,10 @@ function Router() {
       <Route path={"/"} component={Home} />
       <Route path={"/collect"} component={DataCollect} />
       <Route path={"/collect-seq"} component={SequenceCollect} />
+      <Route path={"/collect-sentence"} component={CollectSentence} />
       <Route path={"/train"} component={Train} />
       <Route path={"/train-seq"} component={TrainSequence} />
+      <Route path={"/train-sentence"} component={TrainSentence} />
       <Route path={"/train-skeleton"} component={TrainSkeleton} />
       <Route path={"/translate"} component={Translate} />
       <Route path={"/mocap"} component={VirtualMocap} />

@@ -38,6 +38,18 @@ import {
   type SavedModel,
   type SequenceSample,
 } from "@/lib/datasetStore";
+import {
+  pushDataset,
+  bridgeAvailable,
+  BRIDGE_ABSENT_REASON,
+} from "@/lib/trainBridge";
+// 这四个小件移到了 components/CyberPanels.tsx —— /train-sentence 也要用同一套
+import {
+  Section,
+  DataRow,
+  ParamInput,
+  MetricCard,
+} from "@/components/CyberPanels";
 import { analyzeSequenceImu, isImuSuspect } from "@/lib/imuHealth";
 import { loadBendRange } from "@/lib/bendRange";
 import {
@@ -48,7 +60,7 @@ import {
 } from "@/lib/dominantHand";
 import StepNav from "@/components/StepNav";
 import TfBackendBadge from "@/components/TfBackendBadge";
-import type { TrimStats } from "@/lib/sequenceTrim";
+import { trimSpanForExport, type TrimStats } from "@/lib/sequenceTrim";
 import {
   trainSequenceModel,
   serializeSequenceModel,
@@ -67,6 +79,7 @@ import {
 import { auditDataset, formatAuditReport } from "@/lib/datasetAudit";
 import { probeYawReference, formatYawProbe } from "@/lib/yawDrift";
 import { classesRemovedBy } from "@/lib/labelMerge";
+import { UNTRAINED_WORDS } from "@/lib/sentenceTemplates";
 import { getDisplayLabel, IDLE_LABEL } from "@/lib/signLanguageVocab";
 
 /**
@@ -106,7 +119,14 @@ function countImuSuspect(seqs: SequenceSample[]): number {
 function describeTrim(t: TrimStats): string {
   if (t.total === 0) return "";
   if (t.applied === 0) {
-    const why = t.skipped.no_vision > 0 ? "没有视觉，判不出入画时刻" : "判据没成立";
+    // 第三层一条都没跑过 = 没做弯折两点标定。这跟"没开摄像头"是两种不同的修法，
+    // 混成一句「判据没成立」的话人不知道该去标定还是去补录
+    const why =
+      t.tactileRan === 0
+        ? "没有视觉、也没有弯折标定，三层判据一层都没跑"
+        : t.skipped.no_vision > 0
+          ? "没有视觉，判不出入画时刻"
+          : "判据没成立";
     return ` — 起手段裁剪：0/${t.total} 条（${why}，起手段仍在数据里）`;
   }
   const kept = (t.meanKeptRatio * 100).toFixed(0);
@@ -130,8 +150,18 @@ function describeTrim(t: TrimStats): string {
           ? `（${t.arrivalBendClamped} 条因手型提前成形而少切）`
           : "")
       : "";
+  // 触觉静止段（第三层）也单列，而且**必须区分"没跑"和"跑了但没切"**：
+  // 它是唯一会动尾巴的一层，`裁尾 0 条` 意味着收尾静止全都还在训练数据里，
+  // 而训练/推理的时间口径就是在这里分岔的（sentenceEnvelope 会把尾部静止掐掉）。
+  const tactile =
+    t.tactileRan === 0
+      ? "，触觉静止段判据未运行（没做弯折两点标定）"
+      : `，触觉静止段：裁头 ${t.tactileHead} 条` +
+        (t.tactileHead > 0 ? `（平均 ${t.meanTactileHeadMs.toFixed(0)}ms）` : "") +
+        ` / 裁尾 ${t.tactileTail} 条` +
+        (t.tactileTail > 0 ? `（平均 ${t.meanTactileTailMs.toFixed(0)}ms）` : "");
   return (
-    ` — 起手段裁剪：${t.applied}/${t.total} 条，平均留下 ${kept}%${arrival}` +
+    ` — 起手段裁剪：${t.applied}/${t.total} 条，平均留下 ${kept}%${arrival}${tactile}` +
     (skipped ? `（未裁：${skipped}）` : "")
   );
 }
@@ -161,12 +191,18 @@ const EXCLUDED_KEY = "seq_train_excluded";
 function loadExcluded(): Set<string> {
   try {
     const raw = localStorage.getItem(EXCLUDED_KEY);
-    const arr = raw ? JSON.parse(raw) : [];
+    // **没存过时用 `UNTRAINED_WORDS` 兜底**，不是空集。这三个词在句型表和
+    // Python 侧的类别表里都已经排掉了（见 sentenceTemplates.ts），词模型这边靠
+    // 手勾就等于"两套词表"又活过来一次 —— 而症状只是句子模型偶尔输出一个词模型
+    // 没训过的词，不报错。存过就照存的来：手动取消排除是有意义的对照实验，
+    // 不能被默认值覆盖掉。
+    if (raw === null) return new Set(UNTRAINED_WORDS);
+    const arr = JSON.parse(raw);
     return new Set(
       Array.isArray(arr) ? arr.filter((x): x is string => typeof x === "string") : []
     );
   } catch {
-    return new Set();
+    return new Set(UNTRAINED_WORDS);
   }
 }
 
@@ -196,6 +232,9 @@ export default function TrainSequence() {
   const [models, setModels] = useState<SavedModel[]>([]);
   const [isTraining, setIsTraining] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
+  // 在组件里取而不是模块顶层：注入的 inline script 与本模块的求值顺序不由我们定，
+  // 模块顶层可能比 window.__TRAIN_BRIDGE__ 还早
+  const hasBridge = bridgeAvailable();
   const [progress, setProgress] = useState<SeqTrainingProgress | null>(null);
   const [history, setHistory] = useState<SeqTrainingProgress[]>([]);
   const [message, setMessage] = useState("");
@@ -426,12 +465,20 @@ export default function TrainSequence() {
             ? ` — 另有 ${result.sentencesExcluded} 条句子级样本未参与（多个词连着打的连续手语，` +
               `孤立词模型吃不了；句子模型走 python_train/train_seq.py --ctc）。`
             : "") +
-          // 类别数变了，准确率就不可比 —— 24 类天生比 27 类容易。这句话必须紧贴着
-          // 那个百分数出现，否则很容易把"数字变高了"读成"排除起作用了"
+          // 类别数变了，准确率就不可比 —— 22 类天生比 27 类容易。这句话必须紧贴着
+          // 那个百分数出现，否则很容易把"数字变高了"读成"排除起作用了"。
+          //
+          // ⚠ 报的是 `result.labels.length`，即**模型 softmax 的真实宽度**，
+          // 不是 `remainingLabels`。后者是排除之后剩下的**原始标签**数，比真实类别数
+          // 多两处：合并组还没塌（你/他 两个标签 → 一个类），以及只作为句子样本
+          // 首词出现的标签（那些样本会被 isSentenceSample 挡掉，标签却被算进去了）。
+          // 用它的话这条警告会低估自己：说"只有 24 类"而模型其实只有 22 类，
+          // 而这句话的全部作用就是提醒"这个百分数比看起来更虚"
           (excluded.size
             ? ` — ⚠ 本次排除了 ${excluded.size} 个词（${Array.from(excluded)
                 .map(getDisplayLabel)
-                .join("、")}）共 ${droppedRows} 条，模型只有 ${remainingLabels} 类。` +
+                .join("、")}）共 ${droppedRows} 条，模型只有 ${result.labels.length} 类` +
+              `（含 _idle；${remainingLabels} 个原始标签合并后剩这么多）。` +
               `类别越少准确率天生越高，这个百分数不能和全类别那次直接比 —— 要比就去 /translate 看实际输出。`
             : "")
       );
@@ -458,25 +505,78 @@ export default function TrainSequence() {
 
   // ===== 导出给 Python =====
 
+  /**
+   * 打包一次。下载和直送**共用这一个**函数 —— 两条出路的裁剪口径必须逐位相同，
+   * 各写一遍迟早会分叉，而分叉的症状是"下载的那份能训、直送的那份 WER 不一样"
+   */
+  const packDataset = useCallback(async () => {
+    // 标定必须一起传：Python 侧要按 `trimSpan` 切片，而第三层（触觉静止段）
+    // 是**唯一**会裁尾的一层。不传的话导出的 span 里收尾静止还在，
+    // 合成句子的时间包络就跟推理端（sentenceEnvelope 会掐掉尾部静止）对不上
+    const ranges = currentBendRanges();
+    const { bin, manifest } = await exportSequencesBinary((s) =>
+      trimSpanForExport(s, ranges)
+    );
+    const spans = manifest.sequences.map((e) => e.trimSpan);
+    return {
+      bin,
+      manifest,
+      cut: spans.filter((t) => t?.applied).length,
+      tactile: spans.filter((t) => t?.tactileRan).length,
+    };
+  }, []);
+
+  /** 裁剪读数。两条出路都要报，所以抽出来 */
+  const trimNote = (cut: number, tactile: number) =>
+    `裁剪区间：${cut} 条要裁，${tactile} 条跑过触觉静止段判据` +
+    (tactile === 0 ? "（没做弯折两点标定 → 收尾静止全都还在）" : "");
+
   const handleExport = useCallback(async () => {
     setIsBusy(true);
     setMessage("正在打包序列数据集...");
     try {
-      const { bin, manifest } = await exportSequencesBinary();
+      const { bin, manifest, cut, tactile } = await packDataset();
       downloadBlob(new Blob([bin]), "dataset.bin");
       downloadBlob(
         new Blob([JSON.stringify(manifest)], { type: "application/json" }),
         "dataset.json"
       );
       setMessage(
-        `已导出 ${manifest.totalSequences} 条（${(bin.byteLength / 1024 / 1024).toFixed(1)} MB）。把两个文件放进 python_train/data/ 再跑 train_seq.py`
+        `已导出 ${manifest.totalSequences} 条（${(bin.byteLength / 1024 / 1024).toFixed(1)} MB，${manifest.version}）。` +
+          trimNote(cut, tactile) +
+          `。把两个文件放进 python_train/data/ 再跑 train_seq.py`
       );
     } catch (e) {
       setMessage(`导出失败：${e}`);
     } finally {
       setIsBusy(false);
     }
-  }, []);
+  }, [packDataset]);
+
+  /**
+   * 直送 `python_train/data/`，省掉「下载两个文件再手动拷进去」那一步。
+   *
+   * 桥只在 dev server 存在，所以**下载按钮必须留着** —— 生产构建、或者在另一台
+   * 机器上开页面时，下载是唯一的出路。
+   */
+  const handlePush = useCallback(async () => {
+    setIsBusy(true);
+    setMessage("正在打包并直送 python_train/data/ ...");
+    try {
+      const { bin, manifest, cut, tactile } = await packDataset();
+      const r = await pushDataset(manifest, bin);
+      setMessage(
+        `已写入 ${r.dataDir}：dataset.bin ${(r.binBytes / 1024 / 1024).toFixed(1)} MB + ` +
+          `dataset.json ${(r.jsonBytes / 1024).toFixed(0)} KB，共 ${manifest.totalSequences} 条（${manifest.version}）。` +
+          trimNote(cut, tactile) +
+          `。不用再手动拷文件了 —— 去 /train-sentence 直接开训`
+      );
+    } catch (e) {
+      setMessage(`直送失败：${e}`);
+    } finally {
+      setIsBusy(false);
+    }
+  }, [packDataset]);
 
   /**
    * 数据体检。**只读** —— 不删、不改、不写库，跑完随时可以关掉。
@@ -596,9 +696,15 @@ export default function TrainSequence() {
     handedness.left + handedness.right > 0 &&
     handedness.nearTie > (handedness.left + handedness.right) * 0.3;
 
+  /*
+   * `h-screen` 而不是 `min-h-screen`：两者只差一个字，但决定了**谁在滚**。
+   * min-h 下这一层可以被内容顶高，于是 `flex-1` 那行也跟着长高，下面两列的
+   * `overflow-y-auto` 永远不触发 —— 滚的是整个文档，词表要往下翻就得连头部一起
+   * 推走。h-screen 把高度钉死在视口，overflow-hidden 截断，滚动才落到各列自己身上。
+   */
   return (
     <div
-      className="min-h-screen flex flex-col"
+      className="h-screen overflow-hidden flex flex-col"
       style={{ backgroundColor: "#0a0e1a" }}
     >
       <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
@@ -638,7 +744,9 @@ export default function TrainSequence() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      {/* min-h-0：flex 子项默认 min-height:auto，不加这个的话它拒绝缩到内容以下，
+          overflow 又白设了一次 */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* 左：数据集 + 参数 */}
         <div className="w-80 border-r border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-4">
           <Section title="DATASET">
@@ -703,14 +811,13 @@ export default function TrainSequence() {
                 color={handMixed ? "#a855f7" : "#00e5a0"}
               />
             </div>
-            {handMixed && (
-              <div className="text-[9px] text-[#a855f7] font-mono leading-relaxed">
-                左右手混采（不是问题）：训练会把 {handedness!.left} 条左手样本整条镜像到
-                右手口径再喂模型，与 /translate 的推理口径一致。不做这一步的话，同一个词
-                的两半会落进两段零重叠的槽位，网络只能退回类先验 —— 表现就是"打什么都输出
-                同一个词"。
-              </div>
-            )}
+            {/*
+              这里原来有一段"左右手混采不是问题"的说明，删掉了 —— 混采本来就不是要
+              用户处理的事，`handMixed` 只留在上面那行的颜色上。
+              机制留在代码里：训练会把左手样本**整条镜像到右手口径**再喂模型，与
+              /translate 的推理口径一致。少了这一步，同一个词的两半会落进两段零重叠的
+              槽位，网络只能退回类先验 —— 症状是"打什么都输出同一个词"。
+            */}
             {tieHeavy && (
               <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
                 有 {handedness!.nearTie} 条样本左右手活动量接近，主手判定基本是掷硬币。
@@ -733,13 +840,14 @@ export default function TrainSequence() {
                 与词义无关的因子。要么统一戴两只，要么统一戴一只。
               </div>
             )}
-            {imuSuspect > 0 && (
-              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
-                有 {imuSuspect} 条样本录制时陀螺姿态在漂 —— 它们的四元数通道不可信，
-                帧数和运动能量都看不出问题。先去 /mocap 做「静置自检」确认手套状态，
-                再决定是重录还是接受。
-              </div>
-            )}
+            {/*
+              这里原来有一段"N 条样本录制时陀螺姿态在漂"的提示，删掉了。
+              两点留在代码里：
+              ① 这类样本的四元数通道不可信，而**帧数和运动能量都看不出问题** ——
+                 所以它不是能从别的读数推出来的东西；
+              ② 文案里让人「去 /mocap 做静置自检」已经过时：静置自检早就折叠进四步
+                 校准向导了，没有那个按钮。要是将来把这条提示加回来，别再照抄那句。
+            */}
             {visionRatio < 0.8 && (stats?.totalSequences ?? 0) > 0 && (
               <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
                 视觉覆盖低于 80%，训练会跳过教师与蒸馏，直接用 hard label
@@ -794,14 +902,22 @@ export default function TrainSequence() {
                 <span className="text-[#a855f7]">（含合并省掉 {mergedAway} 类）</span>
               )}
             </div>
-            {mergedAway > 0 && (
-              <div className="text-[9px] text-[#a855f7] font-mono leading-relaxed">
-                我/你/他 与 我们/你们/他们 各自合并为一类：这几个词只差指向(yaw)，
-                六轴 IMU 无磁力计测不到绝对 yaw，实测漂移 P90 15.9°/s、10 秒累计 159°，
-                而类间距仅 45°。**库里的原始标签没动** —— 换九轴 IMU 后重测漂移即可退回。
-              </div>
-            )}
-            <div className="space-y-0.5 max-h-48 overflow-y-auto">
+            {/*
+              这里原来有一段解释合并的说明文字，删掉了。理由留在代码里：
+
+              我/你/他 与 我们/你们/他们 各自合并为一类，因为这几个词**只差指向(yaw)**，
+              而六轴 IMU 无磁力计、测不到绝对 yaw —— 实测漂移 P90 15.9°/s，10 秒累计
+              159°，类间距仅 45°。不是模型不够强，是这个信息物理上不在数据里。
+              ⚠ 库里的原始标签没动，合并只发生在喂训练那一步；换九轴 IMU 后重测漂移
+              即可退回，别去改库里的标签。
+            */}
+            {/*
+              词表自己是一个滚动块，不靠整页滚动去翻词。
+              `overscroll-contain` 是关键那一条：没有它，列表滚到底之后滚轮会接着
+              带动左栏（再往上带动整页），于是"在词表里往下翻"和"把整页推走"是同一个
+              手势。有了它，滚动到边界就停在这里。
+            */}
+            <div className="space-y-0.5 max-h-64 overflow-y-auto overscroll-contain rounded-sm border border-[#00f0ff]/10 p-1">
               {labelRows.map(([label, c]) => {
                 const off = excluded.has(label);
                 return (
@@ -839,12 +955,15 @@ export default function TrainSequence() {
             </div>
             {excluded.size > 0 && (
               <>
-                <div className="text-[9px] text-[#ff2d7b] font-mono leading-relaxed">
-                  已排除 {excluded.size} 个词。这是**过滤不是删除** ——
-                  库里一条没动，但训出来的模型里没有这些类，/translate 永远不会输出它们。
-                  排除状态会一直保留（刷新页面也在），别忘了做完实验取消。
-                  另外类别数变了，准确率不能和之前那次比，类别越少本身就越容易。
-                </div>
+                {/*
+                  这里原来有一段解释排除语义的说明文字，删掉了。三件事留在代码里：
+                  ① 排除是**过滤不是删除**，库里一条不动，但训出来的模型里没有这些类，
+                     /translate 永远不会输出它们；
+                  ② 排除状态持久化（刷新页面也在），所以做完实验容易忘了取消；
+                  ③ ⚠ 排除后类别数变了，准确率**不能**和之前那次比 —— 类别越少本身就
+                     越容易。拿排除过的一次跑分去和全量比是这一块最容易犯的错。
+                  下面那条 `_idle` 警告保留：它是会毁掉实验结论的具体错误，不是背景说明。
+                */}
                 {excluded.has(IDLE_LABEL) && (
                   <div className="text-[9px] text-[#ff2d7b] font-mono leading-relaxed">
                     你把 `_idle` 也排除了。没有空闲类，滑窗推理时手放松的窗口会被强行
@@ -931,15 +1050,8 @@ export default function TrainSequence() {
               <Stethoscope className="w-3 h-3" />
               数据体检（只读）
             </button>
-            <button
-              onClick={handleExport}
-              disabled={isTraining || isBusy}
-              className="cyber-btn w-full px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1"
-            >
-              <Download className="w-3 h-3" />
-              导出数据集给 Python
-            </button>
           </Section>
+
         </div>
 
         {/* 右：进度 + 模型列表 */}
@@ -1017,7 +1129,9 @@ export default function TrainSequence() {
             <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-2">
               Saved Sequence Models
             </div>
-            <div className="space-y-1">
+            {/* 自己滚，不把整页顶长。overscroll-contain 让滚到底之后停在这里，
+                而不是接着带走右栏（与两个训练页的词表一致） */}
+            <div className="space-y-1 max-h-56 overflow-y-auto overscroll-contain pr-1">
               {models.length === 0 && (
                 <div className="text-[10px] text-[#334455] font-mono">
                   还没有时序模型
@@ -1055,16 +1169,69 @@ export default function TrainSequence() {
             </div>
           </div>
 
-          <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[#556677] leading-relaxed">
-            <div className="flex items-center gap-1 text-[#00f0ff] mb-1">
-              <Brain className="w-3 h-3" />
-              句子级（连续手语）
+          {/*
+            给句子模型送数据。
+
+            这两个按钮原来在左栏 ACTIONS 里，挤在「开始训练」「数据体检」下面 ——
+            读起来像词模型训练流程的一部分，而词模型（TCN 学生）整个训练都在浏览器里，
+            一个字节都不经过 python_train/。导出的 dataset 今天**唯一的消费者**是
+            句子 CTC 模型，所以单独一块、标题写明送给谁。
+
+            位置在 Saved Sequence Models 下面：本页从上到下是"训 → 看结果 → 存下的
+            模型"，句子是这条线走完之后的下一站，不是训练时要按的东西。
+
+            ⚠ 严格说 `train_seq.py` 不加 `--ctc` 也能在 Python 里训词模型
+            （`--distill`，桥的 Target 里留着这一支），只是界面上没有入口发起它。
+            哪天要接出来，它不属于这一块 —— 别因为"都是给 Python 的数据"就塞进来。
+            ⚠ tfjs 4.22 没有 CTC loss 也没有 CTC 解码器，句子训练在浏览器里做不了
+            （不是没做，是做不了）。别在这页加"顺便训一下句子模型"的按钮。
+          */}
+          <div className="cyber-panel p-3 rounded-sm space-y-2">
+            <div className="flex items-center gap-1.5">
+              <Brain className="w-3 h-3 text-[#a855f7]" />
+              <span className="text-[10px] font-mono text-[#a855f7] uppercase tracking-wider">
+                Sentence · 给句子模型送数据
+              </span>
             </div>
-            tfjs 4.22 没有 CTC loss 和 CTC 解码器，句子级训练无法在浏览器里做。
-            数据 schema 已经按句子级设计好（每条序列存 segments 词边界列表，
-            孤立词只是长度为 1 的特例），骨干与 head 也分离了，
-            所以到句子阶段直接用「导出数据集给 Python」→ python_train/train_seq.py --ctc，
-            训完用 export_to_tfjs.py 转回来即可，不需要重新采集数据。
+            <div className="text-[9px] font-mono text-[#556677] leading-relaxed">
+              句子（CTC）训练在本机 Python 里跑，不在浏览器。本页只负责把数据交过去。
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handlePush}
+                disabled={isTraining || isBusy || !hasBridge}
+                title={hasBridge ? undefined : BRIDGE_ABSENT_REASON}
+                className="cyber-btn flex-1 px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1"
+                style={{ borderColor: "rgba(168,85,247,0.4)", color: "#a855f7" }}
+              >
+                <Upload className="w-3 h-3" />
+                直送 python_train/data/
+              </button>
+              {/* 桥只在 dev server 存在，所以下载**必须留着** —— 生产构建、或在
+                  另一台机器上开页面时，它是唯一的出路。直送是主路径，所以在左边 */}
+              <button
+                onClick={handleExport}
+                disabled={isTraining || isBusy}
+                className="cyber-btn px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1"
+              >
+                <Download className="w-3 h-3" />
+                下载两个文件
+              </button>
+              <Link
+                href="/train-sentence"
+                className="cyber-btn px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1"
+                style={{ borderColor: "rgba(168,85,247,0.25)" }}
+              >
+                去句子训练页 →
+              </Link>
+            </div>
+            {!hasBridge && (
+              // 不留成一个点了没反应的死按钮：桥不在就说清为什么
+              <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed">
+                直送不可用（桥只在 npm run dev 下挂载），用「下载两个文件」再手动拷进
+                python_train/data/。
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -1079,105 +1246,6 @@ function downloadBlob(blob: Blob, filename: string) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
-}
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 pb-1 border-b border-[#00f0ff]/15">
-        <div className="w-1 h-3 bg-[#00f0ff] rounded-full shadow-[0_0_4px_rgba(0,240,255,0.6)]" />
-        <span className="text-[10px] font-bold tracking-widest text-[#00f0ff] font-mono">
-          {title}
-        </span>
-      </div>
-      {children}
-    </div>
-  );
-}
-
-function DataRow({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string;
-  color: string;
-}) {
-  return (
-    <div className="flex justify-between text-[10px] font-mono">
-      <span className="text-[#556677]">{label}</span>
-      <span style={{ color }}>{value}</span>
-    </div>
-  );
-}
-
-function ParamInput({
-  label,
-  value,
-  onChange,
-  min,
-  max,
-  step = 1,
-  isFloat = false,
-}: {
-  label: string;
-  value: number;
-  onChange: (v: number) => void;
-  min: number;
-  max: number;
-  step?: number;
-  isFloat?: boolean;
-}) {
-  return (
-    <div className="flex items-center justify-between text-[10px] font-mono">
-      <span className="text-[#556677]">{label}</span>
-      <input
-        type="number"
-        value={value}
-        onChange={(e) => {
-          const v = isFloat
-            ? parseFloat(e.target.value)
-            : parseInt(e.target.value);
-          if (!isNaN(v) && v >= min && v <= max) onChange(v);
-        }}
-        min={min}
-        max={max}
-        step={step}
-        className="w-16 bg-[#1a2030] border border-[#00f0ff]/20 rounded-sm px-1.5 py-0.5 text-[#00f0ff] text-center text-[10px]"
-      />
-    </div>
-  );
-}
-
-function MetricCard({
-  label,
-  value,
-  color,
-}: {
-  label: string;
-  value: string;
-  color: string;
-}) {
-  return (
-    <div className="cyber-panel p-2 rounded-sm text-center">
-      <div className="text-[8px] font-mono text-[#556677] uppercase">
-        {label}
-      </div>
-      <div
-        className="text-sm font-bold font-mono mt-0.5"
-        style={{ color, textShadow: `0 0 8px ${color}40` }}
-      >
-        {value}
-      </div>
-    </div>
-  );
 }
 
 /** 训练曲线。教师段与学生段用竖线分开，否则两段 loss 尺度不同看起来像发散 */

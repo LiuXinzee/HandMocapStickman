@@ -4,7 +4,7 @@
  * 移植自 glove_visual/cc_part2 的 glove-protocol.ts（2026-08-07 版逻辑），
  * 解决的是"我戴着手套摆的朝向和屏幕上手模的朝向对不上"。分两层：
  *
- *  1. **零位** `reference`：把某个约定姿态（竖立、手心朝屏幕）记为单位旋转，
+ *  1. **零位** `reference`：把某个约定姿态（竖立、**手心朝自己**）记为单位旋转，
  *     之后所有帧都用 `ref⁻¹ ⊗ q` 表示"相对那个姿态转了多少"。这一层修的是
  *     "整体差一个固定旋转"（IMU 装配朝向 + 戴法 + 六轴没有绝对 yaw 零点）。
  *
@@ -17,6 +17,20 @@
  * 解析层任何"方向修正"都会把标定后的正确行为破坏掉。
  *
  * 四元数一律 **[w, x, y, z]**（协议原序）。传给 three.js 时才换成 (x,y,z,w)。
+ *
+ * ===== 零位约定：手心**朝自己**，不是朝屏幕 =====
+ *
+ * 这条曾经写错过，代价很实在，所以写清楚为什么：
+ *
+ * `MODEL_MOTION_AXES` 那张表是按"手心朝自己"推出来的（三个动作各 90°、两轴正交、
+ * 转轴无符号歧义）。若零位改成手心朝屏幕，两者差 180° 绕 Y —— 于是第 ① 步平铺
+ * 不再是绕 −X 的 90°，而变成绕 (0,1,1)/√2 的 **180° 复合旋转**，`buildAxisMap`
+ * 会解出一个完全错的矩阵。**换零位约定就必须同时重推这张表，不能只改文字。**
+ *
+ * 顺带解释一个容易搞反的点：手模是**第一人称**的（屏幕上那只手就是你自己的手，
+ * 模型正对着你）。所以"手心朝自己"在模型空间里是**手心朝相机**，也就是
+ * `poseQuat` 为单位四元数时示意手模呈现的样子 —— 向导的示意手模一直是对的，
+ * 错的只是 ② 那一步的**文字说明**（见 VirtualMocap.tsx）。
  */
 
 import type { HandKey } from "./bendRange";
@@ -35,7 +49,7 @@ export interface AxisQuality {
 }
 
 export interface OrientationCalib {
-  /** 竖立、手心朝屏幕 的姿态四元数 = 零位 */
+  /** 竖立、**手心朝自己** 的姿态四元数 = 零位（约定见文件头，改不得） */
   reference: Quat;
   /** 平铺（手心朝上）参考，仅用于反解俯仰轴与事后核对 */
   flat?: Quat;
@@ -46,9 +60,36 @@ export interface OrientationCalib {
   axisQuality?: AxisQuality;
 }
 
-/** 轴向识别门限：两个动作各自至少转这么多度，且两轴至少分开这么多度 */
-export const MIN_MOTION_DEG = 15;
-export const MIN_SEPARATION_DEG = 25;
+/**
+ * 三个标定动作的**目标值**。向导要把这些数显示给用户 —— 之前只说"翻到手心朝内"，
+ * 不给目标角，结果实测出现过 40°（勉强够）和 160°（转过头）同时存在。
+ */
+export const TARGET_MOTION_DEG = 90;
+export const TARGET_SEPARATION_DEG = 90;
+
+/**
+ * 轴向识别门限：两个动作各自至少转这么多度，且两轴至少分开这么多度。
+ *
+ * **曾经是 15 / 25，太松了。** 提到 40 / 30（与 glove_visual 参考实现一致）的理由：
+ * `buildAxisMap` 是"强制贴合"的 —— 它把实测轴硬拧到目标轴上，永远返回一个合法的
+ * 旋转矩阵、从不失败。于是界面照样显示"轴向映射已写入"，用户拿到的是一个
+ * 看着正常、实际拧歪的矩阵，表现为"手模跟着动，但方位分不出来"。
+ *
+ * 转角小 → 转轴方向被噪声主导；轴分离小 → 下面 Gram-Schmidt 会把 swing 轴在
+ * pitch 轴上的投影整段扣掉（分离 60° 时约有 cos60° = 50% 的实测方向被丢弃、
+ * 换成正交假设）。这两种情况都不如只留零位。
+ */
+export const MIN_MOTION_DEG = 40;
+export const MIN_SEPARATION_DEG = 30;
+
+/**
+ * 转角超过这个值就有**符号翻转风险**：绕 n 转 180° ≡ 绕 −n 转 180°，
+ * 所以在 180° 附近实测转轴的正负号是不稳定的（w = cos(θ/2)，165° 时只剩 0.13）。
+ * 下一次重标可能整体反向。
+ *
+ * 只告警、不拒收：拒了就退回"仅零位"，那比一个略微不稳的矩阵更差。
+ */
+export const FLIP_RISK_DEG = 165;
 
 const STORE_KEY_PREFIX = "deafkit_orient_calib_v1_";
 
@@ -107,9 +148,13 @@ const normalize3 = (a: Vec3): Vec3 | null => {
 // ===== 轴向识别 =====
 
 /**
- * 两个标定动作在**模型坐标系**里期望的转轴（以"竖立、手心朝屏幕"为零位）：
- *   俯仰 = 竖立→手心朝上平铺，绕 −X 转 90°
- *   偏摆 = 竖立→双手手心相对，左手绕 +Y、右手绕 −Y（动作本身镜像对称）
+ * 两个标定动作在**模型坐标系**里期望的转轴。
+ *
+ * 零位是"竖立、**手心朝自己**（手背对屏幕）"—— 这张表只在这个零位下成立，
+ * 换约定必须重推，理由见文件头。在这个约定下三个动作各 90°、两轴理论正交、
+ * 转轴无符号歧义：
+ *   俯仰 = 竖立→前倾翻掌至手心朝上平铺、指尖朝屏幕，绕 −X 转 90°（双手相同）
+ *   偏摆 = 竖立→双手手心相对，左手绕 +Y、右手绕 −Y 各 90°（动作本身镜像对称）
  */
 export const MODEL_MOTION_AXES: Record<HandKey, { pitch: Vec3; swing: Vec3 }> = {
   LH: { pitch: [-1, 0, 0], swing: [0, 1, 0] },
@@ -234,12 +279,46 @@ export function axisMapFailReason(calib: OrientationCalib): string | null {
   const q = calib.axisQuality;
   if (!q) return "只采到零位，缺平铺或手心相对";
   if (q.pitchDeg < MIN_MOTION_DEG)
-    return `平铺那步只转了 ${q.pitchDeg.toFixed(0)}°，前臂要真的从竖立放平到水平`;
+    return `平铺那步只转了 ${q.pitchDeg.toFixed(0)}°（要 ${TARGET_MOTION_DEG}°），前臂要真的从竖立放平到水平`;
   if (q.swingDeg < MIN_MOTION_DEG)
-    return `手心相对那步只转了 ${q.swingDeg.toFixed(0)}°，手腕要真的翻到手心朝内`;
+    return `手心相对那步只转了 ${q.swingDeg.toFixed(0)}°（要 ${TARGET_MOTION_DEG}°），手腕要真的翻到手心朝内`;
   if (q.separationDeg < MIN_SEPARATION_DEG)
-    return `两个动作的转轴只差 ${q.separationDeg.toFixed(0)}°，说明做成了同一个方向`;
+    return `两个动作的转轴只差 ${q.separationDeg.toFixed(0)}°（要接近 ${TARGET_SEPARATION_DEG}°），说明做成了同一个方向`;
   return "轴向矩阵反解失败";
+}
+
+/**
+ * 矩阵**过了门限、但仍然不可靠**的原因。与 `axisMapFailReason` 互补：
+ * 那个管"没写入"，这个管"写进去了却不好使"—— 后者才是实际踩到的坑，
+ * 因为过了门限界面就只显示一个绿色的✓，用户没有任何线索知道该重做。
+ *
+ * 三种情况，按危害排：
+ *  1. 转角接近 180° → 转轴符号不稳（见 `FLIP_RISK_DEG`）
+ *  2. 转角远离 90° → 转过头/没转够，轴向本身仍可用但精度差
+ *  3. 轴分离远离 90° → Gram-Schmidt 补出来的成分占比大
+ */
+export function axisQualityWarning(calib: OrientationCalib): string | null {
+  const q = calib.axisQuality;
+  if (!calib.axisMap || !q) return null;
+  const flip = [
+    ["平铺", q.pitchDeg],
+    ["手心相对", q.swingDeg],
+  ].filter(([, deg]) => (deg as number) > FLIP_RISK_DEG);
+  if (flip.length) {
+    const which = flip.map(([n, d]) => `${n} ${(d as number).toFixed(0)}°`).join("、");
+    return `${which} 接近 180°，转轴正负号不稳定，下次重标可能整体反向 —— 请重做，转到 ${TARGET_MOTION_DEG}° 就停`;
+  }
+  const off = [
+    ["平铺", q.pitchDeg],
+    ["手心相对", q.swingDeg],
+  ].filter(([, deg]) => Math.abs((deg as number) - TARGET_MOTION_DEG) > 30);
+  if (off.length) {
+    const which = off.map(([n, d]) => `${n} ${(d as number).toFixed(0)}°`).join("、");
+    return `${which} 离 ${TARGET_MOTION_DEG}° 偏远，方位分辨会变差 —— 建议重做这一步`;
+  }
+  if (q.separationDeg < 75)
+    return `两个动作的转轴只分开 ${q.separationDeg.toFixed(0)}°（理想 ${TARGET_SEPARATION_DEG}°），矩阵有相当一部分是正交化补出来的`;
+  return null;
 }
 
 // ===== 应用 =====

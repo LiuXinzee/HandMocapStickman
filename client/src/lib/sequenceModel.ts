@@ -21,7 +21,7 @@
 import * as tf from "@tensorflow/tfjs";
 import { isSentenceSample } from "./datasetStore";
 import type { SequenceSample, SavedModel } from "./datasetStore";
-import { summarizeTrim, type TrimStats } from "@/lib/sequenceTrim";
+import { DEFAULT_TRIM, summarizeTrim, type TrimStats } from "@/lib/sequenceTrim";
 import {
   normalizeSamplesToRight,
   type BendRanges,
@@ -368,6 +368,10 @@ function prepareSequenceData(
       seqLen: cfg.seqLen,
       includeVision,
       augment: copyIdx === 0 ? NO_AUGMENT : cfg.augment,
+      // 把标定塞进裁剪判据，第三层（触觉静止段）才会跑。不塞的话手全程在画面里的
+      // 那些录制一刀裁不到（`full_span`），没开摄像头的那批更是整个判据都不运行 ——
+      // 而训练与推理必须落在同一个"动作真正开始/结束"的点上
+      trim: { ...DEFAULT_TRIM, ranges: cfg.bendRanges },
     });
     xs.set(built.data, r * cfg.seqLen * frameDim);
 
@@ -575,7 +579,12 @@ export async function trainSequenceModel(
   // 起手段裁剪的汇总。裁剪本身在 buildSequenceFeatures 里逐条做，这里只是**把它算一遍
   // 报出来** —— 没有 UI 的自动预处理最怕的就是"裁了什么完全看不见"，
   // 哪几条没裁成（no_vision / no_run / too_short）必须能在训练完那条消息里读到。
-  const trimStats = summarizeTrim(samples);
+  // 口径必须与 prepareSequenceData 里那次逐条裁剪**完全一致**（同样带标定），
+  // 否则报出来的读数在说另一件事
+  const trimStats = summarizeTrim(samples, {
+    ...DEFAULT_TRIM,
+    ranges: cfg.bendRanges,
+  });
 
   const teacherEpochs = useDistillation
     ? Math.max(1, Math.floor(cfg.epochs * 0.6))

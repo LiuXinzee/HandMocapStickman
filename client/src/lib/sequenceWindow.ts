@@ -4,16 +4,32 @@
  * 与 useSequenceRecorder 的区别：录制是"先攒完整段再重采样一次"，
  * 这里是"永远只保留最近几秒，每 100ms 切一段出来推理"，所以：
  *   - 缓冲有上限，超时的帧要丢掉，否则长时间开着翻译会一直涨内存
- *   - 只做触觉（部署用的是纯触觉学生模型），不碰视觉
+ *   - 触觉是必须的，视觉**默认关**（见下）
  *
  * 切片时重采样到与录制时相同的 50Hz 栅格。虽然 buildSequenceFeatures 之后
  * 还会再重采样到 T=32，但中间这一步不能省：左右手是两个独立 COM 口，
  * 各自的时间戳对不齐，必须先落到公共栅格上，两只手的第 t 帧才是"同一时刻"。
+ *
+ * ===== 视觉通道：默认关，只有句子**采集**页开 =====
+ *
+ * 部署时没有摄像头，所以推理端（`/translate`）不采视觉，`vision` 保持 false，
+ * 切出来的样本 `leftLandmarks/rightLandmarks` 恒为 null —— 与这个开关加进来之前
+ * 逐位相同。
+ *
+ * 句子采集页（`/collect-sentence`）打开它，但**视觉不会变成特征**：
+ * `buildSequenceFeatures` 的 `includeVision` 默认 false，`synth_sentences.py` 合成时
+ * 一律把视觉丢掉。关键点的用处只有两个，都是训练期的工具：
+ *   1. `sequenceTrim` 的可见性判据（没有视觉时那一层直接判 `no_vision`）
+ *   2. `signTransitions` 量真实句子里的词间过渡时长（合成端 `overlap_ms` 的实测依据）
+ *
+ * 视觉是**被动通道**：它不参与 `snapshotAll` 的区间计算，也不影响返回 null 的条件。
+ * 摄像头没开、或整段都没检出手，取出来的样本与不开视觉时只差 landmarks 全是 NaN。
  */
 import type { GloveFrame } from "./gloveProtocol";
 import {
   SEQ_SENSOR_N,
   SEQ_IMU_N,
+  SEQ_LANDMARK_N,
   type SequenceSample,
 } from "./datasetStore";
 
@@ -25,22 +41,43 @@ interface WindowEntry {
   att: [number, number, number] | null;
 }
 
+interface VisionEntry {
+  t: number;
+  left: Float32Array | null; // 63 维，见 visionLandmarks.ts
+  right: Float32Array | null;
+}
+
+/**
+ * 视觉最近邻的最大时间差，与 `useSequenceRecorder` 的 `visionMaxGapMs` 同值同理由：
+ * 30Hz 视觉的帧间隔 33ms，取 50ms 容一帧抖动但不容跨两帧硬凑。
+ * 超过就判这个栅格点没有视觉、填 NaN。
+ */
+const VISION_MAX_GAP_MS = 50;
+
 export interface SequenceWindowOptions {
   /** 缓冲保留时长，需要 >= 推理窗口长度 */
   bufferMs?: number;
   /** 公共重采样栅格，必须与采集端一致 */
   gridFps?: number;
+  /**
+   * 是否留视觉通道。**默认 false** —— 推理端不采视觉，这个默认值保证
+   * `/translate` 的行为与视觉通道加进来之前逐位相同。
+   */
+  vision?: boolean;
 }
 
 export class SequenceWindowBuffer {
   private left: WindowEntry[] = [];
   private right: WindowEntry[] = [];
+  private visionBuf: VisionEntry[] = [];
   private readonly bufferMs: number;
   private readonly gridFps: number;
+  private readonly vision: boolean;
 
   constructor(options: SequenceWindowOptions = {}) {
     this.bufferMs = options.bufferMs ?? 3000;
     this.gridFps = options.gridFps ?? 50;
+    this.vision = options.vision ?? false;
   }
 
   push(hand: "left" | "right", frame: GloveFrame): void {
@@ -55,9 +92,33 @@ export class SequenceWindowBuffer {
     this.trim(buf, frame.timestamp);
   }
 
+  /**
+   * 压一帧视觉。`vision: false` 时**直接丢掉** —— 误调不会悄悄给推理端的样本
+   * 塞进 landmarks（那会让人以为特征维度变了去找 bug，而实际上 `includeVision`
+   * 默认 false 根本不读它）。
+   *
+   * `t` 必须与手套帧同一个时钟（`performance.now()`）：重采样是按时间最近邻对齐的。
+   * 这只手没检出时传 null，写栅格时填 NaN。
+   */
+  pushVision(t: number, left: Float32Array | null, right: Float32Array | null): void {
+    if (!this.vision) return;
+    this.visionBuf.push({ t, left, right });
+    // 视觉与手套各自 trim：句子录到 12s 时视觉有约 360 帧，不 trim 会跟着涨
+    const cutoff = t - this.bufferMs;
+    let drop = 0;
+    while (drop < this.visionBuf.length && this.visionBuf[drop].t < cutoff) drop++;
+    if (drop > 0) this.visionBuf.splice(0, drop);
+  }
+
+  /** 缓冲里现有的视觉帧数。采集页用它显示"这一句到底有没有视觉" */
+  visionFrames(): number {
+    return this.visionBuf.length;
+  }
+
   clear(): void {
     this.left = [];
     this.right = [];
+    this.visionBuf = [];
   }
 
   /** 缓冲里最新一帧的时间戳，两手取较大者；空缓冲返回 null */
@@ -163,9 +224,18 @@ export class SequenceWindowBuffer {
     const rightSensor = hasRight ? new Uint8Array(T * SEQ_SENSOR_N) : null;
     const leftImu = hasLeft ? new Float32Array(T * SEQ_IMU_N) : null;
     const rightImu = hasRight ? new Float32Array(T * SEQ_IMU_N) : null;
+    // 只要这只手有手套数据就分配视觉列（缺帧填 NaN），与 `useSequenceRecorder`
+    // 同一条口径：这样下游能区分"这只手没戴手套"和"这只手视觉丢了"。
+    // 视觉缓冲为空时不分配 —— 摄像头没开的那些条与不开视觉时完全一样
+    const hasVision = this.vision && this.visionBuf.length > 0;
+    const leftLandmarks =
+      hasLeft && hasVision ? new Float32Array(T * SEQ_LANDMARK_N) : null;
+    const rightLandmarks =
+      hasRight && hasVision ? new Float32Array(T * SEQ_LANDMARK_N) : null;
 
     let li = 0;
     let ri = 0;
+    let vi = 0;
     for (let t = 0; t < T; t++) {
       const target = start + t * dt;
       timestamps[t] = t * dt;
@@ -179,6 +249,14 @@ export class SequenceWindowBuffer {
         ri = r.idx;
         write(r.entry, rightSensor, rightImu, t);
       }
+      if (leftLandmarks || rightLandmarks) {
+        const r = nearest(this.visionBuf, target, vi);
+        vi = r.idx;
+        const inGap =
+          r.entry !== null && Math.abs(r.entry.t - target) <= VISION_MAX_GAP_MS;
+        if (leftLandmarks) writeVision(inGap ? r.entry!.left : null, leftLandmarks, t);
+        if (rightLandmarks) writeVision(inGap ? r.entry!.right : null, rightLandmarks, t);
+      }
     }
 
     return {
@@ -190,8 +268,8 @@ export class SequenceWindowBuffer {
       rightSensor,
       leftImu,
       rightImu,
-      leftLandmarks: null,
-      rightLandmarks: null,
+      leftLandmarks,
+      rightLandmarks,
       durationMs: windowMs,
       sourceFps: this.gridFps,
       origin: "recorded",
@@ -207,11 +285,11 @@ export class SequenceWindowBuffer {
   }
 }
 
-function nearest(
-  buf: WindowEntry[],
+function nearest<T extends { t: number }>(
+  buf: T[],
   target: number,
   startIdx: number
-): { entry: WindowEntry | null; idx: number } {
+): { entry: T | null; idx: number } {
   if (buf.length === 0) return { entry: null, idx: 0 };
   let i = Math.max(0, Math.min(startIdx, buf.length - 1));
   while (i + 1 < buf.length && buf[i + 1].t <= target) i++;
@@ -256,4 +334,18 @@ function write(
     imu[io + 8] = entry.att[1];
     imu[io + 9] = entry.att[2];
   }
+}
+
+/**
+ * 写一帧关键点。缺手时填 **NaN 而不是 0** —— 0 是一个合法坐标（画面左上角），
+ * `sequenceTrim.handVisibleAt` 靠"首尾两个数是否有限"判可见，填 0 等于宣称
+ * 整段都看得见手，可见性那一层会彻底失效。
+ */
+function writeVision(lm: Float32Array | null, dst: Float32Array, t: number): void {
+  const o = t * SEQ_LANDMARK_N;
+  if (!lm) {
+    dst.fill(NaN, o, o + SEQ_LANDMARK_N);
+    return;
+  }
+  dst.set(lm, o);
 }

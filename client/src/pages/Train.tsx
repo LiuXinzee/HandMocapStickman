@@ -191,9 +191,14 @@ export default function Train() {
     [refresh]
   );
 
+  /*
+   * `h-screen` 而不是 `min-h-screen`（/train-seq 同款，两页要一致）：min-h 下这一层
+   * 会被内容顶高，`flex-1` 那行跟着长高，两侧栏的 `overflow-y-auto` 就永远不触发 ——
+   * 滚的是整个文档。钉死视口高度，滚动才落到各列自己身上。
+   */
   return (
     <div
-      className="min-h-screen flex flex-col"
+      className="h-screen overflow-hidden flex flex-col"
       style={{ backgroundColor: "#0a0e1a" }}
     >
       {/* 顶部导航 */}
@@ -230,7 +235,8 @@ export default function Train() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
+      {/* min-h-0：flex 子项默认 min-height:auto，不加它就不肯缩到内容以下 */}
+      <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* 左侧：数据集和参数 */}
         <div className="w-72 border-r border-[#00f0ff]/15 overflow-y-auto p-4 space-y-4 shrink-0">
           {/* 数据集统计 */}
@@ -250,8 +256,10 @@ export default function Train() {
               value="408D (2×141T + 2×63V)"
               color="#da77f2"
             />
+            {/* 词表自己滚，不靠整页滚动翻词。overscroll-contain 让滚到底之后
+                滚轮停在这里，而不是接着把左栏/整页带走（与 /train-seq 一致） */}
             {stats && stats.labels.length > 0 && (
-              <div className="mt-2 space-y-0.5 max-h-40 overflow-y-auto">
+              <div className="mt-2 space-y-0.5 max-h-64 overflow-y-auto overscroll-contain rounded-sm border border-[#00f0ff]/10 p-1">
                 {stats.labels.map((label) => {
                   const word = getWordById(label);
                   return (

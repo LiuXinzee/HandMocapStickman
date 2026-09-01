@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -32,7 +33,8 @@ from tensorflow import keras
 from tensorflow.keras import layers
 
 from ctc_decode import greedy_decode, word_error_rate
-from label_merge import merge_label_list, merged_class_table
+from dominant_hand import format_stats, normalize_samples_to_right
+from label_merge import merge_label, merge_label_list, merged_class_table
 from load_dataset import (
     FUSED_FRAME_DIM,
     IDLE_LABEL,
@@ -42,6 +44,7 @@ from load_dataset import (
     build_features,
     build_xy,
     load_dataset,
+    require_trim_spans,
 )
 
 
@@ -302,7 +305,10 @@ def build_ctc_xy(
     """
     句子序列 → X (N,T,294) + 补齐的标签 (N,Lmax) int32 + 真实标签长度 (N,)。
 
-    标签用 merge_label 重映射(我/你/他 → merged_pron_sg 等,理由见 label_merge.py)。
+    标签用 merge_label 重映射(你/他 → merged_pron_sg 等,理由见 label_merge.py。
+    「我」**不在**合并组里,它指自己胸口、有接触,原样穿过成独立类)。
+    重映射发生在这里而不是在数据里 —— 数据集存的是原始标签,所以改了合并规则
+    只要重训,不用重新生成合成数据。
     padding 位填 0 —— tf.nn.ctc_loss 只看 label_length,超出的位置根本不读,所以
     填什么都行;填 0 而不是 -1 是因为 dense labels 要求非负。
 
@@ -378,6 +384,41 @@ def transfer_backbone(dst: keras.Model, src_path: Path) -> int:
     return moved
 
 
+def make_emitter(path: str | None):
+    """
+    结构化事件旁路(JSONL),给网页端读。
+
+    **现有的 print 一行不动。** 终端仍是完整、可读的那一份;这里只是把同样的信息
+    再吐一份机器可读的。不这么做的话网页端只能正则解析 stdout —— 而那些 print
+    的措辞是给人看的文档(里面带着"为什么"的长句),措辞一改正则就**静默**失效,
+    页面上表现为"曲线突然不动了"却没有任何报错。
+
+    而且错例列表和"句首错占比"这两样今天**只**存在于 stdout 里,要在界面上用就
+    必须结构化 —— 它们恰好是判断改动有没有效的那两个数。
+
+    两个细节:
+      - 每行写完立刻 flush。不 flush 的话页面在训练结束前一个 epoch 都读不到,
+        整个"实时进度"就是假的。
+      - 文件在开头 truncate。上一轮的 epoch 混进这一轮,曲线会先跌后跳回来,
+        看着像训练崩了。
+
+    `--events` 不给就返回一个什么都不做的函数 —— 命令行用法一字不变。
+    """
+    if not path:
+        return lambda kind, **kw: None
+
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("", encoding="utf-8")
+
+    def emit(kind: str, **kw) -> None:
+        with p.open("a", encoding="utf-8") as f:
+            f.write(json.dumps({"kind": kind, **kw}, ensure_ascii=False) + "\n")
+            f.flush()
+
+    return emit
+
+
 def train_ctc(
     sentence_seqs: list[Sequence],
     word_seqs: list[Sequence],
@@ -393,23 +434,48 @@ def train_ctc(
       - 合成句子(孤立词首尾相接,见 synth_sentences.py)。只验证管道。
     没有真实句子时也能跑,但报出来的 WER 只说明"管道通了"。
     """
-    from synth_sentences import synthesize_sentences
+    from synth_sentences import SENTENCE_TEMPLATES, synthesize_sentences
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
     seq_len = args.sent_seq_len
+    trim = not args.no_trim
+    emit = make_emitter(getattr(args, "events", None))
 
     # 类别表**不依赖**当前有哪些句型:从数据集全部标签推,合并后去掉 _idle 再排序。
     # 依赖句型的话,今天多录一句就会让整张表移位,而表的下标就是 softmax 下标 ——
     # 旧模型配新表 = 每个词都翻译成另一个词。_idle 不是词,不进 CTC 目标
+    # (`labels` 进来时已经在 main() 里按 UNTRAINED_WORDS 过滤过了)
     classes = [c for c in merged_class_table(labels) if c != IDLE_LABEL]
     blank = len(classes)
     print(f"=== 句子级 CTC:{len(classes)} 类 + blank(下标 {blank}),T={seq_len} → "
           f"{seq_len // 4} 输出帧 ===")
 
+    # **有类别、但没有任何句型会用到它** —— 这个词的录制进不了合成句,CTC 只学会
+    # "永远别输出它",那个输出单元白占一格。发生过一次:删掉含 name 的句型之后
+    # `is` 只出现在那两句里,于是变成了一个没有正例的类。症状是 WER 差一点点,
+    # 没有任何线索指回句型表,所以这里必须打印出来
+    in_templates = {merge_label(w) for t in SENTENCE_TEMPLATES for w in t}
+    orphan = [c for c in classes if c not in in_templates]
+    if orphan:
+        print(f"  ⚠️  {orphan} 有类别但没有任何句型用到 —— 要么给它编一句合理的手语句子,"
+              f"要么加进 UNTRAINED_WORDS。现在它只会学到'永远别输出'")
+
+    # **真实句子录制也要裁。** 合成句用的是 trimmed_view() 之后的词(synthesize_sentences
+    # 的 trim_words 跟着同一个开关),真实录制不裁的话训练集两半的时间包络就不一致:
+    # 合成句没有起手段,真实句带着一段抬手 + 一段收尾静止。而推理端 sentenceEnvelope
+    # 的起点是"第一次判到手在动"、终点砍掉尾部 800ms —— 那两段推理时永远见不到。
+    # 这正是基线 61/396 条错例**全部**错在句首的成因,只修合成那一半等于换个位置重犯。
+    #
+    # 裁剪只扫前缀和后缀,**词与词之间的停顿一帧不动** —— 那正是协同发音要学的东西。
+    if trim and sentence_seqs:
+        require_trim_spans(sentence_seqs)
+        sentence_seqs = [s.trimmed_view() for s in sentence_seqs]
+
     real_tr, real_va = split_by_sequence(sentence_seqs, args.val_split, rng) if sentence_seqs else ([], [])
     if sentence_seqs:
-        print(f"真实句子 {len(sentence_seqs)} 条 → 训练 {len(real_tr)} / 验证 {len(real_va)}")
+        print(f"真实句子 {len(sentence_seqs)} 条 → 训练 {len(real_tr)} / 验证 {len(real_va)}"
+              + ("(已按 trimSpan 裁掉头尾静止)" if trim else "(⚠️  未裁,与合成句口径不一致)"))
 
     syn_tr: list[Sequence] = []
     syn_va: list[Sequence] = []
@@ -418,10 +484,13 @@ def train_ctc(
         # 录制既进训练句又进验证句 —— 那是泄漏,验证 WER 虚低到没有参考价值
         w_tr, w_va = split_by_sequence(word_seqs, args.val_split, rng)
         print(f"合成训练句(录制池 {len(w_tr)} 条):")
-        syn_tr, used = synthesize_sentences(w_tr, args.synth_per_template, rng)
+        syn_tr, used = synthesize_sentences(
+            w_tr, args.synth_per_template, rng, trim_words=trim
+        )
         print(f"合成验证句(录制池 {len(w_va)} 条,与训练池不重叠):")
         syn_va, _ = synthesize_sentences(
-            w_va, max(1, args.synth_per_template // 4), rng, templates=used
+            w_va, max(1, args.synth_per_template // 4), rng,
+            templates=used, trim_words=trim
         )
 
     train_seqs = real_tr + syn_tr
@@ -435,6 +504,28 @@ def train_ctc(
 
     xt, yt, ylt = build_ctc_xy(train_seqs, classes, seq_len)
     print(f"特征 {xt.shape},标签最长 {yt.shape[1]} 词")
+    # 真实/合成分开报,训练/验证也分开报。合起来的 numTrain 看不出"验证集里真实句
+    # 只有 9 条"这件事 —— 而那正是"总 WER 不能当真实表现看"的原因
+    emit(
+        "data",
+        classes=classes,
+        blankIndex=blank,
+        orphans=orphan,
+        seqLen=seq_len,
+        outputFrames=seq_len // 4,
+        numReal=len(sentence_seqs),
+        numRealTrain=len(real_tr),
+        numRealVal=len(real_va),
+        numSynthTrain=len(syn_tr),
+        numSynthVal=len(syn_va),
+        numTrain=len(train_seqs),
+        numVal=len(val_seqs),
+        # np.int64 进 json.dumps 会抛 TypeError,必须显式转
+        featShape=[int(v) for v in xt.shape],
+        maxLabelLen=int(yt.shape[1]),
+        trimmed=trim,
+        epochs=args.epochs,
+    )
     xv = yv = ylv = None
     if val_seqs:
         xv, yv, ylv = build_ctc_xy(val_seqs, classes, seq_len)
@@ -475,14 +566,28 @@ def train_ctc(
             idx = order[b : b + args.batch]
             tot += float(train_step(xt[idx], yt[idx], ylt[idx])) * len(idx)
         msg = f"epoch {epoch:>3}/{args.epochs}  loss {tot/n:.4f}"
+        ep_wer = None
+        saved = False
         if xv is not None:
             wer, _ = eval_wer(xv, yv, ylv)
+            ep_wer = float(wer)
             msg += f"  val WER {wer*100:.1f}%"
             if wer < best_wer:
                 best_wer = wer
                 model.save(out_dir / "sentence_student.keras")
                 msg += "  ← 已保存"
+                saved = True
         print(msg)
+        emit(
+            "epoch",
+            epoch=epoch,
+            total=args.epochs,
+            loss=tot / n,
+            valWer=ep_wer,
+            saved=saved,
+            # best_wer 的哨兵是 1e9,直接写出去页面会画一条冲天的线
+            bestWer=None if best_wer >= 1e9 else float(best_wer),
+        )
 
     if xv is None:
         model.save(out_dir / "sentence_student.keras")
@@ -506,6 +611,33 @@ def train_ctc(
             h = " ".join(classes[i] for i in hyp) or "(空)"
             print(f"  {r}\n  → {h}")
 
+        # **错在第几个词**。总 WER 会把这件事稀释掉:句首错误的成因和句中完全不同 ——
+        # 句首错是时间包络对不上(合成句带着抬手 transport,而推理端 sentenceEnvelope
+        # 的起点是"第一次判到手在动",那一段永远见不到),句中错是切词能力不够。
+        # 基线 61/396 条错例**全部**错在第 1 个词,这个占比才是词裁剪改动的直接靶子。
+        bad = [(r, h) for r, h in pairs if r != h]
+        head = sum(1 for r, h in bad if not h or h[0] != r[0])
+        if bad:
+            print(
+                f"  其中 {head}/{len(bad)} 条错在第 1 个词({head / len(bad) * 100:.0f}%)"
+                f" —— 句首错是时间包络问题,句中错是切词问题,两者要分开看"
+            )
+        # 给页面 40 条,而 print 只给 6 条:终端要能一眼扫完,页面可以滚。
+        # 词表而不是拼好的字符串 —— 界面要单独标红句首那个词
+        emit(
+            "errors",
+            nBad=n_bad,
+            nTotal=len(pairs),
+            headBad=head,
+            examples=[
+                {
+                    "ref": [classes[i] for i in r],
+                    "hyp": [classes[i] for i in h],
+                }
+                for r, h in bad[:40]
+            ],
+        )
+
     meta = {
         "labels": classes,
         "seqLen": seq_len,
@@ -528,6 +660,7 @@ def train_ctc(
     (out_dir / "sentence_student_meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
     )
+    emit("done", meta=meta)
     print(f"\n已保存 {out_dir}/sentence_student.keras + _meta.json")
     if meta["synthOnly"]:
         print("⚠️  全部是合成句子:这个 WER 只说明管道是通的,**不能**预测真实连续手语"
@@ -567,12 +700,49 @@ def main():
                     help="只用真实句子录制训练,不合成(默认会合成)")
     ap.add_argument("--synth-per-template", type=int, default=24,
                     help="每个句型合成多少条")
+    # 裁剪默认开,而且**真实句子和合成句必须同一个开关** —— 只裁一半就是新的口径差
+    ap.add_argument("--events", default=None,
+                    help="把训练进度/错例写成 JSONL 到这个路径(给网页端读)。"
+                         "不给就完全不写,stdout 不受影响")
+    ap.add_argument("--exclude-words", nargs="*", default=[], metavar="WORD",
+                    help="本轮临时不训练的词,与 UNTRAINED_WORDS 合并生效。"
+                         "与那份清单的区别是**临时**:UNTRAINED_WORDS 有测试锁着"
+                         "「任何句型都不含不训练的词」,往里加一个词就得同时删掉"
+                         "所有含它的句型和采集清单条目(删 eat 要动 8 条句型),"
+                         "那是不可逆的表结构改动。这个开关只影响本次训练,"
+                         "含该词的句型会像缺录制那样被合成器跳过")
+    ap.add_argument("--no-hand-norm", dest="hand_norm", action="store_false", default=True,
+                    help="不做手别归一化(对照实验基线)。默认**做** —— 见 "
+                         "dominant_hand.py 的模块说明:推理侧一直在把左手打的整条"
+                         "镜像到右手口径,而 Python 训练侧以前完全没做这一步")
+    ap.add_argument("--no-trim", action="store_true",
+                    help="不按 trimSpan 裁剪(对照实验的基线)。三条链路一起关:"
+                         "孤立词(只裁头)、真实句(裁头尾)、合成句用的词(裁头尾) —— "
+                         "只关一条就是新的口径差。注意三条链路裁法本来就不同,"
+                         "见孤立词分支的注释")
     args = ap.parse_args()
 
     rng = np.random.default_rng(args.seed)
     tf.random.set_seed(args.seed)
 
     all_seqs, labels = load_dataset(args.data, recorded_only=args.recorded_only)
+
+    # **手别归一化 —— 必须在这里,在裁剪和句子合成之前。**
+    #
+    # 推理侧一直是右手口径(`Translate.tsx` 的 normalizeHandedness),Python 训练侧
+    # 以前一步都没做,于是训练数据里"信号落在左半边还是右半边"是个与标签无关的
+    # 纯噪声因子。实测代价:31 个词有 15 个左右手混采,而混采最均匀的 `eat` 被逼成
+    # 一个手别无关的宽判据 —— 镜像后 14/18 仍判 eat,任何吃不准的片段都往它那儿掉。
+    # 详见 dominant_hand.py 的模块说明。
+    #
+    # 放在合成句之前是因为合成句是拿孤立词录制拼出来的:词没归一化,拼出来的
+    # 1680 条合成句就全是脏的,而真实句只有 90 条 —— 95% 的训练数据会带着这个缺口。
+    if args.hand_norm:
+        all_seqs, hstats = normalize_samples_to_right(all_seqs)
+        print(format_stats(hstats))
+    else:
+        print("⚠️  --no-hand-norm:左手录的样本留在左手槽位里(对照实验基线)")
+
     # 两条链路各要一半:孤立词训练只能吃单 segment,CTC 只能吃多 segment。
     # 判据是 Sequence.is_sentence,与 TS 侧 isSentenceSample 同一条
     word_seqs = [s for s in all_seqs if not s.is_sentence]
@@ -581,6 +751,33 @@ def main():
         f"载入 {len(all_seqs)} 条序列,{len(labels)} 类"
         f"(孤立词 {len(word_seqs)} / 句子 {len(sentence_seqs)})"
     )
+
+    # 本轮不训练的词:录制一条都不进训练,两条链路(孤立词 / CTC)都排。
+    # **和浏览器侧 TrainSequence 的默认排除清单是同一份**(sentenceTemplates.ts 的
+    # UNTRAINED_WORDS,有跨语言测试锁着)。以前是浏览器排了、Python 没排,于是
+    # 句子模型会输出词模型从来没训过的词
+    # `--exclude-words` 是本轮临时追加的,合并进同一个 drop 集合走同一条路 ——
+    # 两套排除逻辑并行是"某个词在孤立词里排了、句子里没排"这类错误的温床
+    from synth_sentences import UNTRAINED_WORDS
+    drop = set(UNTRAINED_WORDS) | set(args.exclude_words)
+    if args.exclude_words:
+        print(f"本轮临时不训练(--exclude-words): {sorted(set(args.exclude_words))}")
+    if drop:
+        n_w = sum(1 for s in word_seqs if s.primary_label in drop)
+        n_s = sum(1 for s in sentence_seqs if drop & set(s.label_sequence))
+        word_seqs = [s for s in word_seqs if s.primary_label not in drop]
+        # 句子只要**含**一个不训练的词就整条排掉:CTC 的目标是整个序列,
+        # 没法只把其中一个词拿掉
+        sentence_seqs = [s for s in sentence_seqs if not (drop & set(s.label_sequence))]
+        # **先从原始标签里删成员,再合并** —— 顺序反了就错:you_pl 合并进
+        # merged_pron_pl,拿名字去合并后的类别表里删会把 we/they 一起带走,
+        # 而症状是 softmax 下标整体错位、每个词都翻成另一个词
+        before = merged_class_table(labels)
+        labels = [l for l in labels if l not in drop]
+        after = merged_class_table(labels)
+        gone = [c for c in before if c not in after]
+        print(f"排除不训练的词 {sorted(drop)}:孤立词 -{n_w} 条 / 句子 -{n_s} 条;"
+              f"类别表 {len(before)} → {len(after)},少了 {gone or '0 个'}")
     if IDLE_LABEL not in labels:
         print(f"⚠️  没有 {IDLE_LABEL} 类。滑窗推理必须有空闲伪类,否则线上会持续乱吐词。")
 
@@ -595,6 +792,75 @@ def main():
         print(f"排除 {len(sentence_seqs)} 条句子样本(孤立词训练不吃多 segment)")
     if len(seqs) < 10:
         raise SystemExit("孤立词样本太少,先去 /collect-seq 采集")
+
+    # **按 trimSpan 裁掉句首的预备动作 —— 只裁头,尾巴一帧不动**(`head_only=True`)。
+    # 以前这一支连头都没裁:区间在导出时就逐条算好了(sequenceTrim 的三层判据,写进
+    # dataset.json),CTC 那一支和浏览器页面内训练都读了,只有这里没读 ——
+    # 于是整条录制含抬手一起被压进 32 帧。
+    #
+    # 为什么必须裁头(照抄 sequenceTrim.ts 的文件头,别再重新推一遍):
+    #   1. 吃掉时间预算。32 帧铺在整段上,抬手占 40% 就意味着真手势只剩 19 帧,
+    #      而抬手时长每条都不同 —— 同一个词落在不同的相位和时间尺度上。
+    #   2. 污染参考帧。朝向通道是相对**首帧**的,首帧是"手在腿上",于是整条序列
+    #      都在描述"相对腿上那一刻转了多少"。裁掉之后参考帧自动变成起势姿态。
+    #   3. 可能泄漏。抬手快慢若与词相关(换词时手放下休息更久),模型能拿它当捷径。
+    #
+    # **为什么偏偏不裁尾 —— 与句子那两条链路(train_ctc)故意不同:**
+    #   - 逐词推理(`predictSequence`)只是取最近 2000ms 滑窗,`trim: null`,**不掐尾**。
+    #     而句子推理(`sentenceEnvelope`)会主动掐掉尾部静止 —— 所以句子训练必须裁尾。
+    #   - 录制时打完词往往**定格**在手势最终姿态上。第三层判静止靠的是弯折 σ +
+    #     指压 σ + 转角,定格时这三个方差全都趋 0 → 被判成"静止"→ 切掉。可那正是
+    #     手势的一部分,而且你打完手不动的时候,滑窗里装的就是那个定格姿态。
+    #     训练切掉、推理占满滑窗,是最坏的口径差。
+    #   - ⚠ 别拿"尾部被切区域活动度低(实测中位 0.46)"当作可以切的证据:定格的活动度
+    #     本来就低。那个指标能证明尾巴不动,证明不了尾巴没用。
+    #
+    # 时间尺度:不裁 2768ms / 头尾都裁 1454ms / 只裁头 ~2250ms,推理窗 2000ms。
+    # (我先前在这里写过"裁了离推理更远",按实测那是错的,已订正。)
+    #
+    # 合成句用的词仍然是头尾都裁的(train_ctc 里的 trim_words) —— 定格接到下一个词
+    # 前面会在句子中间造出真实句里没有的假停顿。同一批录制两种切法不是矛盾,
+    # 是因为两个推理端不一样。
+    if not args.no_trim:
+        require_trim_spans(seqs)
+        cut = [s for s in seqs if s.trim_applied]
+        if cut:
+            head = np.mean([s.trim_span[0] / s.frame_count for s in cut])
+            before = np.mean([s.duration_ms for s in cut])
+            after = np.mean([s.trimmed_view(head_only=True).duration_ms for s in cut])
+            print(f"按 trimSpan 裁句首: {len(cut)}/{len(seqs)} 条要裁,平均切掉前 {head*100:.0f}% 帧"
+                  f"({before:.0f}ms → {after:.0f}ms);尾部一帧不动")
+        else:
+            print(f"按 trimSpan 裁句首: 0/{len(seqs)} 条要裁(判据都说不用裁)")
+        seqs = [s.trimmed_view(head_only=True) for s in seqs]
+    else:
+        print("⚠️  --no-trim:句首的抬手段全留在训练数据里(对照实验基线)")
+
+    # **标签合并:你/他 → 同一类。** 以前只有 CTC 那一支合并了(`build_ctc_xy`),
+    # 逐词这一支没有 —— 于是部署的词模型里 you/he/we/they 是四个独立类,而
+    # `label_merge.py` 自己的论证是它们在特征空间里**是同一个点**:区别纯在指向
+    # (yaw),而手套是六轴 ICM-42688、无磁力计,绝对 yaw 在硬件层就不存在
+    # (实测漂移 P90 15.9°/s → 归零 10s 累计 159°,而类间距只有 45°)。
+    #
+    # 两个类抢同一块特征空间时 softmax 只能按训练集比例随机分配,所以"打「你」
+    # 出来「他」"不是偶发,是必然;而且逃逸的概率还会污染邻近词。合并后这块空间
+    # 归一个类,其余各类的边界反而更干净。
+    #
+    # **必须在 split_by_sequence 之前。** 那个划分是按标签分层抽样的,合并前划分
+    # 等于把 you/he 当成两类各自抽 —— 类别表已经合了、分层还按旧标签做,
+    # 症状是某一类在验证集里 0 条而没有任何报错。
+    labels = merged_class_table(labels)
+    hit = sorted({s.primary_label for s in seqs if merge_label(s.primary_label) != s.primary_label})
+    seqs = [replace(s, primary_label=merge_label(s.primary_label)) for s in seqs]
+    if hit:
+        print(f"标签合并: {hit} → {sorted({merge_label(h) for h in hit})};类别表 {len(labels)} 类")
+    else:
+        print(f"标签合并: 没有需要合并的标签(类别表 {len(labels)} 类)")
+    # build_xy 对认不出的标签是**静默**跳过的(one-hot 整行为 0),那种样本会把
+    # 交叉熵往"所有类都不是"的方向拖,而准确率看着只是低一点。宁可在这里炸
+    missing = sorted({s.primary_label for s in seqs} - set(labels))
+    if missing:
+        raise SystemExit(f"这些标签不在类别表里,build_xy 会静默丢掉: {missing}")
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -679,6 +945,11 @@ def main():
         "frameDim": TACTILE_FRAME_DIM,
         "modelType": "seq_tactile",
         "distilled": soft is not None,
+        # 裁与不裁是两个模型,而且**权重形状完全一样** —— 不记在 meta 里的话,
+        # 对照实验跑完两版之后没有任何办法分辨部署的是哪一版。
+        # 值是切法本身而不是 true/false:以后再出第三种切法时,老产物的 meta
+        # 仍然自解释("head" 就是只裁头),不用去翻当时的代码
+        "trim": "none" if args.no_trim else "head",
         "valAccuracy": float(val_acc),
         "numSequences": len(seqs),
         "numTrain": len(train_seqs),

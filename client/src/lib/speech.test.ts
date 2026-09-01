@@ -5,7 +5,7 @@
  * 而这里要断言的本来就是**调用序列**，不是有没有出声。
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { speakChinese, speechSupported, stopSpeaking } from "./speech";
+import { speakChinese, speechSupported, stopSpeaking, warmUpVoices } from "./speech";
 
 interface FakeUtterance {
   text: string;
@@ -17,11 +17,14 @@ interface FakeUtterance {
 let spoken: FakeUtterance[];
 let cancels: number;
 let voices: Array<{ name: string; lang: string }>;
+/** getVoices() 被调了几次 —— 预热的唯一可观测行为就是它 */
+let voiceReads: number;
 
 beforeEach(() => {
   spoken = [];
   cancels = 0;
   voices = [];
+  voiceReads = 0;
   // SpeechSynthesisUtterance 在 node 里不存在，自己造一个
   (globalThis as any).SpeechSynthesisUtterance = class {
     text: string;
@@ -34,7 +37,10 @@ beforeEach(() => {
   };
   (globalThis as any).window = {
     speechSynthesis: {
-      getVoices: () => voices,
+      getVoices: () => {
+        voiceReads++;
+        return voices;
+      },
       speak: (u: FakeUtterance) => spoken.push(u),
       cancel: () => {
         cancels++;
@@ -117,6 +123,31 @@ describe("speakChinese", () => {
   it("文本首尾空白被去掉", () => {
     speakChinese("  我高兴。  ");
     expect(spoken[0].text).toBe("我高兴。");
+  });
+});
+
+/*
+ * 预热是**自动朗读**才需要的（2026-08-31 加）。手动点朗读时列表早填好了；
+ * 自动朗读没有那个缓冲，会话第一句正好撞在空列表上 → 英文引擎念汉字。
+ */
+describe("warmUpVoices", () => {
+  it("调一次 getVoices() 把异步加载踢起来", () => {
+    // 浏览器要等到第一次 getVoices() 才去填列表。此刻返回什么不重要 ——
+    // 重要的是等到真要念的时候（至少几秒后）列表已经在了
+    warmUpVoices();
+    expect(voiceReads).toBe(1);
+    expect(spoken).toHaveLength(0); // 预热不出声
+  });
+
+  it("重复调用无害（不设幂等标记 —— 那种标记会跨测试泄漏）", () => {
+    warmUpVoices();
+    warmUpVoices();
+    expect(voiceReads).toBe(2);
+  });
+
+  it("不支持语音合成时静默返回，不抛", () => {
+    (globalThis as any).window = {};
+    expect(() => warmUpVoices()).not.toThrow();
   });
 });
 

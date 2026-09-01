@@ -132,10 +132,25 @@ __pycache__/
 # 本机一块磁盘上，删了没有撤销。异地备份的价值大于仓库变大的代价。
 #
 # ⚠ 代价是真的：dataset.bin 是二进制，git 存不了增量，**每次重新导出并提交都会
-# 再加约 43MB 到仓库历史里，且永久不可回收**（除非 filter-repo 重写历史）。
-# 所以：采集完一批再导出一次，不要每改一点就提交。单文件 100MB 是 GitHub 的硬上限，
-# 现在 43MB，还能再涨一倍多；到那时候要转 git-lfs。
+# 把整份大小再加进仓库历史，且永久不可回收**（除非 filter-repo 重写历史）。
+# 所以：采集完一批再导出一次，不要每改一点就提交。单文件 100MB 是 GitHub 的硬上限。
+# ⚠ 2026-09-01 现状：dataset.bin 已经 **71MB**（上一次提交时 43MB），离硬上限只剩
+# 不到 30MB。**下一次重新导出之前先转 git-lfs**，不要再直接提交一份进历史。
 
 # 例外：句子模型的**权重**要随代码部署（浏览器运行时从 /models/ 读），必须入库。
 # 只有 623KB，是 export_weights.py 从 out/ 里抽出来的推理所需部分
 !client/public/models/
+
+# 消融/对照实验的输出目录**不入库**。
+#
+# out_ab_base / out_ab_norm / out_ab_noeat / out_exp2 / out_exp3 / out_exp_nosynth /
+# out_trim / out_notrim / out_head：每个都是一次完整训练的产物（.keras + meta + 日志），
+# 加起来 32MB。它们是**产生结论的中间产物，不是结论本身** —— 结论已经写进
+# README.md 的指标表和 动态手语识别方案.md 里（例如 out_exp_nosynth 的 WER 20.75%
+# 就是"合成数据在撑着整条链路"那句话的依据）。
+# dataset.bin 已入库，重跑脚本就能再生，没必要每套都占 3~8MB 历史。
+python_train/out_*/
+python_train/out/_backup_*/
+
+# 一次性探针脚本（_gatesim.py / _rate.py / _rot.py 之类），写来验一个数就丢，不是源码
+python_train/_*.py

@@ -42,6 +42,7 @@ import argparse
 import json
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -85,6 +86,14 @@ def export(model_path: Path, meta_path: Path, out_dir: Path) -> dict:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     else:
         print(f"⚠️  没找到 {meta_path} —— 浏览器少了 labels 就无法把输出下标翻回词。")
+
+    # 导出时刻(epoch 毫秒)。孤立词那一档浏览器里同时存在两个模型:这个部署产物,
+    # 和用户在 /train-sequence 页面内训出来、存在 IndexedDB 的那个。选型规则是
+    # "谁更新用谁"(与 Translate 里静态/时序之间的既有约定一致),而 SavedModel 的
+    # createdAt 也是 epoch 毫秒 —— 两者可直接比。
+    # 用**导出时刻**而不是训练时刻:导出才是"这份权重进浏览器"的时刻,重新导一次
+    # 就该重新赢过页面内那个。
+    meta["exportedAt"] = int(time.time() * 1000)
 
     manifest = {"format": "seq-weights-1.0", "layers": layers, "meta": meta}
     (out_dir / "weights.json").write_text(

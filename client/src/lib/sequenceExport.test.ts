@@ -13,6 +13,14 @@ import {
   SEQ_LANDMARK_N,
   type SequenceSample,
 } from "./datasetStore";
+import { trimSpanForExport } from "./sequenceTrim";
+import type { BendRange } from "./bendRange";
+
+/** 弯折两点标定。第三层（触觉静止段）只在量程齐全时才跑 */
+const FIST_RANGE: BendRange = {
+  open: [40, 40, 40, 40, 40],
+  fist: [160, 160, 160, 160, 160],
+};
 
 function makeSeq(
   label: string,
@@ -101,7 +109,7 @@ describe("序列二进制导出 round-trip", () => {
   const back = decodeSequencesBinary(bin, manifest);
 
   it("manifest 元信息正确", () => {
-    expect(manifest.version).toBe("seq-1.0");
+    expect(manifest.version).toBe("seq-1.1");
     expect(manifest.totalSequences).toBe(seqs.length);
     expect(manifest.sensorN).toBe(SEQ_SENSOR_N);
     expect(manifest.imuN).toBe(SEQ_IMU_N);
@@ -163,6 +171,49 @@ describe("序列二进制导出 round-trip", () => {
     expect(back[2].rightSensor).toBeNull();
     expect(back[2].rightImu).toBeNull();
     expect(back[3].rightLandmarks).toBeNull();
+  });
+
+  /*
+   * trimSpan 是 seq-1.1 新加的字段。它决定 Python 侧句子合成从哪一帧切起 ——
+   * 错了不会报错，只会让合成句的时间包络与推理端（sentenceEnvelope）差一段抬手。
+   */
+  it("不传 trimOf 时 trimSpan 是 null —— 那是「没算」，不是「不用裁」", () => {
+    for (const e of manifest.sequences) expect(e.trimSpan).toBeNull();
+  });
+
+  it("传了 trimOf 时逐条写进 manifest，区间落在 [0, frameCount] 内", () => {
+    const withTrim = encodeSequencesBinary(seqs, (s) =>
+      trimSpanForExport(s, { LH: FIST_RANGE, RH: FIST_RANGE })
+    );
+    expect(withTrim.manifest.sequences).toHaveLength(seqs.length);
+    for (let i = 0; i < seqs.length; i++) {
+      const t = withTrim.manifest.sequences[i].trimSpan!;
+      expect(t).not.toBeNull();
+      expect(t.startFrame).toBeGreaterThanOrEqual(0);
+      expect(t.endFrame).toBeLessThanOrEqual(seqs[i].frameCount);
+      expect(t.startFrame).toBeLessThan(t.endFrame);
+      // 不裁的那些必须是整条，不能是"差一帧"的半成品区间
+      if (!t.applied) {
+        expect(t.startFrame).toBe(0);
+        expect(t.endFrame).toBe(seqs[i].frameCount);
+        expect(t.keptRatio).toBe(1);
+      }
+      // 两只手都标定了 → 第三层对**单手录制也**跑得起来：量程对称性守则要的是
+      // "有数据的那只手都有标定"，没戴的那只手不需要标定
+      expect(t.tactileRan).toBe(true);
+    }
+  });
+
+  it("trimSpan 不影响二进制布局（它只在 .json 里）", () => {
+    const withTrim = encodeSequencesBinary(seqs, (s) =>
+      trimSpanForExport(s, { LH: FIST_RANGE, RH: FIST_RANGE })
+    );
+    expect(withTrim.bin.byteLength).toBe(bin.byteLength);
+    for (let i = 0; i < seqs.length; i++) {
+      expect(withTrim.manifest.sequences[i].arrays).toEqual(
+        manifest.sequences[i].arrays
+      );
+    }
   });
 
   it("空数据集导出成 0 字节且不抛异常", () => {
