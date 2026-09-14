@@ -45,7 +45,7 @@ export default function HUDPanel({
         <PanelHeader
           label="System Status"
           statusColor={
-            isRunning ? "#00f0ff" : isLoading ? "#f59e0b" : "#ff2d7b"
+            isRunning ? "var(--hud-accent)" : isLoading ? "var(--hud-warn)" : "var(--hud-err)"
           }
         />
         <div className="space-y-1.5 font-mono text-[11px] mt-2">
@@ -53,7 +53,7 @@ export default function HUDPanel({
             label="STATUS"
             value={isRunning ? "ACTIVE" : isLoading ? "LOADING" : "STANDBY"}
             valueColor={
-              isRunning ? "#00f0ff" : isLoading ? "#f59e0b" : "#ff2d7b"
+              isRunning ? "var(--hud-accent)" : isLoading ? "var(--hud-warn)" : "var(--hud-err)"
             }
           />
           <DataRow label="FPS" value={isRunning ? fps.toString() : "--"} />
@@ -66,8 +66,8 @@ export default function HUDPanel({
             }
             valueColor={
               handResults?.detectionSource === "glove-enhanced"
-                ? "#f59e0b"
-                : "#667788"
+                ? "var(--hud-warn)"
+                : "var(--hud-dim)"
             }
           />
           <DataRow label="MODEL" value="MEDIAPIPE V2" />
@@ -109,20 +109,20 @@ export default function HUDPanel({
           <DataRow
             label="HANDS"
             value={handsDetected.toString()}
-            valueColor={handsDetected > 0 ? "#00f0ff" : "#445566"}
+            valueColor={handsDetected > 0 ? "var(--hud-accent)" : "var(--hud-faint)"}
           />
           {handedness.map((h, i) => (
             <div key={i} className="space-y-1.5">
               <DataRow
                 label={`HAND ${i + 1}`}
                 value={h.toUpperCase()}
-                valueColor="#00e5a0"
+                valueColor="var(--hud-ok)"
               />
               {handResults && handResults.gloveConfidences[i] >= 0.45 && (
                 <DataRow
                   label={`SIDE ${i + 1}`}
                   value={surfaceLabel(surfaces[i])}
-                  valueColor={surfaces[i] === "palm" ? "#d8e2e8" : "#a855f7"}
+                  valueColor={surfaces[i] === "palm" ? "var(--hud-text)" : "var(--hud-violet)"}
                 />
               )}
             </div>
@@ -144,11 +144,11 @@ export default function HUDPanel({
           <PanelHeader label="Fingertip Coords" />
           <div className="space-y-1 font-mono text-[10px] mt-2">
             {[
-              { name: "THUMB", idx: 4, color: "#00f0ff" },
-              { name: "INDEX", idx: 8, color: "#00e5a0" },
-              { name: "MIDDLE", idx: 12, color: "#a855f7" },
-              { name: "RING", idx: 16, color: "#f59e0b" },
-              { name: "PINKY", idx: 20, color: "#ff2d7b" },
+              { name: "THUMB", idx: 4, color: "var(--hud-accent)" },
+              { name: "INDEX", idx: 8, color: "var(--hud-ok)" },
+              { name: "MIDDLE", idx: 12, color: "var(--hud-violet)" },
+              { name: "RING", idx: 16, color: "var(--hud-warn)" },
+              { name: "PINKY", idx: 20, color: "var(--hud-err)" },
             ].map(({ name, idx, color }) => {
               const lm = handResults.landmarks[0][idx];
               return (
@@ -156,7 +156,7 @@ export default function HUDPanel({
                   <span style={{ color }} className="w-14">
                     {name}
                   </span>
-                  <span className="text-[#667788] tabular-nums">
+                  <span className="text-[var(--hud-dim)] tabular-nums">
                     {(1 - lm.x).toFixed(2)} {lm.y.toFixed(2)} {lm.z.toFixed(3)}
                   </span>
                 </div>
@@ -171,22 +171,21 @@ export default function HUDPanel({
         <PanelHeader label="Joint Map" />
         <div className="space-y-1.5 text-[10px] font-mono mt-2">
           {[
-            { name: "THUMB", color: "#00f0ff", joints: "0-4" },
-            { name: "INDEX", color: "#00e5a0", joints: "5-8" },
-            { name: "MIDDLE", color: "#a855f7", joints: "9-12" },
-            { name: "RING", color: "#f59e0b", joints: "13-16" },
-            { name: "PINKY", color: "#ff2d7b", joints: "17-20" },
+            { name: "THUMB", color: "var(--hud-accent)", joints: "0-4" },
+            { name: "INDEX", color: "var(--hud-ok)", joints: "5-8" },
+            { name: "MIDDLE", color: "var(--hud-violet)", joints: "9-12" },
+            { name: "RING", color: "var(--hud-warn)", joints: "13-16" },
+            { name: "PINKY", color: "var(--hud-err)", joints: "17-20" },
           ].map(({ name, color, joints }) => (
             <div key={name} className="flex items-center gap-2">
               <div
                 className="w-3 h-0.5 rounded-full"
                 style={{
                   backgroundColor: color,
-                  boxShadow: `0 0 6px ${color}80`,
                 }}
               />
               <span style={{ color }}>{name}</span>
-              <span className="text-[#445566] ml-auto">{joints}</span>
+              <span className="text-[var(--hud-faint)] ml-auto">{joints}</span>
             </div>
           ))}
         </div>
@@ -229,7 +228,7 @@ function PanelHeader({
 function DataRow({
   label,
   value,
-  valueColor = "#667788",
+  valueColor = "var(--hud-dim)",
 }: {
   label: string;
   value: string;
@@ -237,7 +236,7 @@ function DataRow({
 }) {
   return (
     <div className="flex justify-between items-center">
-      <span className="text-[#445566]">{label}</span>
+      <span className="text-[var(--hud-faint)]">{label}</span>
       <span className="tabular-nums" style={{ color: valueColor }}>
         {value}
       </span>

@@ -10,12 +10,12 @@ import {
 import { useEffect, useRef } from "react";
 
 const FINGER_COLORS: Record<string, string> = {
-  thumb: "#00f0ff",
-  index: "#00e5a0",
-  middle: "#a855f7",
-  ring: "#f59e0b",
-  pinky: "#ff2d7b",
-  palm: "#00f0ff",
+  thumb: "#1677ff",
+  index: "#16a34a",
+  middle: "#7c3aed",
+  ring: "#d97706",
+  pinky: "#e11d48",
+  palm: "#1677ff",
 };
 
 const FINGER_GLOW_COLORS: Record<string, string> = {
@@ -106,10 +106,10 @@ export default function HandCanvas({
         ctx.scale(-1, 1);
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
         ctx.restore();
-        ctx.fillStyle = "rgba(10, 14, 26, 0.4)";
+        ctx.fillStyle = "rgba(244, 246, 250, 0.28)";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
       } else {
-        ctx.fillStyle = "#0a0e1a";
+        ctx.fillStyle = "#eaeff6";
         ctx.fillRect(0, 0, canvas.width, canvas.height);
         drawGrid(ctx, canvas.width, canvas.height);
       }
@@ -180,7 +180,7 @@ export default function HandCanvas({
 
   function drawGrid(ctx: CanvasRenderingContext2D, w: number, h: number) {
     const step = 50;
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.04)";
+    ctx.strokeStyle = "rgba(100, 116, 139, 0.14)";
     ctx.lineWidth = 0.5;
     for (let x = 0; x < w; x += step) {
       ctx.beginPath();
@@ -194,7 +194,7 @@ export default function HandCanvas({
       ctx.lineTo(w, y);
       ctx.stroke();
     }
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.08)";
+    ctx.strokeStyle = "rgba(100, 116, 139, 0.24)";
     ctx.beginPath();
     ctx.moveTo(w / 2, 0);
     ctx.lineTo(w / 2, h);
@@ -204,7 +204,7 @@ export default function HandCanvas({
   }
 
   function drawScanLines(ctx: CanvasRenderingContext2D, w: number, h: number) {
-    ctx.fillStyle = "rgba(0, 240, 255, 0.012)";
+    ctx.fillStyle = "rgba(100, 116, 139, 0.03)";
     for (let y = 0; y < h; y += 3) {
       ctx.fillRect(0, y, w, 1);
     }
@@ -223,7 +223,7 @@ export default function HandCanvas({
     ctx.save();
 
     // 外圈
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.15)";
+    ctx.strokeStyle = "rgba(22, 119, 255, 0.2)";
     ctx.lineWidth = 1;
     ctx.beginPath();
     ctx.arc(cx, cy, radius, 0, Math.PI * 2);
@@ -235,7 +235,7 @@ export default function HandCanvas({
     ctx.stroke();
 
     // 旋转弧线 1
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.5)";
+    ctx.strokeStyle = "rgba(22, 119, 255, 0.55)";
     ctx.lineWidth = 2;
     const angle1 = time * 1.5;
     ctx.beginPath();
@@ -243,7 +243,7 @@ export default function HandCanvas({
     ctx.stroke();
 
     // 旋转弧线 2（反向）
-    ctx.strokeStyle = "rgba(255, 45, 123, 0.4)";
+    ctx.strokeStyle = "rgba(225, 29, 72, 0.45)";
     const angle2 = -time * 2;
     ctx.beginPath();
     ctx.arc(cx, cy, radius * 0.6, angle2, angle2 + 0.8);
@@ -251,20 +251,20 @@ export default function HandCanvas({
 
     // 脉冲圆
     const pulseRadius = radius * (1 + 0.15 * Math.sin(time * 3));
-    ctx.strokeStyle = `rgba(0, 240, 255, ${0.1 + 0.05 * Math.sin(time * 3)})`;
+    ctx.strokeStyle = `rgba(22, 119, 255, ${0.16 + 0.08 * Math.sin(time * 3)})`;
     ctx.lineWidth = 0.5;
     ctx.beginPath();
     ctx.arc(cx, cy, pulseRadius, 0, Math.PI * 2);
     ctx.stroke();
 
     // 提示文字
-    ctx.fillStyle = `rgba(0, 240, 255, ${0.4 + 0.2 * Math.sin(time * 2)})`;
+    ctx.fillStyle = `rgba(22, 119, 255, ${0.55 + 0.25 * Math.sin(time * 2)})`;
     ctx.font = '13px "JetBrains Mono", monospace';
     ctx.textAlign = "center";
     ctx.fillText("SCANNING FOR HANDS...", cx, cy + radius + 35);
 
     ctx.font = '10px "JetBrains Mono", monospace';
-    ctx.fillStyle = "rgba(85, 102, 119, 0.6)";
+    ctx.fillStyle = "rgba(90, 105, 125, 0.75)";
     ctx.fillText("请将手放入摄像头视野范围内", cx, cy + radius + 55);
 
     ctx.restore();
@@ -329,7 +329,7 @@ export default function HandCanvas({
       const x = lm.x * w;
       const y = lm.y * h;
 
-      let color = "#00f0ff";
+      let color = "#1677ff";
       if (idx <= 4) color = FINGER_COLORS.thumb;
       else if (idx <= 8) color = FINGER_COLORS.index;
       else if (idx <= 12) color = FINGER_COLORS.middle;
@@ -359,7 +359,7 @@ export default function HandCanvas({
       ctx.fill();
 
       // 白色高光
-      ctx.fillStyle = "rgba(255, 255, 255, 0.7)";
+      ctx.fillStyle = "rgba(255, 255, 255, 0.85)";
       ctx.beginPath();
       ctx.arc(
         x - radius * 0.25,
@@ -401,7 +401,7 @@ export default function HandCanvas({
 
     const size = 18;
     ctx.save();
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.35)";
+    ctx.strokeStyle = "rgba(22, 119, 255, 0.4)";
     ctx.lineWidth = 0.8;
 
     ctx.beginPath();
@@ -419,7 +419,7 @@ export default function HandCanvas({
     ctx.arc(cx, cy, 2, 0, Math.PI * 2);
     ctx.stroke();
 
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.15)";
+    ctx.strokeStyle = "rgba(22, 119, 255, 0.2)";
     ctx.beginPath();
     ctx.arc(cx, cy, size + 5, 0, Math.PI * 2);
     ctx.stroke();
@@ -452,10 +452,10 @@ export default function HandCanvas({
           : "手套方向识别中";
     const color =
       surface === "palm"
-        ? "#d8e2e8"
+        ? "#334155"
         : surface === "back"
-          ? "#a855f7"
-          : "#f59e0b";
+          ? "#7c3aed"
+          : "#d97706";
 
     ctx.save();
     ctx.font = '11px "JetBrains Mono", monospace';
@@ -463,7 +463,7 @@ export default function HandCanvas({
     const labelWidth = ctx.measureText(label).width + 16;
     const boxX = Math.min(Math.max(6, x + 24), w - labelWidth - 6);
     const boxY = Math.min(Math.max(20, y - 30), h - 24);
-    ctx.fillStyle = "rgba(10, 14, 26, 0.86)";
+    ctx.fillStyle = "rgba(255, 255, 255, 0.92)";
     ctx.fillRect(boxX, boxY - 15, labelWidth, 22);
     ctx.strokeStyle = `${color}88`;
     ctx.lineWidth = 1;
@@ -479,7 +479,7 @@ export default function HandCanvas({
     const cornerSize = 25;
     const offset = 6;
     ctx.save();
-    ctx.strokeStyle = "rgba(0, 240, 255, 0.3)";
+    ctx.strokeStyle = "rgba(22, 119, 255, 0.35)";
     ctx.lineWidth = 1.5;
 
     // 左上

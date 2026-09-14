@@ -353,15 +353,15 @@ function lerpPose(pose1: HandPose, pose2: HandPose, t: number): HandPose {
 
 // 手指颜色
 const FINGER_COLORS = {
-  thumb: "#4dabf7",
-  index: "#69db7c",
-  middle: "#ffd43b",
-  ring: "#ffa94d",
-  pinky: "#ff6b6b",
+  thumb: "#2563eb",
+  index: "#15803d",
+  middle: "#a16207",
+  ring: "#c2410c",
+  pinky: "#be123c",
 };
 
-const JOINT_COLOR = "#00f0ff";
-const WRIST_COLOR = "#da77f2";
+const JOINT_COLOR = "#1677ff";
+const WRIST_COLOR = "#c026d3";
 
 export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAnimProps) {
   const [currentPose, setCurrentPose] = useState<HandPose>(DEFAULT_POSE);
@@ -476,10 +476,10 @@ export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAni
         x="88"
         y="15"
         fontSize="12"
-        fill="#00f0ff"
+        fill="#1677ff"
         opacity="0.7"
         textAnchor="middle"
-        style={{ filter: "drop-shadow(0 0 3px #00f0ff)" }}
+        style={{ filter: "drop-shadow(0 0 3px #1677ff)" }}
       >
         {arrow}
       </text>
@@ -501,7 +501,7 @@ export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAni
             <path
               d="M 10 0 L 0 0 0 10"
               fill="none"
-              stroke="#00f0ff"
+              stroke="#1677ff"
               strokeWidth="0.1"
               opacity="0.2"
             />
@@ -515,7 +515,7 @@ export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAni
           y1="0"
           x2="100"
           y2="0"
-          stroke="#00f0ff"
+          stroke="#1677ff"
           strokeWidth="0.3"
           opacity="0.4"
           className="animate-scan-line"
@@ -537,7 +537,7 @@ export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAni
             } ${currentPose.ring[0].join(",")
             } ${currentPose.pinky[0].join(",")}`}
           fill="rgba(0, 240, 255, 0.05)"
-          stroke="#00f0ff"
+          stroke="#1677ff"
           strokeWidth="0.5"
           opacity="0.4"
         />
@@ -564,10 +564,10 @@ export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAni
       </svg>
 
       {/* 角落装饰 */}
-      <div className="absolute top-0 left-0 w-3 h-3 border-t border-l border-[#00f0ff]/40" />
-      <div className="absolute top-0 right-0 w-3 h-3 border-t border-r border-[#00f0ff]/40" />
-      <div className="absolute bottom-0 left-0 w-3 h-3 border-b border-l border-[#00f0ff]/40" />
-      <div className="absolute bottom-0 right-0 w-3 h-3 border-b border-r border-[#00f0ff]/40" />
+      <div className="absolute top-0 left-0 w-3 h-3 border-t border-l border-[#1677ff]/40" />
+      <div className="absolute top-0 right-0 w-3 h-3 border-t border-r border-[#1677ff]/40" />
+      <div className="absolute bottom-0 left-0 w-3 h-3 border-b border-l border-[#1677ff]/40" />
+      <div className="absolute bottom-0 right-0 w-3 h-3 border-b border-r border-[#1677ff]/40" />
 
       {/* 帧指示器 */}
       {poses && poses.length > 1 && (
@@ -577,8 +577,8 @@ export default function HandSkeletonAnim({ wordId, size = 180 }: HandSkeletonAni
               key={i}
               className="w-1 h-1 rounded-full transition-all duration-200"
               style={{
-                backgroundColor: i === animFrame ? "#00f0ff" : "#334455",
-                boxShadow: i === animFrame ? "0 0 4px #00f0ff" : "none",
+                backgroundColor: i === animFrame ? "#1677ff" : "#aab6c4",
+                boxShadow: i === animFrame ? "0 0 4px #1677ff" : "none",
               }}
             />
           ))}

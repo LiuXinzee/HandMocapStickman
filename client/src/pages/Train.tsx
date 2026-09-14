@@ -199,10 +199,10 @@ export default function Train() {
   return (
     <div
       className="h-screen overflow-hidden flex flex-col"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -211,13 +211,13 @@ export default function Train() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
-          <span className="text-xs font-bold tracking-widest text-[#00f0ff] font-mono">
+          <div className="w-px h-5 bg-[#1677ff]/20" />
+          <span className="text-xs font-bold tracking-widest text-[var(--hud-accent)] font-mono">
             STATIC TRAINING
           </span>
           {/* 标题必须自带"静态"：另一条链路的训练页长得几乎一样（/train-seq），
               光看 MODEL TRAINING 分不出自己在训哪个模型 */}
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             静态单帧 · MLP · DUAL-BRANCH DISTILLATION
           </span>
           <TfBackendBadge />
@@ -225,7 +225,7 @@ export default function Train() {
         <div className="flex items-center gap-4">
           <div className="flex items-center gap-3 text-[10px] font-mono">
             {activeModelLoaded && (
-              <span className="text-[#00e5a0] flex items-center gap-1">
+              <span className="text-[var(--hud-ok)] flex items-center gap-1">
                 <Brain className="w-3 h-3" />
                 STUDENT MODEL ACTIVE
               </span>
@@ -238,28 +238,28 @@ export default function Train() {
       {/* min-h-0：flex 子项默认 min-height:auto，不加它就不肯缩到内容以下 */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* 左侧：数据集和参数 */}
-        <div className="w-72 border-r border-[#00f0ff]/15 overflow-y-auto p-4 space-y-4 shrink-0">
+        <div className="w-72 border-r border-[#1677ff]/15 overflow-y-auto p-4 space-y-4 shrink-0">
           {/* 数据集统计 */}
           <Section title="DATASET">
             <DataRow
               label="SAMPLES"
               value={String(stats?.totalSamples ?? 0)}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <DataRow
               label="CLASSES"
               value={String(stats?.labels.length ?? 0)}
-              color="#00e5a0"
+              color="var(--hud-ok)"
             />
             <DataRow
               label="FEATURES"
               value="408D (2×141T + 2×63V)"
-              color="#da77f2"
+              color="var(--hud-wrist)"
             />
             {/* 词表自己滚，不靠整页滚动翻词。overscroll-contain 让滚到底之后
                 滚轮停在这里，而不是接着把左栏/整页带走（与 /train-seq 一致） */}
             {stats && stats.labels.length > 0 && (
-              <div className="mt-2 space-y-0.5 max-h-64 overflow-y-auto overscroll-contain rounded-sm border border-[#00f0ff]/10 p-1">
+              <div className="mt-2 space-y-0.5 max-h-64 overflow-y-auto overscroll-contain rounded-sm border border-[#1677ff]/10 p-1">
                 {stats.labels.map((label) => {
                   const word = getWordById(label);
                   return (
@@ -267,10 +267,10 @@ export default function Train() {
                       key={label}
                       className="flex justify-between text-[9px] font-mono"
                     >
-                      <span className="text-[#8899aa]">
+                      <span className="text-[var(--hud-soft)]">
                         {word?.label ?? label}
                       </span>
-                      <span className="text-[#556677]">
+                      <span className="text-[var(--hud-dim)]">
                         {stats.labelCounts[label]}
                       </span>
                     </div>
@@ -336,7 +336,7 @@ export default function Train() {
               step={0.1}
               isFloat
             />
-            <p className="text-[8px] text-[#445566] mt-1">
+            <p className="text-[8px] text-[var(--hud-faint)] mt-1">
               Alpha 越大，学生越依赖教师的 soft labels
             </p>
           </Section>
@@ -349,7 +349,7 @@ export default function Train() {
           >
             {isTraining ? (
               <>
-                <div className="w-3 h-3 border border-[#00f0ff] border-t-transparent rounded-full animate-spin" />
+                <div className="w-3 h-3 border border-[var(--hud-accent)] border-t-transparent rounded-full animate-spin" />
                 训练中...
               </>
             ) : (
@@ -361,13 +361,13 @@ export default function Train() {
           </button>
 
           {(stats?.totalSamples ?? 0) < 10 && (
-            <p className="text-[9px] text-[#556677] text-center">
+            <p className="text-[9px] text-[var(--hud-dim)] text-center">
               需要至少 10 个样本和 2 个词汇类别
             </p>
           )}
 
           {/* 导航 */}
-          <div className="pt-3 border-t border-[#00f0ff]/10 space-y-1.5">
+          <div className="pt-3 border-t border-[#1677ff]/10 space-y-1.5">
             <Link
               href="/collect"
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
@@ -390,11 +390,11 @@ export default function Train() {
           {isTraining && progress && (
             <div className="w-full max-w-lg space-y-4">
               <div className="text-center space-y-1">
-                <span className="text-sm font-mono text-[#00f0ff]">
+                <span className="text-sm font-mono text-[var(--hud-accent)]">
                   Epoch {progress.epoch} / {progress.totalEpochs}
                 </span>
                 <div className="text-[10px] font-mono" style={{
-                  color: progress.phase === "teacher" ? "#da77f2" : "#00e5a0"
+                  color: progress.phase === "teacher" ? "var(--hud-wrist)" : "var(--hud-ok)"
                 }}>
                   {progress.phase === "teacher"
                     ? "Phase 1: 教师模型 (视觉+触觉融合)"
@@ -402,15 +402,15 @@ export default function Train() {
                 </div>
               </div>
               {/* 进度条 */}
-              <div className="h-2 bg-[#1a2030] rounded-full overflow-hidden border border-[#00f0ff]/20">
+              <div className="h-2 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#1677ff]/20">
                 <div
                   className="h-full rounded-full transition-all duration-300"
                   style={{
                     width: `${(progress.epoch / progress.totalEpochs) * 100}%`,
                     background:
                       progress.phase === "teacher"
-                        ? "linear-gradient(90deg, #da77f2, #00f0ff)"
-                        : "linear-gradient(90deg, #00f0ff, #00e5a0)",
+                        ? "linear-gradient(90deg, #c026d3, #1677ff)"
+                        : "linear-gradient(90deg, #1677ff, #16a34a)",
                     boxShadow: "0 0 10px rgba(0,240,255,0.5)",
                   }}
                 />
@@ -420,22 +420,22 @@ export default function Train() {
                 <MetricCard
                   label="Loss"
                   value={progress.loss.toFixed(4)}
-                  color="#ff2d7b"
+                  color="var(--hud-err)"
                 />
                 <MetricCard
                   label="Accuracy"
                   value={`${(progress.accuracy * 100).toFixed(1)}%`}
-                  color="#00e5a0"
+                  color="var(--hud-ok)"
                 />
                 <MetricCard
                   label="Val Loss"
                   value={progress.valLoss.toFixed(4)}
-                  color="#f59e0b"
+                  color="var(--hud-warn)"
                 />
                 <MetricCard
                   label="Val Accuracy"
                   value={`${(progress.valAccuracy * 100).toFixed(1)}%`}
-                  color="#00f0ff"
+                  color="var(--hud-accent)"
                 />
               </div>
             </div>
@@ -451,11 +451,11 @@ export default function Train() {
           {/* 空状态 */}
           {!isTraining && history.length === 0 && (
             <div className="text-center space-y-3">
-              <Brain className="w-16 h-16 mx-auto text-[#334455]" />
-              <p className="text-sm text-[#556677]">
+              <Brain className="w-16 h-16 mx-auto text-[var(--hud-faint)]" />
+              <p className="text-sm text-[var(--hud-dim)]">
                 配置参数后点击"开始训练"
               </p>
-              <p className="text-[10px] text-[#334455] max-w-sm mx-auto">
+              <p className="text-[10px] text-[var(--hud-faint)] max-w-sm mx-auto">
                 双分支架构：先用视觉+触觉融合数据训练教师模型，再通过知识蒸馏训练仅触觉的学生模型。最终推理只需手套数据。
               </p>
             </div>
@@ -467,12 +467,12 @@ export default function Train() {
               className="text-[11px] font-mono px-4 py-2 rounded-sm border"
               style={{
                 color: trainMessage.startsWith("✓")
-                  ? "#00e5a0"
+                  ? "var(--hud-ok)"
                   : trainMessage.startsWith("✗")
-                  ? "#ff2d7b"
+                  ? "var(--hud-err)"
                   : trainMessage.startsWith("⚠")
-                  ? "#f59e0b"
-                  : "#8899aa",
+                  ? "var(--hud-warn)"
+                  : "var(--hud-soft)",
                 borderColor: trainMessage.startsWith("✓")
                   ? "rgba(0,229,160,0.3)"
                   : trainMessage.startsWith("✗")
@@ -486,10 +486,10 @@ export default function Train() {
         </div>
 
         {/* 右侧：已保存模型 */}
-        <div className="w-60 border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-3 shrink-0">
+        <div className="w-60 border-l border-[#1677ff]/15 overflow-y-auto p-3 space-y-3 shrink-0">
           <Section title="SAVED MODELS">
             {models.length === 0 ? (
-              <p className="text-[9px] text-[#334455] italic">暂无已保存模型</p>
+              <p className="text-[9px] text-[var(--hud-faint)] italic">暂无已保存模型</p>
             ) : (
               <div className="space-y-2">
                 {models.map((m) => (
@@ -498,17 +498,17 @@ export default function Train() {
                     className="cyber-panel p-2 rounded-sm space-y-1"
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-[9px] font-mono text-[#8899aa] truncate max-w-[120px]">
+                      <span className="text-[9px] font-mono text-[var(--hud-soft)] truncate max-w-[120px]">
                         {m.name}
                       </span>
                       <button
                         onClick={() => handleDeleteModel(m.id!)}
-                        className="text-[#556677] hover:text-[#ff2d7b] transition-colors"
+                        className="text-[var(--hud-dim)] hover:text-[var(--hud-err)] transition-colors"
                       >
                         <Trash2 className="w-2.5 h-2.5" />
                       </button>
                     </div>
-                    <div className="flex justify-between text-[8px] font-mono text-[#556677]">
+                    <div className="flex justify-between text-[8px] font-mono text-[var(--hud-dim)]">
                       <span>Acc: {(m.accuracy * 100).toFixed(1)}%</span>
                       <span>{m.labels.length} classes</span>
                     </div>
@@ -521,12 +521,12 @@ export default function Train() {
                               ? "rgba(0,229,160,0.15)"
                               : "rgba(218,119,242,0.15)",
                           color:
-                            m.modelType === "tactile" ? "#00e5a0" : "#da77f2",
+                            m.modelType === "tactile" ? "var(--hud-ok)" : "var(--hud-wrist)",
                         }}
                       >
                         {m.modelType === "tactile" ? "学生/触觉" : "教师/融合"}
                       </span>
-                      <span className="text-[#334455]">
+                      <span className="text-[var(--hud-faint)]">
                         {new Date(m.createdAt).toLocaleDateString("zh-CN")}
                       </span>
                     </div>
@@ -545,21 +545,21 @@ export default function Train() {
 
           {/* 模型架构说明 */}
           <Section title="ARCHITECTURE">
-            <div className="text-[8px] font-mono text-[#556677] space-y-0.5">
-              <p className="text-[#da77f2]">— 教师 (融合) —</p>
+            <div className="text-[8px] font-mono text-[var(--hud-dim)] space-y-0.5">
+              <p className="text-[var(--hud-wrist)]">— 教师 (融合) —</p>
               <p>Input: 408D (2×141T + 2×63V)</p>
               <p>Dense(256) → BN → Drop(0.3)</p>
               <p>Dense(128) → BN → Drop(0.2)</p>
               <p>Dense(64) → Drop(0.1)</p>
               <p>Dense(N) → Softmax</p>
-              <p className="text-[#00e5a0] mt-1.5">— 学生 (触觉) —</p>
+              <p className="text-[var(--hud-ok)] mt-1.5">— 学生 (触觉) —</p>
               <p>Input: 141D (137 sensors + 4 quat)</p>
               <p>Dense(128) → BN → Drop(0.3)</p>
               <p>Dense(64) → BN → Drop(0.2)</p>
               <p>Dense(32) → Drop(0.1)</p>
               <p>Dense(N) → Softmax</p>
-              <p className="pt-1 text-[#334455]">Distillation: KL + CE</p>
-              <p className="text-[#334455]">Optimizer: Adam</p>
+              <p className="pt-1 text-[var(--hud-faint)]">Distillation: KL + CE</p>
+              <p className="text-[var(--hud-faint)]">Optimizer: Adam</p>
             </div>
           </Section>
         </div>
@@ -579,9 +579,9 @@ function Section({
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 pb-1 border-b border-[#00f0ff]/15">
-        <div className="w-1 h-3 bg-[#00f0ff] rounded-full shadow-[0_0_4px_rgba(0,240,255,0.6)]" />
-        <span className="text-[10px] font-bold tracking-widest text-[#00f0ff] font-mono">
+      <div className="flex items-center gap-2 pb-1 border-b border-[#1677ff]/15">
+        <div className="w-1 h-3 bg-[var(--hud-accent)] rounded-full shadow-[0_0_4px_rgba(0,240,255,0.6)]" />
+        <span className="text-[10px] font-bold tracking-widest text-[var(--hud-accent)] font-mono">
           {title}
         </span>
       </div>
@@ -601,7 +601,7 @@ function DataRow({
 }) {
   return (
     <div className="flex justify-between text-[10px] font-mono">
-      <span className="text-[#556677]">{label}</span>
+      <span className="text-[var(--hud-dim)]">{label}</span>
       <span style={{ color }}>{value}</span>
     </div>
   );
@@ -626,7 +626,7 @@ function ParamInput({
 }) {
   return (
     <div className="flex items-center justify-between text-[10px] font-mono">
-      <span className="text-[#556677]">{label}</span>
+      <span className="text-[var(--hud-dim)]">{label}</span>
       <input
         type="number"
         value={value}
@@ -639,7 +639,7 @@ function ParamInput({
         min={min}
         max={max}
         step={step}
-        className="w-16 bg-[#1a2030] border border-[#00f0ff]/20 rounded-sm px-1.5 py-0.5 text-[#00f0ff] text-center text-[10px]"
+        className="w-16 bg-[var(--hud-track)] border border-[#1677ff]/20 rounded-sm px-1.5 py-0.5 text-[var(--hud-accent)] text-center text-[10px]"
       />
     </div>
   );
@@ -656,12 +656,13 @@ function MetricCard({
 }) {
   return (
     <div className="cyber-panel p-2 rounded-sm text-center">
-      <div className="text-[8px] font-mono text-[#556677] uppercase">
+      <div className="text-[8px] font-mono text-[var(--hud-dim)] uppercase">
         {label}
       </div>
       <div
         className="text-sm font-bold font-mono mt-0.5"
-        style={{ color, textShadow: `0 0 8px ${color}40` }}
+        /* 浅色底不做辉光：白底描不出光晕，只会糊出一圈脏边 */
+        style={{ color }}
       >
         {value}
       </div>
@@ -716,7 +717,7 @@ function TrainingChart({ history }: { history: TrainingProgress[] }) {
 
   return (
     <div className="cyber-panel p-3 rounded-sm">
-      <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider mb-2">
+      <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-2">
         Training Curves (Teacher → Student)
       </div>
       <svg
@@ -751,14 +752,14 @@ function TrainingChart({ history }: { history: TrainingProgress[] }) {
         <path
           d={lossPath}
           fill="none"
-          stroke="#ff2d7b"
+          style={{ stroke: "var(--hud-err)" }}
           strokeWidth="1.5"
           opacity="0.8"
         />
         <path
           d={valLossPath}
           fill="none"
-          stroke="#f59e0b"
+          style={{ stroke: "var(--hud-warn)" }}
           strokeWidth="1.5"
           opacity="0.6"
           strokeDasharray="4 2"
@@ -767,14 +768,14 @@ function TrainingChart({ history }: { history: TrainingProgress[] }) {
         <path
           d={accPath}
           fill="none"
-          stroke="#00e5a0"
+          style={{ stroke: "var(--hud-ok)" }}
           strokeWidth="1.5"
           opacity="0.8"
         />
         <path
           d={valAccPath}
           fill="none"
-          stroke="#00f0ff"
+          style={{ stroke: "var(--hud-accent)" }}
           strokeWidth="1.5"
           opacity="0.6"
           strokeDasharray="4 2"
@@ -782,11 +783,11 @@ function TrainingChart({ history }: { history: TrainingProgress[] }) {
       </svg>
       {/* 图例 */}
       <div className="flex items-center justify-center gap-4 mt-2 text-[8px] font-mono">
-        <Legend color="#ff2d7b" label="Loss" />
-        <Legend color="#f59e0b" label="Val Loss" dashed />
-        <Legend color="#00e5a0" label="Accuracy" />
-        <Legend color="#00f0ff" label="Val Acc" dashed />
-        <Legend color="#da77f2" label="Phase" dashed />
+        <Legend color="var(--hud-err)" label="Loss" />
+        <Legend color="var(--hud-warn)" label="Val Loss" dashed />
+        <Legend color="var(--hud-ok)" label="Accuracy" />
+        <Legend color="var(--hud-accent)" label="Val Acc" dashed />
+        <Legend color="var(--hud-wrist)" label="Phase" dashed />
       </div>
     </div>
   );
@@ -810,7 +811,7 @@ function Legend({
           borderTop: dashed ? `1px dashed ${color}` : undefined,
         }}
       />
-      <span style={{ color: "#556677" }}>{label}</span>
+      <span style={{ color: "var(--hud-dim)" }}>{label}</span>
     </div>
   );
 }

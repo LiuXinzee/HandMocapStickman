@@ -117,6 +117,37 @@ export function getBendValues(rawData: number[], sensorType: number): number[] {
 }
 
 /**
+ * 137 维重排数组里弯折那五路的位置。
+ *
+ * 两只手都是 60~64（见上面两张表的注释），**但五指顺序相反** ——
+ * 左手是 [小指…拇指]、右手是 [拇指…小指]。所以这一对常数只够定位、
+ * 不够取指：要按手指用一律先过 `bendRange.canonicalBendMapped`。
+ */
+export const MAPPED_BEND_START = 60;
+export const MAPPED_BEND_N = 5;
+
+/**
+ * 从**已经重排好的 137 维**数据里取弯折五路，返回**物理顺序**（与 `getBendValues` 同口径）。
+ *
+ * 存在的理由：`getBendValues` 要的是原始 256 字节，而 `SequenceSample.leftSensor`
+ * 存的是重排后的 137（`datasetStore.ts` 的 `SEQ_SENSOR_N`）—— 录制回放这类
+ * "从库里读一帧出来画手模"的场合手上只有后者，没法回推前者。
+ *
+ * @param mapped 137 维数组，或一条 `[T*137]` 的长数组
+ * @param offset 这一帧在 `mapped` 里的起始下标（长数组时传 `t * SEQ_SENSOR_N`）
+ */
+export function getBendValuesFromMapped(
+  mapped: ArrayLike<number>,
+  offset = 0
+): number[] {
+  const out: number[] = [];
+  for (let k = 0; k < MAPPED_BEND_N; k++) {
+    out.push(mapped[offset + MAPPED_BEND_START + k] ?? 0);
+  }
+  return out;
+}
+
+/**
  * 获取各手指压力值（每指12点的平均值）
  * @param rawData 原始 256 字节传感器数据
  * @param sensorType 传感器类型
@@ -170,25 +201,32 @@ export interface SensorRegion {
   name: string;
   startIdx: number; // 在 remapped 数组中的起始索引
   endIdx: number;   // 在 remapped 数组中的结束索引（不含）
-  color: string;    // 显示颜色
+  /**
+   * 显示颜色。
+   *
+   * ⚠ **必须是 6 位十六进制字面量**：GlovePanel 里有 `` `0 0 4px ${color}60` ``
+   * 这种拼透明度的用法，写成 `var(--hud-f1)` 会拼出非法色值、整条声明失效。
+   * 这一套是白底版本（与 index.css 的 --hud-f1..f5 同值），换肤时两边一起改。
+   */
+  color: string;
 }
 
 export const LEFT_HAND_REGIONS: SensorRegion[] = [
-  { name: "小拇指", startIdx: 0, endIdx: 12, color: "#ff6b6b" },
-  { name: "无名指", startIdx: 12, endIdx: 24, color: "#ffa94d" },
-  { name: "中指", startIdx: 24, endIdx: 36, color: "#ffd43b" },
-  { name: "食指", startIdx: 36, endIdx: 48, color: "#69db7c" },
-  { name: "大拇指", startIdx: 48, endIdx: 60, color: "#4dabf7" },
-  { name: "弯折", startIdx: 60, endIdx: 65, color: "#da77f2" },
-  { name: "手掌", startIdx: 65, endIdx: 137, color: "#868e96" },
+  { name: "小拇指", startIdx: 0, endIdx: 12, color: "#be123c" },
+  { name: "无名指", startIdx: 12, endIdx: 24, color: "#c2410c" },
+  { name: "中指", startIdx: 24, endIdx: 36, color: "#a16207" },
+  { name: "食指", startIdx: 36, endIdx: 48, color: "#15803d" },
+  { name: "大拇指", startIdx: 48, endIdx: 60, color: "#2563eb" },
+  { name: "弯折", startIdx: 60, endIdx: 65, color: "#c026d3" },
+  { name: "手掌", startIdx: 65, endIdx: 137, color: "#64748b" },
 ];
 
 export const RIGHT_HAND_REGIONS: SensorRegion[] = [
-  { name: "大拇指", startIdx: 0, endIdx: 12, color: "#4dabf7" },
-  { name: "食指", startIdx: 12, endIdx: 24, color: "#69db7c" },
-  { name: "中指", startIdx: 24, endIdx: 36, color: "#ffd43b" },
-  { name: "无名指", startIdx: 36, endIdx: 48, color: "#ffa94d" },
-  { name: "小拇指", startIdx: 48, endIdx: 60, color: "#ff6b6b" },
-  { name: "弯折", startIdx: 60, endIdx: 65, color: "#da77f2" },
-  { name: "手掌", startIdx: 65, endIdx: 137, color: "#868e96" },
+  { name: "大拇指", startIdx: 0, endIdx: 12, color: "#2563eb" },
+  { name: "食指", startIdx: 12, endIdx: 24, color: "#15803d" },
+  { name: "中指", startIdx: 24, endIdx: 36, color: "#a16207" },
+  { name: "无名指", startIdx: 36, endIdx: 48, color: "#c2410c" },
+  { name: "小拇指", startIdx: 48, endIdx: 60, color: "#be123c" },
+  { name: "弯折", startIdx: 60, endIdx: 65, color: "#c026d3" },
+  { name: "手掌", startIdx: 65, endIdx: 137, color: "#64748b" },
 ];

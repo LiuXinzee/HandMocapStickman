@@ -328,10 +328,10 @@ export default function DataCollect() {
   return (
     <div
       className="min-h-screen flex flex-col"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -340,40 +340,40 @@ export default function DataCollect() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
+          <div className="w-px h-5 bg-[#1677ff]/20" />
           <span
             className="text-xs font-bold tracking-widest"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
-              color: "#00f0ff",
+              color: "var(--hud-accent)",
             }}
           >
             STATIC COLLECTION
           </span>
           {/* 标题带上"静态"：/collect-seq 是另一条链路的采集页，两页布局相近 */}
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             静态单帧
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             VISION + TACTILE SYNC
           </span>
         </div>
         <div className="flex items-center gap-4 text-[10px] font-mono">
           {/* 摄像头状态 */}
           {cameraRunning ? (
-            <span className="text-[#00e5a0] flex items-center gap-1">
+            <span className="text-[var(--hud-ok)] flex items-center gap-1">
               <Camera className="w-3 h-3" />
               CAM {cameraFps}fps
             </span>
           ) : (
-            <span className="text-[#556677] flex items-center gap-1">
+            <span className="text-[var(--hud-dim)] flex items-center gap-1">
               <Camera className="w-3 h-3" />
               CAM OFF
             </span>
           )}
-          <span className="text-[#556677]">
+          <span className="text-[var(--hud-dim)]">
             SAMPLES:{" "}
-            <span className="text-[#00f0ff]">{stats?.totalSamples ?? 0}</span>
+            <span className="text-[var(--hud-accent)]">{stats?.totalSamples ?? 0}</span>
           </span>
           {/* 手套状态（左右手分开）+ 下一步 */}
           <StepNav />
@@ -383,21 +383,23 @@ export default function DataCollect() {
       <div className="flex-1 flex overflow-hidden">
         {/* 左侧：词汇选择 */}
         <div
-          className="w-64 border-r border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-3"
+          className="w-64 border-r border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-3"
           style={{
             scrollbarWidth: "thin",
-            scrollbarColor: "#00f0ff30 transparent",
+            scrollbarColor: "var(--hud-line-strong) transparent",
           }}
         >
           {/* 分类筛选 */}
           <div className="space-y-1.5">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Category Filter
             </div>
             <div className="flex flex-wrap gap-1">
+              {/* ⚠ 这里必须是十六进制字面量，不能写 var(--hud-accent)：
+                    CategoryChip 里会拼 `${color}80` 做透明度 */}
               <CategoryChip
                 label="全部"
-                color="#00f0ff"
+                color="#1677ff"
                 active={selectedCategory === "all"}
                 onClick={() => setSelectedCategory("all")}
               />
@@ -415,7 +417,7 @@ export default function DataCollect() {
 
           {/* 词汇列表 */}
           <div className="space-y-1">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Vocabulary ({filteredWords.length})
             </div>
             {filteredWords.map(word => {
@@ -427,8 +429,8 @@ export default function DataCollect() {
                   onClick={() => setSelectedWord(word)}
                   className={`w-full text-left px-2.5 py-2 rounded-sm border transition-all duration-150 ${
                     isSelected
-                      ? "border-[#00f0ff]/60 bg-[#00f0ff]/10"
-                      : "border-[#00f0ff]/10 hover:border-[#00f0ff]/30 bg-transparent"
+                      ? "border-[#1677ff]/60 bg-[#1677ff]/10"
+                      : "border-[#1677ff]/10 hover:border-[#1677ff]/30 bg-transparent"
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -439,10 +441,10 @@ export default function DataCollect() {
                           backgroundColor: getCategoryColor(word.category),
                         }}
                       />
-                      <span className="text-[11px] text-[#ccd6e0]">
+                      <span className="text-[11px] text-[var(--hud-text)]">
                         {word.label}
                       </span>
-                      <span className="text-[9px] text-[#556677]">
+                      <span className="text-[9px] text-[var(--hud-dim)]">
                         {word.pinyin}
                       </span>
                     </div>
@@ -451,10 +453,10 @@ export default function DataCollect() {
                       style={{
                         color:
                           count >= targetCount
-                            ? "#00e5a0"
+                            ? "var(--hud-ok)"
                             : count > 0
-                              ? "#f59e0b"
-                              : "#334455",
+                              ? "var(--hud-warn)"
+                              : "var(--hud-faint)",
                       }}
                     >
                       {count}
@@ -475,13 +477,13 @@ export default function DataCollect() {
                 <h2
                   className="text-lg font-bold"
                   style={{
-                    color: "#00f0ff",
+                    color: "var(--hud-accent)",
                     fontFamily: "'Space Grotesk', sans-serif",
                   }}
                 >
                   设备连接
                 </h2>
-                <p className="text-[11px] text-[#8899aa]">
+                <p className="text-[11px] text-[var(--hud-soft)]">
                   需要同时连接摄像头和触觉手套才能开始采集
                 </p>
               </div>
@@ -491,23 +493,23 @@ export default function DataCollect() {
                 <div className="cyber-panel p-4 rounded-sm w-56 space-y-3 text-center">
                   <Camera
                     className="w-10 h-10 mx-auto"
-                    style={{ color: cameraRunning ? "#00e5a0" : "#556677" }}
+                    style={{ color: cameraRunning ? "var(--hud-ok)" : "var(--hud-dim)" }}
                   />
-                  <div className="text-[11px] font-mono text-[#8899aa]">
+                  <div className="text-[11px] font-mono text-[var(--hud-soft)]">
                     摄像头 (视觉骨架)
                   </div>
                   {cameraRunning ? (
-                    <div className="text-[10px] text-[#00e5a0] font-mono">
+                    <div className="text-[10px] text-[var(--hud-ok)] font-mono">
                       ✓ 已启动 ({cameraFps}fps)
                     </div>
                   ) : cameraLoading ? (
-                    <div className="text-[10px] text-[#f59e0b] font-mono animate-pulse">
+                    <div className="text-[10px] text-[var(--hud-warn)] font-mono animate-pulse">
                       加载中...
                     </div>
                   ) : (
                     <>
                       {cameraError && (
-                        <div className="text-[9px] text-[#ff2d7b]">
+                        <div className="text-[9px] text-[var(--hud-err)]">
                           {cameraError}
                         </div>
                       )}
@@ -527,13 +529,13 @@ export default function DataCollect() {
                 <div className="cyber-panel p-4 rounded-sm w-56 space-y-3 text-center">
                   <Hand
                     className="w-10 h-10 mx-auto"
-                    style={{ color: gloveConnected ? "#00e5a0" : "#556677" }}
+                    style={{ color: gloveConnected ? "var(--hud-ok)" : "var(--hud-dim)" }}
                   />
-                  <div className="text-[11px] font-mono text-[#8899aa]">
+                  <div className="text-[11px] font-mono text-[var(--hud-soft)]">
                     触觉手套 (左/右手)
                   </div>
                   {gloveError && (
-                    <div className="text-[9px] text-[#ff2d7b]">
+                    <div className="text-[9px] text-[var(--hud-err)]">
                       {gloveError}
                     </div>
                   )}
@@ -541,7 +543,7 @@ export default function DataCollect() {
                   <div className="text-[10px] font-mono space-y-1">
                     <div
                       style={{
-                        color: gloveLeft.isConnected ? "#00e5a0" : "#556677",
+                        color: gloveLeft.isConnected ? "var(--hud-ok)" : "var(--hud-dim)",
                       }}
                     >
                       左手{" "}
@@ -553,7 +555,7 @@ export default function DataCollect() {
                     </div>
                     <div
                       style={{
-                        color: gloveRight.isConnected ? "#00e5a0" : "#556677",
+                        color: gloveRight.isConnected ? "var(--hud-ok)" : "var(--hud-dim)",
                       }}
                     >
                       右手{" "}
@@ -596,7 +598,7 @@ export default function DataCollect() {
                 {/* 叠加：采集状态 */}
                 {isCollecting && (
                   <div className="absolute top-3 left-1/2 -translate-x-1/2 z-10">
-                    <div className="bg-[#ff2d7b]/90 px-4 py-1.5 rounded-sm flex items-center gap-2">
+                    <div className="bg-[#e11d48]/90 px-4 py-1.5 rounded-sm flex items-center gap-2">
                       <div className="w-2 h-2 rounded-full bg-white animate-pulse" />
                       <span className="text-[11px] font-mono text-white font-bold">
                         REC {collectCount}/{targetCount}
@@ -611,8 +613,8 @@ export default function DataCollect() {
                     className="px-2 py-1 rounded-sm text-[9px] font-mono"
                     style={{
                       backgroundColor: "rgba(10, 14, 26, 0.8)",
-                      color: handResults ? "#00e5a0" : "#f59e0b",
-                      border: `1px solid ${handResults ? "#00e5a040" : "#f59e0b40"}`,
+                      color: handResults ? "var(--hud-ok)" : "var(--hud-warn)",
+                      border: `1px solid ${handResults ? "rgba(22, 163, 74, 0.35)" : "var(--hud-warn-edge)"}`,
                     }}
                   >
                     {handResults
@@ -627,7 +629,7 @@ export default function DataCollect() {
                     className="px-2 py-1 rounded-sm text-[9px] font-mono"
                     style={{
                       backgroundColor: "rgba(10, 14, 26, 0.8)",
-                      color: "#556677",
+                      color: "var(--hud-dim)",
                       border: "1px solid rgba(85, 102, 119, 0.3)",
                     }}
                   >
@@ -645,7 +647,7 @@ export default function DataCollect() {
               </div>
 
               {/* 右侧采集控制面板 */}
-              <div className="w-72 border-l border-[#00f0ff]/15 p-3 space-y-4 overflow-y-auto shrink-0">
+              <div className="w-72 border-l border-[#1677ff]/15 p-3 space-y-4 overflow-y-auto shrink-0">
                 {/* 当前词汇 */}
                 {selectedWord ? (
                   <div className="space-y-3">
@@ -661,15 +663,16 @@ export default function DataCollect() {
                         style={{
                           fontFamily: "'Space Grotesk', sans-serif",
                           color: getCategoryColor(selectedWord.category),
-                          textShadow: `0 0 15px ${getCategoryColor(selectedWord.category)}40`,
+                          /* 浅底不发光：白底描不出辉光，只会糊成一圈脏边 */
+                          textShadow: "none",
                         }}
                       >
                         {selectedWord.label}
                       </div>
-                      <p className="text-[11px] text-[#8899aa] mt-1">
+                      <p className="text-[11px] text-[var(--hud-soft)] mt-1">
                         {selectedWord.description}
                       </p>
-                      <p className="text-[9px] text-[#556677] font-mono mt-1">
+                      <p className="text-[9px] text-[var(--hud-dim)] font-mono mt-1">
                         已采集: {stats?.labelCounts[selectedWord.id] ?? 0} /{" "}
                         {targetCount}
                       </p>
@@ -678,18 +681,18 @@ export default function DataCollect() {
                     {/* 进度条 */}
                     {isCollecting && (
                       <div className="space-y-1">
-                        <div className="h-2 bg-[#1a2030] rounded-full overflow-hidden border border-[#00f0ff]/20">
+                        <div className="h-2 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#1677ff]/20">
                           <div
                             className="h-full rounded-full transition-all duration-200"
                             style={{
                               width: `${Math.min((collectCount / targetCount) * 100, 100)}%`,
                               background:
-                                "linear-gradient(90deg, #00f0ff, #00e5a0)",
+                                "linear-gradient(90deg, #1677ff, #16a34a)",
                               boxShadow: "0 0 10px rgba(0,240,255,0.5)",
                             }}
                           />
                         </div>
-                        <div className="flex justify-between text-[8px] font-mono text-[#556677]">
+                        <div className="flex justify-between text-[8px] font-mono text-[var(--hud-dim)]">
                           <span>{collectCount} 帧</span>
                           <span>{targetCount} 目标</span>
                         </div>
@@ -718,7 +721,7 @@ export default function DataCollect() {
                             单次采集
                           </button>
                           {!handResults && (
-                            <p className="text-[9px] text-[#f59e0b] text-center">
+                            <p className="text-[9px] text-[var(--hud-warn)] text-center">
                               请将手放入摄像头视野
                             </p>
                           )}
@@ -736,12 +739,12 @@ export default function DataCollect() {
 
                     {/* 参数设置 */}
                     {!isCollecting && (
-                      <div className="space-y-2 pt-2 border-t border-[#00f0ff]/10">
-                        <div className="text-[9px] font-mono text-[#556677] uppercase">
+                      <div className="space-y-2 pt-2 border-t border-[#1677ff]/10">
+                        <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase">
                           Parameters
                         </div>
                         <div className="flex items-center justify-between text-[10px] font-mono">
-                          <span className="text-[#8899aa]">目标数量</span>
+                          <span className="text-[var(--hud-soft)]">目标数量</span>
                           <input
                             type="number"
                             value={targetCount}
@@ -750,11 +753,11 @@ export default function DataCollect() {
                                 Math.max(5, parseInt(e.target.value) || 20)
                               )
                             }
-                            className="w-14 bg-[#1a2030] border border-[#00f0ff]/20 rounded-sm px-1.5 py-0.5 text-[#00f0ff] text-center"
+                            className="w-14 bg-[var(--hud-track)] border border-[#1677ff]/20 rounded-sm px-1.5 py-0.5 text-[var(--hud-accent)] text-center"
                           />
                         </div>
                         <div className="flex items-center justify-between text-[10px] font-mono">
-                          <span className="text-[#8899aa]">间隔(ms)</span>
+                          <span className="text-[var(--hud-soft)]">间隔(ms)</span>
                           <input
                             type="number"
                             value={collectInterval}
@@ -763,7 +766,7 @@ export default function DataCollect() {
                                 Math.max(50, parseInt(e.target.value) || 100)
                               )
                             }
-                            className="w-14 bg-[#1a2030] border border-[#00f0ff]/20 rounded-sm px-1.5 py-0.5 text-[#00f0ff] text-center"
+                            className="w-14 bg-[var(--hud-track)] border border-[#1677ff]/20 rounded-sm px-1.5 py-0.5 text-[var(--hud-accent)] text-center"
                           />
                         </div>
                       </div>
@@ -771,8 +774,8 @@ export default function DataCollect() {
                   </div>
                 ) : (
                   <div className="text-center py-8 space-y-2">
-                    <Database className="w-10 h-10 mx-auto text-[#556677]" />
-                    <p className="text-[11px] text-[#8899aa]">
+                    <Database className="w-10 h-10 mx-auto text-[var(--hud-dim)]" />
+                    <p className="text-[11px] text-[var(--hud-soft)]">
                       请在左侧选择要采集的手语词汇
                     </p>
                   </div>
@@ -781,7 +784,7 @@ export default function DataCollect() {
                 {/* 传感器预览 */}
                 {latestFrame && (
                   <div className="cyber-panel p-2 rounded-sm">
-                    <div className="text-[8px] font-mono text-[#556677] uppercase tracking-wider mb-1">
+                    <div className="text-[8px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-1">
                       Tactile Preview
                     </div>
                     <MiniSensorGrid data={latestFrame.mapped_data} />
@@ -790,18 +793,18 @@ export default function DataCollect() {
 
                 {/* 消息 */}
                 {message && (
-                  <div className="text-[10px] font-mono text-[#00e5a0] text-center">
+                  <div className="text-[10px] font-mono text-[var(--hud-ok)] text-center">
                     {message}
                   </div>
                 )}
 
                 {/* 手套连接入口只有第 1 步（/mocap）一处：一个 COM 口同一时刻只能被
                     一个持有者打开，各页各连会把第 1 步做好的标定作废 */}
-                <div className="pt-2 border-t border-[#00f0ff]/10 space-y-2">
+                <div className="pt-2 border-t border-[#1677ff]/10 space-y-2">
                   <div className="flex items-center justify-between text-[9px] font-mono">
                     <span
                       style={{
-                        color: gloveLeft.isConnected ? "#00e5a0" : "#556677",
+                        color: gloveLeft.isConnected ? "var(--hud-ok)" : "var(--hud-dim)",
                       }}
                     >
                       左手{" "}
@@ -811,7 +814,7 @@ export default function DataCollect() {
                     </span>
                     <span
                       style={{
-                        color: gloveRight.isConnected ? "#00e5a0" : "#556677",
+                        color: gloveRight.isConnected ? "var(--hud-ok)" : "var(--hud-dim)",
                       }}
                     >
                       右手{" "}
@@ -823,14 +826,14 @@ export default function DataCollect() {
                   {!gloveConnected && (
                     <Link
                       href="/mocap"
-                      className="block text-center text-[9px] font-mono py-1 border border-[#f59e0b]/40 text-[#f59e0b] rounded-sm hover:bg-[#f59e0b]/10 transition-colors"
+                      className="block text-center text-[9px] font-mono py-1 border border-[#d97706]/40 text-[var(--hud-warn)] rounded-sm hover:bg-[#d97706]/10 transition-colors"
                     >
                       去第 1 步连接手套
                     </Link>
                   )}
                   <button
                     onClick={stopTracking}
-                    className="w-full text-[9px] text-[#556677] hover:text-[#ff2d7b] transition-colors font-mono py-1 border border-[#556677]/20 rounded-sm"
+                    className="w-full text-[9px] text-[var(--hud-dim)] hover:text-[var(--hud-err)] transition-colors font-mono py-1 border border-[#7a8899]/20 rounded-sm"
                   >
                     关闭摄像头
                   </button>
@@ -842,15 +845,15 @@ export default function DataCollect() {
 
         {/* 右侧：数据集概览 */}
         <div
-          className="w-56 border-l border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-3"
+          className="w-56 border-l border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-3"
           style={{
             scrollbarWidth: "thin",
-            scrollbarColor: "#00f0ff30 transparent",
+            scrollbarColor: "var(--hud-line-strong) transparent",
           }}
         >
-          <div className="flex items-center gap-2 pb-1 border-b border-[#00f0ff]/15">
-            <Database className="w-3 h-3 text-[#00f0ff]" />
-            <span className="text-[10px] font-bold tracking-widest text-[#00f0ff] font-mono">
+          <div className="flex items-center gap-2 pb-1 border-b border-[#1677ff]/15">
+            <Database className="w-3 h-3 text-[var(--hud-accent)]" />
+            <span className="text-[10px] font-bold tracking-widest text-[var(--hud-accent)] font-mono">
               DATASET
             </span>
           </div>
@@ -859,28 +862,28 @@ export default function DataCollect() {
             <DataRow
               label="TOTAL"
               value={String(stats?.totalSamples ?? 0)}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <DataRow
               label="CLASSES"
               value={String(stats?.labels.length ?? 0)}
-              color="#00e5a0"
+              color="var(--hud-ok)"
             />
             <DataRow
               label="TARGET"
               value={`${targetCount}/class`}
-              color="#556677"
+              color="var(--hud-dim)"
             />
             <DataRow
               label="FEATURES"
               value="408D (126V+282T)"
-              color="#da77f2"
+              color="var(--hud-wrist)"
             />
           </div>
 
           {/* 各词汇采集进度 */}
-          <div className="space-y-1 pt-2 border-t border-[#00f0ff]/10">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+          <div className="space-y-1 pt-2 border-t border-[#1677ff]/10">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Per-Class Progress
             </div>
             {SIGN_VOCABULARY.filter(
@@ -891,33 +894,33 @@ export default function DataCollect() {
               return (
                 <div key={word.id} className="space-y-0.5">
                   <div className="flex items-center justify-between">
-                    <span className="text-[9px] text-[#8899aa]">
+                    <span className="text-[9px] text-[var(--hud-soft)]">
                       {word.label}
                     </span>
                     <div className="flex items-center gap-1.5">
-                      <span className="text-[9px] font-mono text-[#556677]">
+                      <span className="text-[9px] font-mono text-[var(--hud-dim)]">
                         {count}
                       </span>
                       <button
                         onClick={() => handleDeleteLabel(word.id)}
-                        className="text-[#556677] hover:text-[#ff2d7b] transition-colors"
+                        className="text-[var(--hud-dim)] hover:text-[var(--hud-err)] transition-colors"
                         title="删除该词汇所有样本"
                       >
                         <Trash2 className="w-2.5 h-2.5" />
                       </button>
                     </div>
                   </div>
-                  <div className="h-1 bg-[#1a2030] rounded-full overflow-hidden">
+                  <div className="h-1 bg-[var(--hud-track)] rounded-full overflow-hidden">
                     <div
                       className="h-full rounded-full"
                       style={{
                         width: `${pct}%`,
                         backgroundColor:
                           pct >= 100
-                            ? "#00e5a0"
+                            ? "var(--hud-ok)"
                             : pct > 50
-                              ? "#f59e0b"
-                              : "#00f0ff",
+                              ? "var(--hud-warn)"
+                              : "var(--hud-accent)",
                       }}
                     />
                   </div>
@@ -925,12 +928,12 @@ export default function DataCollect() {
               );
             })}
             {(stats?.labels.length ?? 0) === 0 && (
-              <p className="text-[9px] text-[#334455] italic">暂无数据</p>
+              <p className="text-[9px] text-[var(--hud-faint)] italic">暂无数据</p>
             )}
           </div>
 
           {/* 导航链接 */}
-          <div className="pt-3 border-t border-[#00f0ff]/10 space-y-1.5">
+          <div className="pt-3 border-t border-[#1677ff]/10 space-y-1.5">
             <Link
               href="/train"
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
@@ -971,7 +974,7 @@ function CategoryChip({
       style={{
         borderColor: active ? `${color}80` : `${color}20`,
         backgroundColor: active ? `${color}15` : "transparent",
-        color: active ? color : "#556677",
+        color: active ? color : "var(--hud-dim)",
       }}
     >
       {label}
@@ -980,13 +983,13 @@ function CategoryChip({
 }
 
 function MiniSensorGrid({ data }: { data: number[] }) {
-  const fingerColors = ["#ff6b6b", "#ffa94d", "#ffd43b", "#69db7c", "#4dabf7"];
+  const fingerColors = ["var(--hud-f5)", "var(--hud-f4)", "var(--hud-f3)", "var(--hud-f2)", "var(--hud-f1)"];
 
   return (
     <div className="space-y-1">
       {/* 手指压力 5x12 */}
       <div className="space-y-[2px]">
-        <div className="text-[7px] font-mono text-[#445566]">FINGERS</div>
+        <div className="text-[7px] font-mono text-[var(--hud-faint)]">FINGERS</div>
         {[0, 1, 2, 3, 4].map(finger => (
           <div key={finger} className="flex gap-[1px]">
             {Array.from({ length: 12 }, (_, i) => {
@@ -1017,7 +1020,7 @@ function MiniSensorGrid({ data }: { data: number[] }) {
               key={i}
               className="flex-1 h-[6px] rounded-[1px]"
               style={{
-                backgroundColor: "#da77f2",
+                backgroundColor: "var(--hud-wrist)",
                 opacity: 0.15 + intensity * 0.85,
               }}
             />
@@ -1039,10 +1042,10 @@ function MiniSensorGrid({ data }: { data: number[] }) {
                   style={{
                     backgroundColor:
                       intensity < 0.3
-                        ? "#00f0ff"
+                        ? "var(--hud-accent)"
                         : intensity < 0.6
-                          ? "#00e5a0"
-                          : "#ff2d7b",
+                          ? "var(--hud-ok)"
+                          : "var(--hud-err)",
                     opacity: 0.15 + intensity * 0.85,
                   }}
                 />
@@ -1058,7 +1061,7 @@ function MiniSensorGrid({ data }: { data: number[] }) {
 function DataRow({
   label,
   value,
-  color = "#00f0ff",
+  color = "var(--hud-accent)",
 }: {
   label: string;
   value: string;
@@ -1066,8 +1069,9 @@ function DataRow({
 }) {
   return (
     <div className="flex items-center justify-between text-[10px] font-mono">
-      <span style={{ color: "#556677" }}>{label}</span>
-      <span style={{ color, textShadow: `0 0 6px ${color}40` }}>{value}</span>
+      <span style={{ color: "var(--hud-dim)" }}>{label}</span>
+      {/* 浅色底不做辉光：白底描不出光晕，只会糊出一圈脏边 */}
+      <span style={{ color }}>{value}</span>
     </div>
   );
 }

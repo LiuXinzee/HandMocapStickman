@@ -1,6 +1,25 @@
 @import "tailwindcss";
 @import "tw-animate-css";
 
+/*
+ * MiSans（小米，Apache-2.0，可商用 —— 这条对本项目是硬要求）。
+ *
+ * 只给**翻译页那一列台词**用，见 `--font-sentence`。全站正文仍是 Space Grotesk +
+ * 系统回退：那套已经调好了，而 MiSans 在 9~11px 的 mono 读数旁边会显得过于圆润。
+ *
+ * ⚠ 只引 Regular + Semibold 两档，**别顺手把十档全 @import 进来**。
+ * 每一档都是 100 个按 unicode-range 切好的 woff2 分片、整档 2.3MB；分片本身是好事
+ * （浏览器只下载真的用到那几片，一两句中文约 20~60KB），但 @import 一档就多 100 条
+ * @font-face 规则要解析，十档 = 1000 条，纯浪费。
+ *
+ * ⚠ 这两档声明的 font-weight 是 **330 / 520**，不是 400 / 600。这是包作者按
+ * MiSans 自己的字重刻度写的。所以用的时候 `font-weight` 必须写这两个数
+ * （见 SentencePanel 的 `SENT_WEIGHT_*`）—— 写 700 的话没有任何一档匹配得上，
+ * Chrome 会拿 520 那档**合成加粗**，字幕那种一百多 px 的大字上是一眼能看出来的糊。
+ */
+@import "misans/lib/Normal/MiSans-Regular.min.css";
+@import "misans/lib/Normal/MiSans-Semibold.min.css";
+
 @custom-variant dark (&:is(.dark *));
 
 /*
@@ -48,6 +67,13 @@
   --color-sidebar-ring: var(--sidebar-ring);
   --font-sans: 'Space Grotesk', system-ui, sans-serif;
   --font-mono: 'JetBrains Mono', monospace;
+  /*
+   * 翻译页那一列台词专用。MiSans 在前、Space Grotesk 在后：
+   * MiSans 的拉丁字形规整但偏窄，而这一列的内容几乎全是汉字，
+   * 让 MiSans 同时管汉字和标点，中西文混排时的基线和标点宽度才是一套的。
+   * 字重必须用 330 / 520，理由见文件头那段 @import。
+   */
+  --font-sentence: 'MiSans', 'Space Grotesk', system-ui, sans-serif;
   /* Cyberpunk custom colors */
   --color-cyber-cyan: oklch(0.85 0.18 195);
   --color-cyber-magenta: oklch(0.65 0.25 10);
@@ -58,38 +84,132 @@
 
 :root {
   --radius: 0.35rem;
-  --background: oklch(0.1 0.02 260);
-  --foreground: oklch(0.92 0.01 200);
-  --card: oklch(0.14 0.02 260);
-  --card-foreground: oklch(0.92 0.01 200);
-  --popover: oklch(0.14 0.02 260);
-  --popover-foreground: oklch(0.92 0.01 200);
-  --primary: oklch(0.85 0.18 195);
-  --primary-foreground: oklch(0.1 0.02 260);
-  --secondary: oklch(0.18 0.02 260);
-  --secondary-foreground: oklch(0.85 0.18 195);
-  --muted: oklch(0.2 0.02 260);
-  --muted-foreground: oklch(0.6 0.05 200);
-  --accent: oklch(0.65 0.25 10);
-  --accent-foreground: oklch(0.98 0.01 0);
-  --destructive: oklch(0.6 0.22 25);
-  --destructive-foreground: oklch(0.98 0.01 0);
-  --border: oklch(0.25 0.04 195);
-  --input: oklch(0.2 0.03 260);
-  --ring: oklch(0.85 0.18 195);
-  --chart-1: oklch(0.85 0.18 195);
-  --chart-2: oklch(0.65 0.25 10);
-  --chart-3: oklch(0.7 0.15 150);
-  --chart-4: oklch(0.75 0.12 80);
-  --chart-5: oklch(0.6 0.2 280);
-  --sidebar: oklch(0.12 0.02 260);
-  --sidebar-foreground: oklch(0.92 0.01 200);
-  --sidebar-primary: oklch(0.85 0.18 195);
-  --sidebar-primary-foreground: oklch(0.1 0.02 260);
-  --sidebar-accent: oklch(0.18 0.02 260);
-  --sidebar-accent-foreground: oklch(0.92 0.01 200);
-  --sidebar-border: oklch(0.25 0.04 195);
-  --sidebar-ring: oklch(0.85 0.18 195);
+  /*
+   * shadcn 那套 token。已经从深色翻成浅色 —— 它们喂的是 `body { bg-background }`
+   * 和 ui/ 目录下那批组件（dialog / tooltip / sonner…）。只翻 --hud-* 而不翻这里，
+   * 会得到"白卡片浮在深蓝底上"和"深色的 toast 弹在浅色页面上"。
+   */
+  --background: oklch(0.975 0.003 250);
+  --foreground: oklch(0.29 0.03 255);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.29 0.03 255);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.29 0.03 255);
+  --primary: oklch(0.58 0.2 262);
+  --primary-foreground: oklch(1 0 0);
+  --secondary: oklch(0.96 0.005 250);
+  --secondary-foreground: oklch(0.38 0.03 255);
+  --muted: oklch(0.96 0.005 250);
+  --muted-foreground: oklch(0.58 0.02 255);
+  --accent: oklch(0.95 0.02 255);
+  --accent-foreground: oklch(0.35 0.03 255);
+  --destructive: oklch(0.58 0.22 15);
+  --destructive-foreground: oklch(1 0 0);
+  --border: oklch(0.92 0.006 250);
+  --input: oklch(0.92 0.006 250);
+  --ring: oklch(0.58 0.2 262);
+  --chart-1: oklch(0.58 0.2 262);
+  --chart-2: oklch(0.6 0.16 160);
+  --chart-3: oklch(0.68 0.15 70);
+  --chart-4: oklch(0.58 0.22 15);
+  --chart-5: oklch(0.55 0.2 300);
+  --sidebar: oklch(0.99 0.002 250);
+  --sidebar-foreground: oklch(0.29 0.03 255);
+  --sidebar-primary: oklch(0.58 0.2 262);
+  --sidebar-primary-foreground: oklch(1 0 0);
+  --sidebar-accent: oklch(0.96 0.005 250);
+  --sidebar-accent-foreground: oklch(0.35 0.03 255);
+  --sidebar-border: oklch(0.92 0.006 250);
+  --sidebar-ring: oklch(0.58 0.2 262);
+
+  /*
+   * ===== HUD 语义色 =====
+   *
+   * 全站原来是一大堆写死的十六进制（`text-[#556677]` / `border-[#00f0ff]/15` …），
+   * 换肤时只能一个个改，而且同一个"次要文字灰"在不同文件里漂成了 #556677 /
+   * #445566 / #667788 三个值。这里给它们起了名字，页面统一写
+   * `text-[var(--hud-dim)]`，配色只在这一处定义。
+   *
+   * **默认这一套是浅色**（全站已经换过去了）。深色那套原样留在下面的 `.theme-dark`
+   * 里，给某个容器加上那个类，它内部就整块退回赛博朋克配色。
+   *
+   * 两条坑：
+   *  1. 带透明度的边框必须自己成一个变量 —— `border-[var(--hud-line)]/15` 不成立，
+   *     Tailwind 的 `/透明度` 语法只认色值，不认 var()。
+   *  2. 同理，JS 里也别再写 `` `${SOME_COLOR}66` `` 拼透明度：值是 var() 时拼出来是非法色值。
+   */
+  --hud-page: #f4f6fa;        /* 页面底色 */
+  --hud-surface: #ffffff;     /* 卡片底色 */
+  --hud-text: #1f2b3a;        /* 正文（大字、句子） */
+  --hud-soft: #4a5a6e;        /* 次要正文 */
+  --hud-mid: #64748b;         /* 读数里的中间态 */
+  --hud-dim: #7a8899;         /* 标签、说明文字 */
+  --hud-faint: #aab6c4;       /* 占位图标、更弱的注释 */
+  --hud-accent: #1677ff;      /* 主强调 */
+  --hud-accent-hover: #0e5fd8;
+  --hud-ok: #16a34a;          /* 已连接 / 高置信 */
+  --hud-warn: #d97706;        /* 句子档主色 / 中置信 */
+  --hud-err: #e11d48;         /* 报错 / 低置信 */
+  --hud-err-hover: #9f1239;
+  --hud-violet: #7c3aed;      /* 句子训练那条链路 */
+  --hud-wrist: #c026d3;       /* 手腕/手别标记（原 #da77f2） */
+  --hud-line: #e3e8f0;        /* 常规分隔线 */
+  --hud-line-strong: #cbd5e1; /* 需要看得见的框 */
+  --hud-line-dead: #e8ecf2;   /* 未连接那一格的框 */
+  --hud-stage: #eaeff6;       /* 3D 视口 / 画布底色 */
+  --hud-track: #e5eaf1;       /* 进度条、置信度条、图表轴线 */
+  --hud-veil: rgba(244, 246, 250, 0.72); /* 视口上的"没连接"蒙版 */
+  --hud-scrim: rgba(31, 43, 58, 0.45);   /* 全屏对话框背后的压暗层 */
+  --hud-chip: #ffffff;        /* 蒙版上那颗小标签 */
+  --hud-warn-wash: rgba(217, 119, 6, 0.08);
+  --hud-warn-edge: rgba(217, 119, 6, 0.3);
+  --hud-warn-line: rgba(217, 119, 6, 0.35);
+  /* 五指的分类色。要能在白底上互相分得开，所以比原来那套（#4dabf7 等）都压暗了一档 */
+  --hud-f1: #2563eb;          /* 拇指 */
+  --hud-f2: #15803d;          /* 食指 */
+  --hud-f3: #a16207;          /* 中指 */
+  --hud-f4: #c2410c;          /* 无名 */
+  --hud-f5: #be123c;          /* 小指 */
+}
+
+/*
+ * ===== 深色皮肤（原赛博朋克配色）=====
+ *
+ * 现在是**可选项**，默认没有任何地方用。想让某一页/某一块退回深色，给它的根节点
+ * 加 `theme-dark` 即可 —— 变量是继承的，整棵子树连同 cyber-* 会一起变回去。
+ */
+.theme-dark {
+  --hud-page: #0a0e1a;
+  --hud-surface: rgba(20, 26, 42, 0.85);
+  --hud-text: #ccd6e0;
+  --hud-soft: #8899aa;
+  --hud-mid: #7788aa;
+  --hud-dim: #556677;
+  --hud-faint: #334455;
+  --hud-accent: #00f0ff;
+  --hud-accent-hover: #7df6ff;
+  --hud-ok: #00e5a0;
+  --hud-warn: #f59e0b;
+  --hud-err: #ff2d7b;
+  --hud-err-hover: #ff6b9d;
+  --hud-violet: #a855f7;
+  --hud-wrist: #da77f2;
+  --hud-line: rgba(0, 240, 255, 0.15);
+  --hud-line-strong: rgba(0, 240, 255, 0.2);
+  --hud-line-dead: rgba(85, 102, 119, 0.2);
+  --hud-stage: #070a13;
+  --hud-track: #1a2030;
+  --hud-veil: rgba(7, 10, 19, 0.7);
+  --hud-scrim: rgba(5, 8, 16, 0.92);
+  --hud-chip: rgba(10, 14, 26, 0.9);
+  --hud-warn-wash: rgba(245, 158, 11, 0.12);
+  --hud-warn-edge: rgba(245, 158, 11, 0.35);
+  --hud-warn-line: rgba(245, 158, 11, 0.4);
+  --hud-f1: #4dabf7;
+  --hud-f2: #69db7c;
+  --hud-f3: #ffd43b;
+  --hud-f4: #ffa94d;
+  --hud-f5: #ff6b6b;
 }
 
 @layer base {
@@ -186,28 +306,36 @@
   animation: scan-line-move 2s linear infinite;
 }
 
+/*
+ * ===== cyber-* =====
+ *
+ * 类名沿用（16 个 tsx 在用，改名是一次纯噪声的大改），但**皮已经换成浅色**：
+ * 白卡片 + 柔和投影 + 蓝色强调。深色那一套原样保留在文件末尾的 `.theme-dark`
+ * 分支里，只是默认没人用。
+ *
+ * 发光边框那个 `border-glow` 动画在浅色下必须**关掉**：它是拿青色阴影做的辉光，
+ * 白底上不会发光，只会变成一圈灰边在慢慢呼吸，看着像渲染没画完。
+ */
 .cyber-panel {
-  background: oklch(0.14 0.02 260 / 0.85);
-  border: 1px solid oklch(0.85 0.18 195 / 0.3);
-  backdrop-filter: blur(10px);
-  animation: border-glow 3s ease-in-out infinite;
+  background: var(--hud-surface);
+  border: 1px solid var(--hud-line);
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04), 0 4px 14px rgba(16, 24, 40, 0.06);
 }
 
 .cyber-text {
-  color: oklch(0.85 0.18 195);
-  text-shadow: 0 0 8px oklch(0.85 0.18 195 / 0.5);
+  color: var(--hud-accent);
   font-family: 'JetBrains Mono', monospace;
 }
 
 .cyber-accent {
-  color: oklch(0.65 0.25 10);
-  text-shadow: 0 0 8px oklch(0.65 0.25 10 / 0.5);
+  color: var(--hud-err);
 }
 
 .cyber-btn {
-  background: oklch(0.85 0.18 195 / 0.1);
-  border: 1px solid oklch(0.85 0.18 195 / 0.5);
-  color: oklch(0.85 0.18 195);
+  background: var(--hud-surface);
+  border: 1px solid var(--hud-line-strong);
+  color: #33415c;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.05);
   font-family: 'JetBrains Mono', monospace;
   text-transform: uppercase;
   letter-spacing: 0.1em;
@@ -215,21 +343,98 @@
 }
 
 .cyber-btn:hover {
-  background: oklch(0.85 0.18 195 / 0.2);
-  box-shadow: 0 0 20px oklch(0.85 0.18 195 / 0.4);
+  background: #f0f6ff;
+  border-color: var(--hud-accent);
+  color: var(--hud-accent);
+  box-shadow: 0 1px 4px rgba(22, 119, 255, 0.18);
 }
 
 .cyber-btn:active {
   transform: scale(0.97);
 }
 
+/* 强调按钮是**实心蓝**，不是半透明染色：白底上 15% 的染色几乎看不出来，
+   而这个按钮承担的是"正在录 / 停止"这类必须一眼看见的状态 */
+.cyber-btn-accent,
+.cyber-btn-accent:hover {
+  color: #ffffff;
+}
+
 .cyber-btn-accent {
-  background: oklch(0.65 0.25 10 / 0.15);
-  border-color: oklch(0.65 0.25 10 / 0.5);
-  color: oklch(0.65 0.25 10);
+  background: var(--hud-accent);
+  border-color: var(--hud-accent);
+  box-shadow: 0 1px 3px rgba(22, 119, 255, 0.25);
 }
 
 .cyber-btn-accent:hover {
+  background: var(--hud-accent-hover);
+  border-color: var(--hud-accent-hover);
+  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.3);
+}
+
+/*
+ * 3D 视口 / 骨架画布的底：浅蓝灰 + 一层浅网格。
+ * 网格是 CSS 画的 —— 那些 Canvas 都是 `alpha: true`，网格直接透上来，
+ * 不用往 three 场景里加 GridHelper（多一份每帧都要画的几何）。
+ */
+.hud-stage {
+  background-color: var(--hud-stage);
+  background-image:
+    linear-gradient(to right, rgba(148, 163, 184, 0.22) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(148, 163, 184, 0.22) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+/* ===== theme-dark：原赛博朋克配色的 cyber-* =====
+   变量部分在上面 `.theme-dark` 那块；这里是那几个类的具体画法。
+   两者要一起生效才完整，所以别只加变量不加这段。 */
+.theme-dark .cyber-panel {
+  background: oklch(0.14 0.02 260 / 0.85);
+  border: 1px solid oklch(0.85 0.18 195 / 0.3);
+  backdrop-filter: blur(10px);
+  animation: border-glow 3s ease-in-out infinite;
+  box-shadow: none;
+}
+
+.theme-dark .cyber-text {
+  color: oklch(0.85 0.18 195);
+  text-shadow: 0 0 8px oklch(0.85 0.18 195 / 0.5);
+}
+
+.theme-dark .cyber-accent {
+  color: oklch(0.65 0.25 10);
+  text-shadow: 0 0 8px oklch(0.65 0.25 10 / 0.5);
+}
+
+.theme-dark .cyber-btn {
+  background: oklch(0.85 0.18 195 / 0.1);
+  border: 1px solid oklch(0.85 0.18 195 / 0.5);
+  color: oklch(0.85 0.18 195);
+  box-shadow: none;
+}
+
+.theme-dark .cyber-btn:hover {
+  background: oklch(0.85 0.18 195 / 0.2);
+  color: oklch(0.85 0.18 195);
+  box-shadow: 0 0 20px oklch(0.85 0.18 195 / 0.4);
+}
+
+.theme-dark .cyber-btn-accent,
+.theme-dark .cyber-btn-accent:hover {
+  color: oklch(0.65 0.25 10);
+}
+
+.theme-dark .cyber-btn-accent {
+  background: oklch(0.65 0.25 10 / 0.15);
+  border-color: oklch(0.65 0.25 10 / 0.5);
+  box-shadow: none;
+}
+
+.theme-dark .cyber-btn-accent:hover {
   background: oklch(0.65 0.25 10 / 0.25);
   box-shadow: 0 0 20px oklch(0.65 0.25 10 / 0.4);
+}
+
+.theme-dark .hud-stage {
+  background-image: none;
 }

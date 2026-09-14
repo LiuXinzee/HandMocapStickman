@@ -16,7 +16,7 @@
  * 千万不要自己按 137 维下标索引五指 —— 左手一定会错位。
  */
 
-import { getBendValues } from "./sensorMapping";
+import { getBendValues, getBendValuesFromMapped } from "./sensorMapping";
 
 /** 手别常量，与协议的 sensorType 一致 */
 export const HAND_LEFT = 0x01;
@@ -62,8 +62,28 @@ function clamp01(v: number): number {
  * @param sensorType 0x01=左手 0x02=右手
  */
 export function canonicalBendRaw(raw: number[], sensorType: number): number[] {
-  const physical = getBendValues(raw, sensorType);
-  // 左手 getBendValues 返回 [小指, 无名指, 中指, 食指, 拇指]，反过来才是 canonical
+  return toCanonical(getBendValues(raw, sensorType), sensorType);
+}
+
+/**
+ * 同上，但输入是**已重排的 137 维**（`SequenceSample.leftSensor` 那种）。
+ *
+ * 回放库里的录制时手上只有 137，没有原始 256（重排是不可逆的：256 里有 119 个
+ * 位置根本不在映射表里）。所以这一条是"从库里读一帧出来画手模"唯一的入口 ——
+ * 别在调用方自己按 60~64 取值，左手一定会错位（见 `sensorMapping.MAPPED_BEND_START`）。
+ *
+ * @param offset 这一帧在长数组里的起始下标（`t * SEQ_SENSOR_N`）
+ */
+export function canonicalBendMapped(
+  mapped: ArrayLike<number>,
+  sensorType: number,
+  offset = 0
+): number[] {
+  return toCanonical(getBendValuesFromMapped(mapped, offset), sensorType);
+}
+
+/** 物理顺序 → canonical。左手的五路是倒着排的，反过来才是拇指→小指 */
+function toCanonical(physical: number[], sensorType: number): number[] {
   return sensorType === HAND_LEFT ? physical.slice().reverse() : physical.slice();
 }
 
@@ -76,7 +96,21 @@ export function bendRatios(
   sensorType: number,
   range: BendRange | null
 ): number[] {
-  const values = canonicalBendRaw(raw, sensorType);
+  return bendRatiosFromCanonical(canonicalBendRaw(raw, sensorType), range);
+}
+
+/**
+ * 两点内插本体，输入已是 **canonical 顺序的 5 路 ADC**。
+ *
+ * 抽出来只为了让"从库里回放"能用同一份归一化（`canonicalBendMapped` → 这里），
+ * 而不是把这段数学抄第二遍。抄第二遍的具体危害：`PREVIEW_GAIN` 那条兜底和
+ * "分母允许为负"这两件事一旦只改一处，回放出来的手型会和实时手型**系统性不同**，
+ * 而两者在同一页上并排显示，差异会被当成"手模坏了"。
+ */
+export function bendRatiosFromCanonical(
+  values: number[],
+  range: BendRange | null
+): number[] {
   return values.map((v, i) => {
     const open = range?.open?.[i];
     const fist = range?.fist?.[i];

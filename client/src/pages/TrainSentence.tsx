@@ -310,20 +310,20 @@ export default function TrainSentence() {
     v == null ? "—" : `${(v * 100).toFixed(1)}%`;
 
   return (
-    <div className="min-h-screen bg-[#0a0e17] text-[#c8d4e0]">
-      <div className="flex items-center gap-3 px-4 py-3 border-b border-[#00f0ff]/15">
+    <div className="min-h-screen bg-[var(--hud-page)] text-[var(--hud-text)]">
+      <div className="flex items-center gap-3 px-4 py-3 border-b border-[#1677ff]/15">
         <Link href="/" className="cyber-btn px-2 py-1 rounded-sm">
           <ArrowLeft className="w-3 h-3" />
         </Link>
         {/* 紫＝连续句子那条链路（与 /collect-sentence、首页步骤卡同色）。
             这页和 /train-seq 长得几乎一样，颜色是第一道区分 */}
-        <Brain className="w-4 h-4 text-[#a855f7]" />
-        <span className="text-xs font-mono tracking-widest text-[#a855f7]">
+        <Brain className="w-4 h-4 text-[var(--hud-violet)]" />
+        <span className="text-xs font-mono tracking-widest text-[var(--hud-violet)]">
           SENTENCE MODEL · CTC
         </span>
         <Link
           href="/train-seq"
-          className="text-[10px] font-mono text-[#556677] hover:text-[#00f0ff]"
+          className="text-[10px] font-mono text-[var(--hud-dim)] hover:text-[var(--hud-accent)]"
         >
           ← 词模型 / 数据导出
         </Link>
@@ -336,7 +336,7 @@ export default function TrainSentence() {
 
       <div className="flex">
         {/* 左：控制 */}
-        <div className="w-64 shrink-0 p-4 space-y-4 border-r border-[#00f0ff]/15">
+        <div className="w-64 shrink-0 p-4 space-y-4 border-r border-[#1677ff]/15">
           <Section title="TRAINING">
             <ParamInput label="epochs" value={epochs} onChange={setEpochs} min={1} max={2000} />
             <ParamInput
@@ -400,23 +400,23 @@ export default function TrainSentence() {
 
             {/* 禁用要说清为什么。死按钮比没有按钮更糟 */}
             {!hasBridge && (
-              <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed border border-[#f59e0b]/30 rounded-sm p-2">
+              <div className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed border border-[#d97706]/30 rounded-sm p-2">
                 {BRIDGE_ABSENT_REASON}
               </div>
             )}
             {hasBridge && pyError && (
-              <div className="text-[9px] font-mono text-[#ff3b6b] leading-relaxed border border-[#ff3b6b]/30 rounded-sm p-2">
+              <div className="text-[9px] font-mono text-[var(--hud-err)] leading-relaxed border border-[#e11d48]/30 rounded-sm p-2">
                 {pyError}
               </div>
             )}
           </Section>
 
           <Section title="INPUT">
-            <DataRow label="真实句" value={`${summary.total} 条`} color="#00e5a0" />
+            <DataRow label="真实句" value={`${summary.total} 条`} color="var(--hud-ok)" />
             <DataRow
               label="多段可见"
               value={`${summary.multiRun} 条`}
-              color={summary.multiRun ? "#f59e0b" : "#556677"}
+              color={summary.multiRun ? "var(--hud-warn)" : "var(--hud-dim)"}
             />
             {/*
               这里原本报的是「被裁掉的词」。那个读数恒为 0 —— 句子录制的词边界是
@@ -426,24 +426,24 @@ export default function TrainSentence() {
             <DataRow
               label="整段被扔的可见区"
               value={`${summary.uncoveredRuns} 段`}
-              color={summary.uncoveredRuns ? "#ff3b6b" : "#00e5a0"}
+              color={summary.uncoveredRuns ? "var(--hud-err)" : "var(--hud-ok)"}
             />
             <DataRow
               label="区间外可见帧"
               value={`${summary.uncoveredFrames} 帧`}
               // 只是参考量：头尾静止帧被切掉是裁剪本来就该做的，正常也不为 0
-              color="#556677"
+              color="var(--hud-dim)"
             />
             <DataRow
               label="平均保留比"
               value={summary.meanKeptRatio == null ? "未算" : pct(summary.meanKeptRatio)}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             {summary.notComputed > 0 && (
               <DataRow
                 label="没算过裁剪"
                 value={`${summary.notComputed} 条`}
-                color="#f59e0b"
+                color="var(--hud-warn)"
               />
             )}
           </Section>
@@ -459,7 +459,7 @@ export default function TrainSentence() {
         */}
         <div className="flex-1 min-h-0 p-4 space-y-5 overflow-y-auto">
           {message && (
-            <div className="cyber-panel p-2 rounded-sm text-[10px] font-mono text-[#00e5a0]">
+            <div className="cyber-panel p-2 rounded-sm text-[10px] font-mono text-[var(--hud-ok)]">
               {message}
             </div>
           )}
@@ -486,15 +486,15 @@ export default function TrainSentence() {
             <MetricCard
               label="Epoch"
               value={last ? `${last.epoch}/${last.total}` : "—"}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <MetricCard
               label="Loss"
               value={last ? last.loss.toFixed(4) : "—"}
-              color="#00e5a0"
+              color="var(--hud-ok)"
             />
-            <MetricCard label="Val WER" value={pct(last?.valWer)} color="#f59e0b" />
-            <MetricCard label="Best WER" value={pct(bestWer)} color="#a855f7" />
+            <MetricCard label="Val WER" value={pct(last?.valWer)} color="var(--hud-warn)" />
+            <MetricCard label="Best WER" value={pct(bestWer)} color="var(--hud-violet)" />
           </div>
 
           <CtcTrainingChart epochs={epochsSeen} />
@@ -513,36 +513,36 @@ export default function TrainSentence() {
           <Band n="③" title="输入" question="这次到底喂进去了什么？">
           {events?.data && (
             <div className="cyber-panel p-3 rounded-sm space-y-1">
-              <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-1">
+              <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-1">
                 本轮训练读到的数据
               </div>
               <DataRow
                 label="真实句 训练/验证"
                 value={`${events.data.numRealTrain} / ${events.data.numRealVal}`}
-                color="#00e5a0"
+                color="var(--hud-ok)"
               />
               <DataRow
                 label="合成句 训练/验证"
                 value={`${events.data.numSynthTrain} / ${events.data.numSynthVal}`}
-                color="#556677"
+                color="var(--hud-dim)"
               />
               <DataRow
                 label="类别数"
                 value={`${events.data.classes.length} + blank(${events.data.blankIndex})`}
-                color="#00f0ff"
+                color="var(--hud-accent)"
               />
               <DataRow
                 label="特征"
                 value={`${events.data.featShape.join(" × ")}，最长 ${events.data.maxLabelLen} 词`}
-                color="#00f0ff"
+                color="var(--hud-accent)"
               />
               <DataRow
                 label="裁剪"
                 value={events.data.trimmed ? "已按 trimSpan 裁" : "⚠ 未裁（与合成句口径不一致）"}
-                color={events.data.trimmed ? "#00e5a0" : "#f59e0b"}
+                color={events.data.trimmed ? "var(--hud-ok)" : "var(--hud-warn)"}
               />
               {events.data.orphans.length > 0 && (
-                <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed pt-1">
+                <div className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed pt-1">
                   ⚠ {events.data.orphans.join("、")} 有类别但没有任何句型用到 ——
                   这个输出单元只会学到「永远别输出」。要么编一句用到它的手语句子，
                   要么加进 UNTRAINED_WORDS。
@@ -551,7 +551,7 @@ export default function TrainSentence() {
               {/* 验证集里真实句占比极低时，总 WER 主要由合成句决定 */}
               {events.data.numVal > 0 &&
                 events.data.numRealVal / events.data.numVal < 0.3 && (
-                  <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed pt-1">
+                  <div className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed pt-1">
                     ⚠ 验证集 {events.data.numVal} 条里真实句只有 {events.data.numRealVal} 条
                     （{pct(events.data.numRealVal / events.data.numVal)}）。上面那个 WER
                     主要由合成句决定，**不能**当真实连续手语的表现看 ——
@@ -568,7 +568,7 @@ export default function TrainSentence() {
 
           <Band n="④" title="原始输出" question="上面哪个数字对不上，就来这里核。">
           {argv && (
-            <div className="cyber-panel p-2 rounded-sm text-[9px] font-mono text-[#556677] break-all">
+            <div className="cyber-panel p-2 rounded-sm text-[9px] font-mono text-[var(--hud-dim)] break-all">
               {/* 真跑的那条命令行，桥回显的。页面自己拼一条显示出来毫无意义 */}
               $ {argv.join(" ")}
             </div>
@@ -576,7 +576,7 @@ export default function TrainSentence() {
 
           <div className="cyber-panel p-3 rounded-sm">
             <div className="flex items-center justify-between mb-2">
-              <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+              <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                 stdout · 唯一的真相来源
               </div>
               <button
@@ -589,12 +589,12 @@ export default function TrainSentence() {
             </div>
             <pre
               ref={logRef}
-              className="text-[10px] font-mono text-[#8fa3b8] leading-relaxed max-h-72 overflow-y-auto whitespace-pre-wrap"
+              className="text-[10px] font-mono text-[var(--hud-soft)] leading-relaxed max-h-72 overflow-y-auto whitespace-pre-wrap"
             >
               {lines.length ? lines.join("\n") : "（还没有输出）"}
             </pre>
             {/* 上面那些卡片是从 events JSONL 解析来的旁路。两边对不上时以这里为准 */}
-            <div className="text-[9px] font-mono text-[#3d4a5c] mt-1">
+            <div className="text-[9px] font-mono text-[var(--hud-faint)] mt-1">
               上面的图表和卡片解析自 events 旁路；与这里对不上时，以这里为准。
               {events && events.skipped > 0 && `（本次有 ${events.skipped} 行没认出来）`}
             </div>
@@ -627,13 +627,13 @@ function Band({
   return (
     <div className="space-y-3">
       <div className="flex items-baseline gap-2">
-        <span className="text-[11px] font-mono font-bold tracking-widest text-[#a855f7] shrink-0">
+        <span className="text-[11px] font-mono font-bold tracking-widest text-[var(--hud-violet)] shrink-0">
           {n} {title}
         </span>
-        <span className="text-[9px] font-mono text-[#556677] shrink-0">
+        <span className="text-[9px] font-mono text-[var(--hud-dim)] shrink-0">
           {question}
         </span>
-        <div className="flex-1 h-px bg-[#a855f7]/20" />
+        <div className="flex-1 h-px bg-[#7c3aed]/20" />
       </div>
       {children}
     </div>
@@ -650,13 +650,13 @@ function ErrorList({
   const headPct = errors.nBad ? (errors.headBad / errors.nBad) * 100 : 0;
   return (
     <div className="cyber-panel p-3 rounded-sm">
-      <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-2">
+      <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-2">
         验证集错例 · {errors.nBad}/{errors.nTotal} 条整句不完全一致
       </div>
       {errors.nBad > 0 && (
         // 句首错和句中错的成因完全不同：句首错是时间包络对不上，句中错是切词能力。
         // 总 WER 会把这件事稀释掉，所以单独报
-        <div className="text-[10px] font-mono text-[#f59e0b] mb-2 leading-relaxed">
+        <div className="text-[10px] font-mono text-[var(--hud-warn)] mb-2 leading-relaxed">
           其中 {errors.headBad}/{errors.nBad} 条错在第 1 个词（{headPct.toFixed(0)}%）
           —— 句首错是时间包络问题，句中错是切词问题，两者要分开看。
         </div>
@@ -666,8 +666,8 @@ function ErrorList({
           const headWrong = !ex.hyp.length || ex.hyp[0] !== ex.ref[0];
           return (
             <div key={i} className="text-[10px] font-mono leading-relaxed">
-              <div className="text-[#556677]">{ex.ref.join(" ")}</div>
-              <div className={headWrong ? "text-[#ff3b6b]" : "text-[#f59e0b]"}>
+              <div className="text-[var(--hud-dim)]">{ex.ref.join(" ")}</div>
+              <div className={headWrong ? "text-[var(--hud-err)]" : "text-[var(--hud-warn)]"}>
                 → {ex.hyp.length ? ex.hyp.join(" ") : "(空)"}
                 {headWrong && <span className="ml-1 text-[9px]">句首</span>}
               </div>
@@ -714,14 +714,25 @@ function BackbonePanel({
   disabled: boolean;
   onTrain: () => void;
 }) {
+  /*
+   * 文字色和边框色分成两个值。原来是 `${color}55` 拼出来的，
+   * 换肤之后 color 变成了 `var(--hud-*)` —— 拼完是非法色值，整条 borderColor
+   * 会被丢掉，这块面板就退回普通卡片的灰边、警告状态看不出来了。
+   */
   const color =
     v.level === "ok"
-      ? "#00e5a0"
+      ? "var(--hud-ok)"
       : v.level === "stale"
-        ? "#f59e0b"
+        ? "var(--hud-warn)"
         : v.level === "missing"
-          ? "#ff3b6b"
-          : "#556677";
+          ? "var(--hud-err)"
+          : "var(--hud-dim)";
+  const edge =
+    v.level === "stale"
+      ? "rgba(217, 119, 6, 0.45)"
+      : v.level === "missing"
+        ? "rgba(225, 29, 72, 0.45)"
+        : "var(--hud-line-strong)";
   const mark = v.level === "ok" ? "✅" : v.level === "missing" ? "⛔" : "⚠";
   const when = (ms?: number | null) =>
     ms == null ? "—" : new Date(ms).toLocaleString("zh-CN", { hour12: false });
@@ -729,14 +740,14 @@ function BackbonePanel({
   return (
     <div
       className="cyber-panel p-3 rounded-sm space-y-2"
-      style={v.level === "ok" ? undefined : { borderColor: `${color}55` }}
+      style={v.level === "ok" ? undefined : { borderColor: edge }}
     >
       <div className="text-[10px] font-mono leading-relaxed" style={{ color }}>
         {mark} {v.detail}
       </div>
 
       {v.level === "ok" && info && (
-        <div className="text-[9px] font-mono text-[#556677]">
+        <div className="text-[9px] font-mono text-[var(--hud-dim)]">
           out/student.keras · 训于 {when(info.trainedAt)} · T={info.seqLen ?? "—"}
         </div>
       )}
@@ -748,12 +759,12 @@ function BackbonePanel({
             disabled={disabled}
             title="跑 train_seq.py（不带 --ctc），产物是 out/student.keras"
             className="cyber-btn px-2 py-1.5 rounded-sm text-[10px] flex items-center gap-1"
-            style={{ borderColor: "rgba(0,240,255,0.4)", color: "#00f0ff" }}
+            style={{ borderColor: "rgba(0,240,255,0.4)", color: "var(--hud-accent)" }}
           >
             <Play className="w-3 h-3" />
             训练词骨干
           </button>
-          <span className="text-[9px] font-mono text-[#556677]">
+          <span className="text-[9px] font-mono text-[var(--hud-dim)]">
             日志走下面 ④ 那一段（和 CTC 共用一个进程槽位）
           </span>
         </div>
@@ -764,7 +775,7 @@ function BackbonePanel({
         骨干本身可能确实没训过，而"先直送再回来看"是两次点击的绕路
       */}
       {v.level === "stale" && (
-        <div className="text-[9px] font-mono text-[#556677] leading-relaxed">
+        <div className="text-[9px] font-mono text-[var(--hud-dim)] leading-relaxed">
           训完骨干再点左边「开始训练（CTC）」。骨干只影响收敛，不改类别表 ——
           类别表是 CTC 自己从数据集标签推的。
         </div>
@@ -780,9 +791,9 @@ function DeployPanel({ d }: { d: DeployedModel | null }) {
 
   if (!d.exists) {
     return (
-      <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[#f59e0b] leading-relaxed">
-        <span className="text-[#556677] uppercase tracking-wider">部署状态 · </span>
-        还没导出过。<Link href="/translate?mode=sentence" className="text-[#00f0ff]">/translate</Link>{" "}
+      <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[var(--hud-warn)] leading-relaxed">
+        <span className="text-[var(--hud-dim)] uppercase tracking-wider">部署状态 · </span>
+        还没导出过。<Link href="/translate?mode=sentence" className="text-[var(--hud-accent)]">/translate</Link>{" "}
         的「连续句子」那一档现在不可用 —— 点左边「导出到浏览器」。
       </div>
     );
@@ -791,35 +802,35 @@ function DeployPanel({ d }: { d: DeployedModel | null }) {
   const stale = d.trainedAt != null && d.deployedAt != null && d.trainedAt > d.deployedAt;
   return (
     <div className="cyber-panel p-3 rounded-sm space-y-1">
-      <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-1">
+      <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-1">
         部署状态 · /translate 用的这一份
       </div>
-      <DataRow label="导出于" value={when(d.deployedAt)} color={stale ? "#f59e0b" : "#00e5a0"} />
-      <DataRow label="out/ 里的模型" value={when(d.trainedAt)} color="#00f0ff" />
+      <DataRow label="导出于" value={when(d.deployedAt)} color={stale ? "var(--hud-warn)" : "var(--hud-ok)"} />
+      <DataRow label="out/ 里的模型" value={when(d.trainedAt)} color="var(--hud-accent)" />
       <DataRow
         label="权重"
         value={d.bytes == null ? "—" : `${(d.bytes / 1024).toFixed(0)} KB`}
-        color="#556677"
+        color="var(--hud-dim)"
       />
       {d.meta?.labels && (
-        <DataRow label="类别" value={`${d.meta.labels.length} 类`} color="#556677" />
+        <DataRow label="类别" value={`${d.meta.labels.length} 类`} color="var(--hud-dim)" />
       )}
       {d.meta?.valWer != null && (
         <DataRow
           label="导出时的 val WER"
           value={`${(d.meta.valWer * 100).toFixed(1)}%`}
-          color="#a855f7"
+          color="var(--hud-violet)"
         />
       )}
       {stale ? (
-        <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed pt-1">
+        <div className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed pt-1">
           ⚠ out/ 里的模型比部署的这份**新** —— 训完还没导出。上面的指标属于新的那份，
           而 /translate 用的还是旧的。点「导出到浏览器」。
         </div>
       ) : (
-        <div className="text-[9px] font-mono text-[#3d4a5c] leading-relaxed pt-1">
+        <div className="text-[9px] font-mono text-[var(--hud-faint)] leading-relaxed pt-1">
           与 out/ 同步。去{" "}
-          <Link href="/translate?mode=sentence" className="text-[#00f0ff]">
+          <Link href="/translate?mode=sentence" className="text-[var(--hud-accent)]">
             /translate
           </Link>{" "}
           试「连续句子」。导出会触发 Vite 整页刷新（publicDir 在 watch 范围里），不是出错。
@@ -854,7 +865,7 @@ function TemplateCoverage({ counts }: { counts: Map<string, number> }) {
   });
   return (
     <div className="cyber-panel p-3 rounded-sm">
-      <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-2">
+      <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-2">
         第一批句型覆盖 · {done}/{rows.length} 句采满（共 {total} 条 / 目标{" "}
         {rows.length * RECOMMENDED_PER_TEMPLATE}）
       </div>
@@ -864,17 +875,17 @@ function TemplateCoverage({ counts }: { counts: Map<string, number> }) {
           return (
             <div key={r.key} className="text-[10px] font-mono">
               <div className="flex justify-between">
-                <span className="text-[#8fa3b8]">{r.key}</span>
-                <span className={r.n >= RECOMMENDED_PER_TEMPLATE ? "text-[#00e5a0]" : "text-[#556677]"}>
+                <span className="text-[var(--hud-soft)]">{r.key}</span>
+                <span className={r.n >= RECOMMENDED_PER_TEMPLATE ? "text-[var(--hud-ok)]" : "text-[var(--hud-dim)]"}>
                   {r.n}/{RECOMMENDED_PER_TEMPLATE}
                 </span>
               </div>
-              <div className="h-0.5 bg-[#1e2836] mt-0.5">
+              <div className="h-0.5 bg-[var(--hud-track)] mt-0.5">
                 <div
                   className="h-full"
                   style={{
                     width: `${ratio * 100}%`,
-                    background: r.n >= RECOMMENDED_PER_TEMPLATE ? "#00e5a0" : "#00f0ff",
+                    background: r.n >= RECOMMENDED_PER_TEMPLATE ? "var(--hud-ok)" : "var(--hud-accent)",
                   }}
                 />
               </div>
@@ -883,7 +894,7 @@ function TemplateCoverage({ counts }: { counts: Map<string, number> }) {
         })}
       </div>
       {extra.length > 0 && (
-        <div className="text-[9px] font-mono text-[#f59e0b] mt-2 leading-relaxed">
+        <div className="text-[9px] font-mono text-[var(--hud-warn)] mt-2 leading-relaxed">
           另有不在第一批清单里的句型 {extra.length} 个：{extra.join(" / ")}
           —— 它们照样会进训练集。
         </div>
@@ -897,16 +908,16 @@ function TemplateCoverage({ counts }: { counts: Map<string, number> }) {
 function TrimStrips({ rows, loading }: { rows: StripRow[]; loading: boolean }) {
   if (loading) {
     return (
-      <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[#556677]">
+      <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[var(--hud-dim)]">
         正在读取录制并重算裁剪区间...
       </div>
     );
   }
   if (!rows.length) {
     return (
-      <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[#556677]">
+      <div className="cyber-panel p-3 rounded-sm text-[10px] font-mono text-[var(--hud-dim)]">
         还没有真实句子录制。去{" "}
-        <Link href="/collect-sentence" className="text-[#00f0ff]">
+        <Link href="/collect-sentence" className="text-[var(--hud-accent)]">
           /collect-sentence
         </Link>{" "}
         录几条。
@@ -915,16 +926,16 @@ function TrimStrips({ rows, loading }: { rows: StripRow[]; loading: boolean }) {
   }
   return (
     <div className="cyber-panel p-3 rounded-sm">
-      <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-1">
+      <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-1">
         训练输入 · 逐条裁剪区间（{rows.length} 条真实句）
       </div>
-      <div className="text-[9px] font-mono text-[#3d4a5c] mb-3 leading-relaxed">
-        <span className="text-[#00e5a0]">■</span> 可见段（MediaPipe 看得见手）
-        <span className="ml-3 text-[#ff3b6b]">■</span> 整段落在保留区间外 = 这段动作没进训练集
-        <span className="ml-3 text-[#00f0ff]">▭</span> 保留区间（真正喂进模型的）。
+      <div className="text-[9px] font-mono text-[var(--hud-faint)] mb-3 leading-relaxed">
+        <span className="text-[var(--hud-ok)]">■</span> 可见段（MediaPipe 看得见手）
+        <span className="ml-3 text-[var(--hud-err)]">■</span> 整段落在保留区间外 = 这段动作没进训练集
+        <span className="ml-3 text-[var(--hud-accent)]">▭</span> 保留区间（真正喂进模型的）。
         可见段被劈成多段 = 录制中途掉了手；此时保留区间必须<b>跨过空洞</b>，
         没跨过就会有整段动作被扔掉（红条）。
-        <div className="mt-1 text-[#556677]">
+        <div className="mt-1 text-[var(--hud-dim)]">
           不画词边界：句子录制的 startFrame/endFrame 是占位值（全填整段），
           画出来会全部堆在最左边。真边界要等「用词模型给句子做强制对齐」才有。
         </div>
@@ -945,22 +956,22 @@ function Strip({ row }: { row: StripRow }) {
   return (
     <div>
       <div className="flex items-baseline gap-2 text-[9px] font-mono mb-0.5">
-        <span className="text-[#c8d4e0]">{row.text}</span>
-        <span className="text-[#3d4a5c]">
+        <span className="text-[var(--hud-text)]">{row.text}</span>
+        <span className="text-[var(--hud-faint)]">
           {row.totalFrames} 帧 / {(row.durationMs / 1000).toFixed(1)}s
         </span>
         {row.multiRun && (
-          <span className="text-[#f59e0b]">可见 {row.visibleRuns.length} 段</span>
+          <span className="text-[var(--hud-warn)]">可见 {row.visibleRuns.length} 段</span>
         )}
         {row.trimSpan && (
-          <span className="text-[#556677]">
+          <span className="text-[var(--hud-dim)]">
             保留 {row.trimSpan.startFrame}~{row.trimSpan.endFrame}（
             {(row.trimSpan.keptRatio * 100).toFixed(0)}%，{row.trimSpan.reason}）
           </span>
         )}
-        {!row.trimSpan && <span className="text-[#f59e0b]">裁剪未算</span>}
+        {!row.trimSpan && <span className="text-[var(--hud-warn)]">裁剪未算</span>}
         {uncovered.length > 0 && (
-          <span className="text-[#ff3b6b]">
+          <span className="text-[var(--hud-err)]">
             ⚠ {uncovered.length} 段可见区被整个扔掉：
             {uncovered.map((r) => `${r.start}~${r.end}`).join("、")}
           </span>
@@ -968,7 +979,7 @@ function Strip({ row }: { row: StripRow }) {
       </div>
       <svg width={STRIP_W} height={H} className="block">
         {/* 底：总帧长 */}
-        <rect x={0} y={0} width={STRIP_W} height={H} fill="#141a26" />
+        <rect x={0} y={0} width={STRIP_W} height={H} style={{ fill: "var(--hud-track)" }} />
         {/* 可见段。整段落在保留区间外的标红 —— 那一段动作根本没进训练集 */}
         {g.visible.map((b, i) => (
           <rect
@@ -977,7 +988,7 @@ function Strip({ row }: { row: StripRow }) {
             y={0}
             width={b.w}
             height={H}
-            fill={b.covered ? "#00e5a0" : "#ff3b6b"}
+            style={{ fill: b.covered ? "var(--hud-ok)" : "var(--hud-err)" }}
             opacity={b.covered ? 0.22 : 0.4}
           />
         ))}
@@ -989,7 +1000,7 @@ function Strip({ row }: { row: StripRow }) {
             width={g.trim.w}
             height={H}
             fill="none"
-            stroke="#00f0ff"
+            style={{ stroke: "var(--hud-accent)" }}
             strokeWidth={1.5}
           />
         )}
@@ -1001,8 +1012,8 @@ function Strip({ row }: { row: StripRow }) {
         */}
         {g.segments.map((s, i) => (
           <g key={i}>
-            <line x1={s.x} y1={0} x2={s.x} y2={H} stroke="#a855f7" strokeWidth={1} />
-            <text x={s.x + 2} y={H - 6} fontSize={8} fontFamily="monospace" fill="#8fa3b8">
+            <line x1={s.x} y1={0} x2={s.x} y2={H} style={{ stroke: "var(--hud-violet)" }} strokeWidth={1} />
+            <text x={s.x + 2} y={H - 6} fontSize={8} fontFamily="monospace" style={{ fill: "var(--hud-soft)" }}>
               {s.label}
             </text>
           </g>
@@ -1032,7 +1043,7 @@ function CtcTrainingChart({ epochs }: { epochs: EpochEvent[] }) {
 
   if (epochs.length < 2) {
     return (
-      <div className="cyber-panel p-3 rounded-sm h-[180px] flex items-center justify-center text-[10px] font-mono text-[#556677]">
+      <div className="cyber-panel p-3 rounded-sm h-[180px] flex items-center justify-center text-[10px] font-mono text-[var(--hud-dim)]">
         等待训练数据...（至少 2 个 epoch 才能画线）
       </div>
     );
@@ -1063,29 +1074,29 @@ function CtcTrainingChart({ epochs }: { epochs: EpochEvent[] }) {
   return (
     <div className="cyber-panel p-3 rounded-sm">
       <div className="flex items-center gap-4 text-[9px] font-mono mb-1">
-        <span className="text-[#00e5a0]">— loss（左轴，对数）</span>
-        <span className="text-[#f59e0b]">— val WER（右轴，0~{(werMax * 100).toFixed(0)}%）</span>
+        <span className="text-[var(--hud-ok)]">— loss（左轴，对数）</span>
+        <span className="text-[var(--hud-warn)]">— val WER（右轴，0~{(werMax * 100).toFixed(0)}%）</span>
       </div>
       <svg width={W} height={H} className="block">
-        <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} stroke="#1e2836" />
-        <line x1={pad} y1={pad} x2={pad} y2={H - pad} stroke="#1e2836" />
+        <line x1={pad} y1={H - pad} x2={W - pad} y2={H - pad} style={{ stroke: "var(--hud-track)" }} />
+        <line x1={pad} y1={pad} x2={pad} y2={H - pad} style={{ stroke: "var(--hud-track)" }} />
         {/* 保存点：WER 创新低的那些 epoch。盘上的 checkpoint 来自这里的最后一个 */}
         {epochs.map((e, i) =>
           e.saved ? (
-            <circle key={i} cx={x(i)} cy={yWer(e.valWer ?? 0)} r={2} fill="#a855f7" />
+            <circle key={i} cx={x(i)} cy={yWer(e.valWer ?? 0)} r={2} style={{ fill: "var(--hud-violet)" }} />
           ) : null
         )}
-        <polyline points={lossPts} fill="none" stroke="#00e5a0" strokeWidth={1.5} />
+        <polyline points={lossPts} fill="none" style={{ stroke: "var(--hud-ok)" }} strokeWidth={1.5} />
         {werPts && (
-          <polyline points={werPts} fill="none" stroke="#f59e0b" strokeWidth={1.5} />
+          <polyline points={werPts} fill="none" style={{ stroke: "var(--hud-warn)" }} strokeWidth={1.5} />
         )}
-        <text x={2} y={pad + 4} fontSize={8} fontFamily="monospace" fill="#556677">
+        <text x={2} y={pad + 4} fontSize={8} fontFamily="monospace" style={{ fill: "var(--hud-dim)" }}>
           {Math.pow(10, loMax).toFixed(3)}
         </text>
-        <text x={2} y={H - pad} fontSize={8} fontFamily="monospace" fill="#556677">
+        <text x={2} y={H - pad} fontSize={8} fontFamily="monospace" style={{ fill: "var(--hud-dim)" }}>
           {Math.pow(10, loMin).toFixed(3)}
         </text>
-        <text x={W - pad + 4} y={pad + 4} fontSize={8} fontFamily="monospace" fill="#556677">
+        <text x={W - pad + 4} y={pad + 4} fontSize={8} fontFamily="monospace" style={{ fill: "var(--hud-dim)" }}>
           {(werMax * 100).toFixed(0)}%
         </text>
         <text
@@ -1093,7 +1104,7 @@ function CtcTrainingChart({ epochs }: { epochs: EpochEvent[] }) {
           y={H - 4}
           fontSize={8}
           fontFamily="monospace"
-          fill="#556677"
+          style={{ fill: "var(--hud-dim)" }}
           textAnchor="middle"
         >
           epoch 1 → {epochs[n - 1].epoch}

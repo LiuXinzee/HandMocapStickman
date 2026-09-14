@@ -78,6 +78,7 @@ import {
   TARGET_MOTION_DEG,
   type OrientationCalib,
   type Quat,
+  type Vec3,
 } from "@/lib/orientationCalib";
 import {
   analyzeImuHealth,
@@ -101,22 +102,33 @@ import {
   X,
 } from "lucide-react";
 
+/*
+ * 火柴人的配色。
+ *
+ * ⚠ **这两张表不能改用 `var(--hud-*)`**，尽管页面上别处都改了。两个原因，
+ * 每一个都足以让它失效：
+ *  1. 它们喂的是 canvas 2D 的 `fillStyle/strokeStyle` —— 那是自己解析色值的，
+ *     不走 CSS，`var()` 会被静默丢弃（画出来是上一笔的残留色）。
+ *  2. 下面还有 `color + "50"` 这种**拼十六进制透明度**的用法，
+ *     值必须是 6 位十六进制字面量才拼得出合法颜色。
+ * 所以这里写死浅色版的值，改配色时和 index.css 那几个 --hud-* 一起改。
+ */
 const FINGER_COLORS: Record<string, string> = {
-  thumb: "#00f0ff",
-  index: "#00e5a0",
-  middle: "#a855f7",
-  ring: "#f59e0b",
-  pinky: "#ff2d7b",
-  palm: "#00f0ff",
+  thumb: "#1677ff",
+  index: "#16a34a",
+  middle: "#7c3aed",
+  ring: "#d97706",
+  pinky: "#e11d48",
+  palm: "#1677ff",
 };
 
 const FINGER_GLOW_COLORS: Record<string, string> = {
-  thumb: "rgba(0, 240, 255, 0.35)",
-  index: "rgba(0, 229, 160, 0.35)",
-  middle: "rgba(168, 85, 247, 0.35)",
-  ring: "rgba(245, 158, 11, 0.35)",
-  pinky: "rgba(255, 45, 123, 0.35)",
-  palm: "rgba(0, 240, 255, 0.2)",
+  thumb: "rgba(22, 119, 255, 0.28)",
+  index: "rgba(22, 163, 74, 0.28)",
+  middle: "rgba(124, 58, 237, 0.28)",
+  ring: "rgba(217, 119, 6, 0.28)",
+  pinky: "rgba(225, 29, 72, 0.28)",
+  palm: "rgba(22, 119, 255, 0.16)",
 };
 
 const CANVAS_W = 640;
@@ -204,8 +216,16 @@ const WIZARD_STEPS: WizardStep[] = [
     key: "palms",
     short: "③ 相对",
     title: "双手手心相对 · 翻腕参考",
+    /*
+     * ⚠ "向内翻"必须写明是哪一边。翻反方向解出来的矩阵是**合法的**，
+     * 三个质量数（俯仰/偏摆/轴分离）全部正常，界面只显示一个✓ ——
+     * 而用户看到的是绕 Y/Z 的旋转全部反号（摆拇指朝上，手模拇指朝下）。
+     * 现在有重力核对能自动纠正（见 orientationCalib.ts 的
+     * `validateAxisMapWithGravity`），但那一关要靠 ② 站直才有定论，
+     * 所以这里仍然要把方向说清楚，别指望下游兜底。
+     */
     instruction:
-      "手肘不动，双手向内翻腕，让左右手心相对（照着示意手模的朝向）并保持静止。转到手心正好相对、约 90° 就停，别转过头 —— 超过 165° 转轴的正负号就不稳了。这一步给出偏摆轴，和 ① 的俯仰轴一起反解出轴向映射矩阵。",
+      "手肘不动，双手向内翻腕，让左右手心相对（照着示意手模的朝向）并保持静止。「向内」= 左手掌心转向你的右边、右手掌心转向你的左边，两掌心最后面对面。转到约 90° 就停，别转过头 —— 超过 165° 转轴的正负号就不稳了。这一步给出偏摆轴，和 ① 的俯仰轴一起反解出轴向映射矩阵。",
     curl: 0,
     poseQuat: { LH: quatAboutY(90), RH: quatAboutY(-90) },
   },
@@ -219,6 +239,21 @@ const WIZARD_STEPS: WizardStep[] = [
     poseQuat: { LH: IDENTITY_QUAT, RH: IDENTITY_QUAT },
   },
 ];
+
+/**
+ * 一步之内的平均加速度（机体系），供重力核对用。全程没有 acc 的旧款手套返回 null。
+ *
+ * 直接求平均、不剔野值：这一步是静止 3 秒，平均本来就以重力为主；而重力核对只分辨
+ * "正着"与"整体翻转 180°"，容差 60°（`GRAVITY_DECISIVE`），远大于抖动带来的偏差。
+ * 真要剔野值该用 `imuHealth.ts` 那套按模长筛的做法，不该在这里再写一份。
+ */
+function averageAcc(samples: CalibSample[]): Vec3 | null {
+  const valid = samples.filter((s) => s.acc);
+  if (!valid.length) return null;
+  const sum: Vec3 = [0, 0, 0];
+  for (const s of valid) for (let i = 0; i < 3; i++) sum[i] += s.acc![i];
+  return [sum[0] / valid.length, sum[1] / valid.length, sum[2] / valid.length];
+}
 
 const WIZARD_COUNTDOWN_S = 3;
 const WIZARD_SAMPLE_MS = 3000;
@@ -533,7 +568,9 @@ function useCalibWizard(
         averageQuaternions(openS.map((s) => s.quat)),
         palmsS.length >= WIZARD_MIN_FRAMES
           ? averageQuaternions(palmsS.map((s) => s.quat))
-          : null
+          : null,
+        // 零位那步的平均加速度：用来核对轴向矩阵有没有整体翻转
+        averageAcc(zeroS)
       );
 
       /*
@@ -577,6 +614,31 @@ function useCalibWizard(
         lines.push(
           `${name} 朝向：零位 + 轴向映射已写入（俯仰 ${q.pitchDeg.toFixed(0)}° · 偏摆 ${q.swingDeg.toFixed(0)}° · 轴分离 ${q.separationDeg.toFixed(0)}°，三项都应接近 ${TARGET_MOTION_DEG}°）`
         );
+        /*
+         * 重力核对的结论。**必须单独报一行**：三个质量数对"③ 翻反方向"是全绿的，
+         * 唯一能说明这件事的就是这一关。三种口径分开说，因为该做的事不一样：
+         *   纠正了 → 已经好了，但下次那一步该往对的方向翻
+         *   通过了 → 真的没问题
+         *   没做   → 旧款手套不上报加速度，这一关缺席，用户得自己看手模
+         * （"没定论"那种由 axisQualityWarning 报，不在这里重复。）
+         */
+        const g = orient.gravityCheck;
+        if (g?.corrected) {
+          lines.push(
+            `${name} 朝向：重力核对发现轴向矩阵整体翻转了 180°，**已自动纠正**` +
+              `（零位测到的"上"换算成 ${g.upY.toFixed(2)}，应为 +1）—— ` +
+              `原因是 ③ 那步翻反了方向：${handName(hand)}"往内"是把掌心转向${
+                hand === "LH" ? "你的右边" : "你的左边"
+              }。这次已经修好，下次照对的方向做就不必纠正`
+          );
+        } else if (g) {
+          lines.push(`${name} 朝向：重力核对通过（上 = ${g.upY.toFixed(2)}）`);
+        } else {
+          lines.push(
+            `${name} 朝向：这只手套不上报加速度，无法做重力核对 —— ` +
+              `"③ 翻反方向"这类整体翻转拦不住，请摆个拇指朝上确认手模跟着朝上`
+          );
+        }
         // 过了门限不等于好用 —— 这条不报的话，一份拧歪的矩阵只会显示成一个✓
         const warn = axisQualityWarning(orient);
         if (warn) lines.push(`${name} 朝向 WARN：${warn}`);
@@ -725,6 +787,8 @@ export default function VirtualMocap() {
   const [confidence, setConfidence] = useState(0);
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  /** 画布底色的**实际值**（从 --hud-stage 解析出来的）。见下面 render 里那段注释 */
+  const stageColorRef = useRef("#eaeff6");
   const animRef = useRef<number>(0);
   const prevLandmarksRef = useRef<{ x: number; y: number; z: number }[] | null>(
     null
@@ -785,12 +849,20 @@ export default function VirtualMocap() {
     canvas.width = CANVAS_W;
     canvas.height = CANVAS_H;
 
+    // 解析一次就够：换肤不会在运行时发生（皮肤是 CSS 里的常量，不是可切的开关）
+    stageColorRef.current =
+      getComputedStyle(canvas).getPropertyValue("--hud-stage").trim() ||
+      "#eaeff6";
+
     const render = () => {
       const time = Date.now() / 1000;
       ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
 
-      // 背景
-      ctx.fillStyle = "#0a0e1a";
+      /* 背景。**canvas 2D 里不能写 var(--hud-page)** —— fillStyle 是 CSS 色值
+         的解析，不走自定义属性；给它 var() 会被静默丢弃（画出来是上一帧残留）。
+         所以这里从元素的计算样式里把变量读成实际颜色再喂进去，
+         页面换肤时这块底也跟着变。 */
+      ctx.fillStyle = stageColorRef.current;
       ctx.fillRect(0, 0, CANVAS_W, CANVAS_H);
       drawGrid(ctx, CANVAS_W, CANVAS_H);
       drawScanLines(ctx, CANVAS_W, CANVAS_H);
@@ -867,10 +939,10 @@ export default function VirtualMocap() {
     // 侧栏自己 overflow-y-auto 内部滚动，主区永远是一屏。首页 HUD 也是这个写法。
     <div
       className="h-screen flex flex-col overflow-hidden"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -879,17 +951,17 @@ export default function VirtualMocap() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
-          <span className="text-xs font-bold tracking-widest text-[#f59e0b] font-mono">
+          <div className="w-px h-5 bg-[#1677ff]/20" />
+          <span className="text-xs font-bold tracking-widest text-[var(--hud-warn)] font-mono">
             VIRTUAL MOCAP
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             TACTILE → SKELETON / 3D HAND（两条独立链路 · 双手体检）
           </span>
         </div>
         <div className="flex items-center gap-4 text-[10px] font-mono">
           {modelReady && (
-            <span className="text-[#f59e0b] flex items-center gap-1">
+            <span className="text-[var(--hud-warn)] flex items-center gap-1">
               <Bone className="w-3 h-3" />
               MODEL: {modelName || "LOADED"}
             </span>
@@ -945,7 +1017,7 @@ export default function VirtualMocap() {
         </div>
 
         {/* 右侧面板 */}
-        <div className="w-72 border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-4 shrink-0">
+        <div className="w-72 border-l border-[#1677ff]/15 overflow-y-auto p-3 space-y-4 shrink-0">
           {/*
             体检汇总：两只手全过才给绿灯，否则直接点名缺哪只手的哪一项。
 
@@ -961,16 +1033,16 @@ export default function VirtualMocap() {
               return (
                 <div key={hc.handKey} className="flex items-start gap-1.5">
                   {ok ? (
-                    <CheckCircle2 className="w-3 h-3 shrink-0 mt-px text-[#00e5a0]" />
+                    <CheckCircle2 className="w-3 h-3 shrink-0 mt-px text-[var(--hud-ok)]" />
                   ) : (
-                    <AlertTriangle className="w-3 h-3 shrink-0 mt-px text-[#f59e0b]" />
+                    <AlertTriangle className="w-3 h-3 shrink-0 mt-px text-[var(--hud-warn)]" />
                   )}
-                  <span className="text-[10px] font-mono w-5 shrink-0 text-[#8899aa]">
+                  <span className="text-[10px] font-mono w-5 shrink-0 text-[var(--hud-soft)]">
                     {hc.handKey}
                   </span>
                   <span
                     className="flex-1 text-[9px] font-mono leading-relaxed"
-                    style={{ color: ok ? "#00e5a0" : "#f59e0b" }}
+                    style={{ color: ok ? "var(--hud-ok)" : "var(--hud-warn)" }}
                   >
                     {ok ? "全部通过" : issues.join(" · ")}
                   </span>
@@ -1005,7 +1077,7 @@ export default function VirtualMocap() {
             </button>
             <OrientBlock hc={L} />
             <OrientBlock hc={R} />
-            <div className="pt-1.5 border-t border-[#a855f7]/10 space-y-1">
+            <div className="pt-1.5 border-t border-[#7c3aed]/10 space-y-1">
               <ImuVerdictBlock hc={L} />
               <ImuVerdictBlock hc={R} />
             </div>
@@ -1014,13 +1086,13 @@ export default function VirtualMocap() {
           {/* 手套连接：两只手分别一个 COM 口，各连一次 */}
           <Section title="GLOVE CONNECTION">
             {!gloveSupported && (
-              <p className="text-[8px] text-[#ff2d7b] leading-relaxed">
+              <p className="text-[8px] text-[var(--hud-err)] leading-relaxed">
                 当前浏览器不支持 Web Serial，请用 Chrome / Edge。
               </p>
             )}
             <ConnRow hc={L} />
             <ConnRow hc={R} />
-            <p className="text-[8px] text-[#334455] leading-relaxed">
+            <p className="text-[8px] text-[var(--hud-faint)] leading-relaxed">
               {bothConnected
                 ? "双手已连接。"
                 : anyConnected
@@ -1032,8 +1104,8 @@ export default function VirtualMocap() {
           {/* 推理状态 */}
           <Section title="PREDICTION">
             <div className="flex items-center justify-between text-[10px] font-mono">
-              <span className="text-[#556677]">SOURCE</span>
-              <span className="text-[#8899aa]">
+              <span className="text-[var(--hud-dim)]">SOURCE</span>
+              <span className="text-[var(--hud-soft)]">
                 {skeletonSide
                   ? skeletonSide === "LH"
                     ? "左手"
@@ -1042,33 +1114,33 @@ export default function VirtualMocap() {
               </span>
             </div>
             <div className="flex items-center justify-between text-[10px] font-mono">
-              <span className="text-[#556677]">MODEL</span>
+              <span className="text-[var(--hud-dim)]">MODEL</span>
               <span
-                className={modelReady ? "text-[#00e5a0]" : "text-[#ff2d7b]"}
+                className={modelReady ? "text-[var(--hud-ok)]" : "text-[var(--hud-err)]"}
               >
                 {modelReady ? "READY" : "NOT LOADED"}
               </span>
             </div>
             <div className="flex items-center justify-between text-[10px] font-mono">
-              <span className="text-[#556677]">PRED FPS</span>
-              <span className="text-[#f59e0b]">{predFps}</span>
+              <span className="text-[var(--hud-dim)]">PRED FPS</span>
+              <span className="text-[var(--hud-warn)]">{predFps}</span>
             </div>
             <div className="flex items-center justify-between text-[10px] font-mono">
-              <span className="text-[#556677]">CONFIDENCE</span>
-              <span className="text-[#da77f2]">{confidence.toFixed(0)}%</span>
+              <span className="text-[var(--hud-dim)]">CONFIDENCE</span>
+              <span className="text-[var(--hud-wrist)]">{confidence.toFixed(0)}%</span>
             </div>
             {/* 置信度条 */}
-            <div className="h-1.5 bg-[#1a2030] rounded-full overflow-hidden border border-[#f59e0b]/10">
+            <div className="h-1.5 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#d97706]/10">
               <div
                 className="h-full rounded-full transition-all duration-200"
                 style={{
                   width: `${confidence}%`,
                   background:
                     confidence > 70
-                      ? "#00e5a0"
+                      ? "var(--hud-ok)"
                       : confidence > 40
-                      ? "#f59e0b"
-                      : "#ff2d7b",
+                      ? "var(--hud-warn)"
+                      : "var(--hud-err)",
                   boxShadow: `0 0 6px ${
                     confidence > 70
                       ? "rgba(0,229,160,0.5)"
@@ -1080,7 +1152,7 @@ export default function VirtualMocap() {
               />
             </div>
             {loadMsg && (
-              <p className="text-[8px] text-[#f59e0b]">{loadMsg}</p>
+              <p className="text-[8px] text-[var(--hud-warn)]">{loadMsg}</p>
             )}
           </Section>
 
@@ -1141,13 +1213,13 @@ export default function VirtualMocap() {
 function verdictColor(verdict: ImuHealthReport["verdict"]): string {
   switch (verdict) {
     case "ok":
-      return "#00e5a0";
+      return "var(--hud-ok)";
     case "warn":
-      return "#f59e0b";
+      return "var(--hud-warn)";
     case "bad":
-      return "#ff2d7b";
+      return "var(--hud-err)";
     default:
-      return "#8899aa";
+      return "var(--hud-soft)";
   }
 }
 
@@ -1187,8 +1259,8 @@ function ConnRow({ hc }: { hc: HandCheck }) {
   return (
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[10px] font-mono">
-        <span className="text-[#556677]">{name}</span>
-        <span className={ch.isConnected ? "text-[#00e5a0]" : "text-[#ff2d7b]"}>
+        <span className="text-[var(--hud-dim)]">{name}</span>
+        <span className={ch.isConnected ? "text-[var(--hud-ok)]" : "text-[var(--hud-err)]"}>
           {ch.isConnected
             ? `${ch.gloveFps} FPS · ${ch.gloveFrameCount}`
             : ch.isConnecting
@@ -1196,7 +1268,7 @@ function ConnRow({ hc }: { hc: HandCheck }) {
               : "DISCONNECTED"}
         </span>
       </div>
-      {ch.error && <p className="text-[8px] text-[#ff2d7b]">{ch.error}</p>}
+      {ch.error && <p className="text-[8px] text-[var(--hud-err)]">{ch.error}</p>}
       <button
         onClick={ch.isConnected ? ch.disconnect : ch.connect}
         disabled={ch.isConnecting}
@@ -1230,33 +1302,33 @@ function OrientBlock({ hc }: { hc: HandCheck }) {
   return (
     <div className="space-y-0.5">
       <div className="flex items-center justify-between text-[10px] font-mono">
-        <span className="text-[#8899aa]">{handName(hc.handKey)} 朝向</span>
+        <span className="text-[var(--hud-soft)]">{handName(hc.handKey)} 朝向</span>
         <span
           style={{
-            color: !calib ? "#f59e0b" : calib.axisMap ? "#00e5a0" : "#00f0ff",
+            color: !calib ? "var(--hud-warn)" : calib.axisMap ? "var(--hud-ok)" : "var(--hud-accent)",
           }}
         >
           {!calib ? "未标定" : calib.axisMap ? "零位 + 轴向" : "仅零位"}
         </span>
       </div>
       {calib?.axisQuality && (
-        <div className="text-[8px] font-mono text-[#556677]">
+        <div className="text-[8px] font-mono text-[var(--hud-dim)]">
           俯仰 {calib.axisQuality.pitchDeg.toFixed(0)}° · 偏摆{" "}
           {calib.axisQuality.swingDeg.toFixed(0)}° · 分离{" "}
           {calib.axisQuality.separationDeg.toFixed(0)}°
-          <span className="text-[#3d4a5a]"> / 目标 {TARGET_MOTION_DEG}°</span>
+          <span className="text-[var(--hud-faint)]"> / 目标 {TARGET_MOTION_DEG}°</span>
         </div>
       )}
       {calib && fail && (
-        <p className="text-[8px] text-[#00f0ff] leading-relaxed">{fail}</p>
+        <p className="text-[8px] text-[var(--hud-accent)] leading-relaxed">{fail}</p>
       )}
       {calib && warn && (
-        <p className="text-[8px] text-[#f59e0b] leading-relaxed">{warn}</p>
+        <p className="text-[8px] text-[var(--hud-warn)] leading-relaxed">{warn}</p>
       )}
       {calib && (
         <button
           onClick={hc.resetOrientCalib}
-          className="text-[8px] font-mono text-[#ff2d7b]/70 hover:text-[#ff2d7b] underline"
+          className="text-[8px] font-mono text-[#e11d48]/70 hover:text-[var(--hud-err)] underline"
         >
           清除{handName(hc.handKey)}朝向标定
         </button>
@@ -1276,17 +1348,17 @@ function CalibWizardModal({
   const step = WIZARD_STEPS[wz.stepIndex];
   const done = wz.phase === "done";
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[#050810]/92 p-4">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--hud-scrim)] p-4">
       <div
         className="w-full max-w-3xl max-h-full overflow-y-auto rounded-sm border p-4 space-y-3"
         style={{
-          backgroundColor: "#0a0e1a",
+          backgroundColor: "var(--hud-page)",
           borderColor: "rgba(168,85,247,0.35)",
           boxShadow: "0 0 40px rgba(168,85,247,0.12)",
         }}
       >
         <div className="flex items-center justify-between">
-          <span className="text-xs font-bold tracking-widest font-mono text-[#a855f7]">
+          <span className="text-xs font-bold tracking-widest font-mono text-[var(--hud-violet)]">
             GLOVE CALIBRATION · 四步
           </span>
           <button
@@ -1320,10 +1392,10 @@ function CalibWizardModal({
                         : "rgba(85,102,119,0.25)",
                   color:
                     state === "active"
-                      ? "#a855f7"
+                      ? "var(--hud-violet)"
                       : state === "done"
-                        ? "#00e5a0"
-                        : "#556677",
+                        ? "var(--hud-ok)"
+                        : "var(--hud-dim)",
                 }}
               >
                 {s.short}
@@ -1334,20 +1406,20 @@ function CalibWizardModal({
 
         {done ? (
           <div className="space-y-2">
-            <p className="text-[11px] font-mono text-[#00e5a0]">
+            <p className="text-[11px] font-mono text-[var(--hud-ok)]">
               校准完成，已写入 localStorage（按手别分开存）。
             </p>
             <div className="space-y-1">
               {wz.summary.map((line, i) => (
                 <p
                   key={i}
-                  className="text-[9px] font-mono leading-relaxed text-[#8899aa]"
+                  className="text-[9px] font-mono leading-relaxed text-[var(--hud-soft)]"
                 >
                   {line}
                 </p>
               ))}
             </div>
-            <p className="text-[8px] text-[#334455] leading-relaxed">
+            <p className="text-[8px] text-[var(--hud-faint)] leading-relaxed">
               回到主界面握一下拳看手模：满量程按解剖学行程分配（掌指 85° / 近端 100° /
               远端 70°，指尖骨不转），指尖应该落在掌面上。若仍显得不够弯，
               说明④那步握得不够紧或该路弯折跨度太小 —— 看上面的跨度数。
@@ -1372,8 +1444,8 @@ function CalibWizardModal({
         ) : (
           <div className="space-y-3">
             <div>
-              <p className="text-[11px] font-mono text-[#f59e0b]">{step.title}</p>
-              <p className="text-[9px] font-mono text-[#8899aa] leading-relaxed mt-1">
+              <p className="text-[11px] font-mono text-[var(--hud-warn)]">{step.title}</p>
+              <p className="text-[9px] font-mono text-[var(--hud-soft)] leading-relaxed mt-1">
                 {step.instruction}
               </p>
             </div>
@@ -1400,33 +1472,33 @@ function CalibWizardModal({
 
             {wz.phase === "countdown" ? (
               <div className="flex items-center gap-3">
-                <span className="text-2xl font-mono font-bold text-[#a855f7] w-8 text-center">
+                <span className="text-2xl font-mono font-bold text-[var(--hud-violet)] w-8 text-center">
                   {wz.countdown}
                 </span>
-                <span className="text-[9px] font-mono text-[#556677]">
+                <span className="text-[9px] font-mono text-[var(--hud-dim)]">
                   摆好姿势并保持静止，倒数结束后自动采样 3 秒
                 </span>
               </div>
             ) : (
               <div className="space-y-1">
-                <div className="h-1.5 bg-[#1a2030] rounded-full overflow-hidden border border-[#a855f7]/20">
+                <div className="h-1.5 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#7c3aed]/20">
                   <div
                     className="h-full rounded-full"
                     style={{
                       width: `${wz.progress}%`,
-                      background: "#a855f7",
+                      background: "var(--hud-violet)",
                       boxShadow: "0 0 6px rgba(168,85,247,0.5)",
                     }}
                   />
                 </div>
-                <div className="text-[9px] font-mono text-[#a855f7]">
+                <div className="text-[9px] font-mono text-[var(--hud-violet)]">
                   采样中… 保持静止（左 {wz.counts.LH} 帧 / 右 {wz.counts.RH} 帧）
                 </div>
               </div>
             )}
 
             {wz.errorMsg && (
-              <p className="text-[9px] font-mono text-[#ff2d7b] leading-relaxed">
+              <p className="text-[9px] font-mono text-[var(--hud-err)] leading-relaxed">
                 {wz.errorMsg}
               </p>
             )}
@@ -1456,10 +1528,10 @@ function DemoViewport({
   return (
     <div className="basis-[240px] grow shrink min-w-0 space-y-1">
       <div className="flex items-baseline justify-between px-1">
-        <span className="text-[9px] font-mono text-[#a855f7]">{label}</span>
+        <span className="text-[9px] font-mono text-[var(--hud-violet)]">{label}</span>
         <span
           className="text-[8px] font-mono"
-          style={{ color: connected ? "#00e5a0" : "#556677" }}
+          style={{ color: connected ? "var(--hud-ok)" : "var(--hud-dim)" }}
         >
           {connected ? (sampling ? `${frames} 帧` : "已连接") : "未连接 · 跳过"}
         </span>
@@ -1467,7 +1539,7 @@ function DemoViewport({
       <div
         className="relative w-full aspect-[4/3] border rounded-sm overflow-hidden"
         style={{
-          backgroundColor: "#0a0e1a",
+          backgroundColor: "var(--hud-page)",
           borderColor: connected
             ? "rgba(168,85,247,0.3)"
             : "rgba(85,102,119,0.2)",
@@ -1491,17 +1563,17 @@ function SensorPanel({ checks }: { checks: HandCheck[] }) {
   return (
     <div className="min-w-0 min-h-0 flex flex-col gap-1.5">
       <div className="flex items-baseline gap-2 px-1 shrink-0">
-        <span className="text-[10px] font-bold tracking-widest font-mono text-[#00f0ff]">
+        <span className="text-[10px] font-bold tracking-widest font-mono text-[var(--hud-accent)]">
           SENSOR OVERVIEW
         </span>
-        <span className="text-[8px] font-mono text-[#334455]">
+        <span className="text-[8px] font-mono text-[var(--hud-faint)]">
           137 mapped sensors · 每只手一张
         </span>
       </div>
       <div
         className="flex-1 min-h-0 border rounded-sm p-2 flex gap-3 overflow-hidden"
         style={{
-          backgroundColor: "#0a0e1a",
+          backgroundColor: "var(--hud-page)",
           borderColor: "rgba(0,240,255,0.2)",
         }}
       >
@@ -1509,14 +1581,14 @@ function SensorPanel({ checks }: { checks: HandCheck[] }) {
           const frame = hc.channel.latestFrame;
           return (
             <div key={hc.handKey} className="flex-1 min-w-0 space-y-1">
-              <div className="text-[8px] font-mono text-[#556677]">
+              <div className="text-[8px] font-mono text-[var(--hud-dim)]">
                 {handName(hc.handKey)}
                 {frame ? ` · ${hc.channel.gloveFps} FPS` : " · 未连接"}
               </div>
               {frame ? (
                 <MiniHeatmap data={frame.mapped_data} />
               ) : (
-                <div className="h-full min-h-[80px] flex items-center justify-center text-[9px] font-mono text-[#334455]">
+                <div className="h-full min-h-[80px] flex items-center justify-center text-[9px] font-mono text-[var(--hud-faint)]">
                   没有数据
                 </div>
               )}
@@ -1541,7 +1613,7 @@ function HandViewport({ hc }: { hc: HandCheck }) {
     <Viewport
       label={`BEND + IMU · ${hc.handKey}`}
       hint={`${hc.calibrated ? "弯折两点标定" : "弯折未标定"} · ${orientHint}`}
-      accent={hc.calibrated && orient ? "#00e5a0" : "#556677"}
+      accent={hc.calibrated && orient ? "var(--hud-ok)" : "var(--hud-dim)"}
       badge={
         <>
           <Ruler className="w-3 h-3 inline mr-1" />
@@ -1552,7 +1624,7 @@ function HandViewport({ hc }: { hc: HandCheck }) {
       <HandModel driveRef={hc.driveRef} side={side} />
       {!hc.channel.isConnected && (
         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-          <span className="text-[10px] font-mono text-[#556677]">
+          <span className="text-[10px] font-mono text-[var(--hud-dim)]">
             连接{handName(hc.handKey)}手套后即可驱动（无需模型）
           </span>
         </div>
@@ -1560,8 +1632,8 @@ function HandViewport({ hc }: { hc: HandCheck }) {
       {/* 未标定时必须写在画面里：这个状态下握拳只弯到约一半，
           很容易被当成"手模坏了"或"模型不准"，而其实只是没标定。 */}
       {hc.channel.isConnected && !hc.calibrated && (
-        <div className="absolute bottom-2 left-2 right-2 px-2 py-1 rounded-sm pointer-events-none bg-[#f59e0b]/12 border border-[#f59e0b]/35">
-          <span className="text-[9px] font-mono text-[#f59e0b] leading-relaxed">
+        <div className="absolute bottom-2 left-2 right-2 px-2 py-1 rounded-sm pointer-events-none bg-[#d97706]/12 border border-[#d97706]/35">
+          <span className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed">
             未标定 · 只有柔和预览：满量程也只弯约一半，握拳不会成形。跑一次四步校准。
           </span>
         </div>
@@ -1575,10 +1647,10 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
   const { calibrated, weak, bendUi, rawUi, spans, calibMsg, handKey } = hc;
   const connected = hc.channel.isConnected;
   return (
-    <div className="space-y-1.5 pb-2 border-b border-[#f59e0b]/10 last:border-b-0">
+    <div className="space-y-1.5 pb-2 border-b border-[#d97706]/10 last:border-b-0">
       <div className="flex items-center justify-between text-[10px] font-mono">
-        <span className="text-[#8899aa]">{handName(handKey)}</span>
-        <span className={calibrated ? "text-[#00e5a0]" : "text-[#f59e0b]"}>
+        <span className="text-[var(--hud-soft)]">{handName(handKey)}</span>
+        <span className={calibrated ? "text-[var(--hud-ok)]" : "text-[var(--hud-warn)]"}>
           {calibrated ? "CALIBRATED" : "UNCALIBRATED"}
         </span>
       </div>
@@ -1592,32 +1664,32 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
             <div key={name} className="flex items-center gap-1.5">
               <span
                 className={`text-[8px] font-mono w-8 shrink-0 ${
-                  isWeak ? "text-[#ff2d7b]" : "text-[#556677]"
+                  isWeak ? "text-[var(--hud-err)]" : "text-[var(--hud-dim)]"
                 }`}
               >
                 {name}
               </span>
-              <div className="flex-1 h-1.5 bg-[#1a2030] rounded-full overflow-hidden border border-[#f59e0b]/10">
+              <div className="flex-1 h-1.5 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#d97706]/10">
                 <div
                   className="h-full rounded-full transition-all duration-100"
                   style={{
                     width: `${pct}%`,
                     background: isWeak
-                      ? "#ff2d7b"
+                      ? "var(--hud-err)"
                       : calibrated
-                        ? "#00e5a0"
-                        : "#556677",
+                        ? "var(--hud-ok)"
+                        : "var(--hud-dim)",
                   }}
                 />
               </div>
-              <span className="text-[8px] font-mono text-[#8899aa] w-7 text-right shrink-0">
+              <span className="text-[8px] font-mono text-[var(--hud-soft)] w-7 text-right shrink-0">
                 {pct}%
               </span>
               {/* 原始 ADC / 标定跨度：手模看着不对时，先看这一路到底动不动。
                   百分比是算出来的，只有这两个数能区分"传感器没反应"和"标定不对"。 */}
               <span
                 className="text-[8px] font-mono w-14 text-right shrink-0"
-                style={{ color: isWeak ? "#ff2d7b" : "#334455" }}
+                style={{ color: isWeak ? "var(--hud-err)" : "var(--hud-faint)" }}
                 title="当前原始 ADC / 标定跨度"
               >
                 {Math.round(rawUi[i] ?? 0)}
@@ -1653,7 +1725,7 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
       </div>
 
       {weak.length > 0 && (
-        <p className="text-[8px] text-[#ff2d7b] leading-relaxed flex gap-1">
+        <p className="text-[8px] text-[var(--hud-err)] leading-relaxed flex gap-1">
           <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
           <span>
             {handName(handKey)}的 {weak.map((i) => FINGER_NAMES[i]).join("、")}{" "}
@@ -1663,7 +1735,7 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
         </p>
       )}
       {calibMsg && (
-        <p className="text-[8px] text-[#f59e0b] leading-relaxed">{calibMsg}</p>
+        <p className="text-[8px] text-[var(--hud-warn)] leading-relaxed">{calibMsg}</p>
       )}
     </div>
   );
@@ -1679,10 +1751,10 @@ function ImuVerdictBlock({ hc }: { hc: HandCheck }) {
   return (
     <div className="space-y-0.5">
       <div className="flex items-center justify-between text-[10px] font-mono">
-        <span className="text-[#8899aa]">{handName(hc.handKey)} 陀螺</span>
+        <span className="text-[var(--hud-soft)]">{handName(hc.handKey)} 陀螺</span>
         <span
           className="flex items-center gap-1"
-          style={{ color: imuReport ? verdictColor(imuReport.verdict) : "#f59e0b" }}
+          style={{ color: imuReport ? verdictColor(imuReport.verdict) : "var(--hud-warn)" }}
         >
           {!imuReport ? (
             <>
@@ -1703,7 +1775,7 @@ function ImuVerdictBlock({ hc }: { hc: HandCheck }) {
       </div>
       {imuReport && (
         <>
-          <div className="text-[8px] font-mono text-[#556677]">
+          <div className="text-[8px] font-mono text-[var(--hud-dim)]">
             倾角偏差 {imuReport.tiltInconsistencyDeg.toFixed(1)}° · p95{" "}
             {imuReport.p95TiltDeg.toFixed(1)}° · 可用帧 {imuReport.usableFrames}
             {imuReport.stillRotationDegPerMin != null &&
@@ -1738,7 +1810,7 @@ function Viewport({
   label,
   hint,
   badge,
-  accent = "#f59e0b",
+  accent = "var(--hud-warn)",
   boxClass = "flex-1 min-h-0 w-full",
   children,
 }: {
@@ -1755,12 +1827,12 @@ function Viewport({
         <span className="text-[10px] font-bold tracking-widest font-mono" style={{ color: accent }}>
           {label}
         </span>
-        {hint && <span className="text-[8px] font-mono text-[#334455]">{hint}</span>}
+        {hint && <span className="text-[8px] font-mono text-[var(--hud-faint)]">{hint}</span>}
       </div>
       <div
         className={`relative border rounded-sm overflow-hidden ${boxClass}`}
         style={{
-          backgroundColor: "#0a0e1a",
+          backgroundColor: "var(--hud-page)",
           borderColor: `${accent}33`,
           boxShadow: "0 0 30px rgba(245,158,11,0.08), inset 0 0 30px rgba(10,14,26,0.5)",
         }}
@@ -1790,9 +1862,9 @@ function Section({
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 pb-1 border-b border-[#f59e0b]/15">
-        <div className="w-1 h-3 bg-[#f59e0b] rounded-full shadow-[0_0_4px_rgba(245,158,11,0.6)]" />
-        <span className="text-[10px] font-bold tracking-widest text-[#f59e0b] font-mono">
+      <div className="flex items-center gap-2 pb-1 border-b border-[#d97706]/15">
+        <div className="w-1 h-3 bg-[var(--hud-warn)] rounded-full shadow-[0_0_4px_rgba(245,158,11,0.6)]" />
+        <span className="text-[10px] font-bold tracking-widest text-[var(--hud-warn)] font-mono">
           {title}
         </span>
       </div>
@@ -1969,7 +2041,7 @@ function drawJoints(
     const x = lm.x * w;
     const y = lm.y * h;
 
-    let color = "#f59e0b";
+    let color = "var(--hud-warn)";
     if (idx <= 4) color = FINGER_COLORS.thumb;
     else if (idx <= 8) color = FINGER_COLORS.index;
     else if (idx <= 12) color = FINGER_COLORS.middle;

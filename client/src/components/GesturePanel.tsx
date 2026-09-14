@@ -11,11 +11,11 @@ interface GesturePanelProps {
 }
 
 const FINGER_COLORS: Record<string, string> = {
-  thumb: "#00f0ff",
-  index: "#00e5a0",
-  middle: "#a855f7",
-  ring: "#f59e0b",
-  pinky: "#ff2d7b",
+  thumb: "var(--hud-accent)",
+  index: "var(--hud-ok)",
+  middle: "var(--hud-violet)",
+  ring: "var(--hud-warn)",
+  pinky: "var(--hud-err)",
 };
 
 const FINGER_LABELS: Record<string, string> = {
@@ -53,13 +53,13 @@ export default function GesturePanel({ handResults }: GesturePanelProps) {
             className="text-lg font-bold"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
-              color: "#00f0ff",
+              color: "var(--hud-accent)",
               textShadow: "0 0 12px rgba(0,240,255,0.5)",
             }}
           >
             {gesture.label}
           </div>
-          <div className="text-[10px] text-[#556677] font-mono mt-1">
+          <div className="text-[10px] text-[var(--hud-dim)] font-mono mt-1">
             {gesture.gesture} · {(gesture.confidence * 100).toFixed(0)}%
           </div>
         </div>
@@ -85,17 +85,16 @@ export default function GesturePanel({ handResults }: GesturePanelProps) {
                   >
                     {FINGER_LABELS[finger]}
                   </span>
-                  <span className="text-[10px] font-mono text-[#8899aa]">
+                  <span className="text-[10px] font-mono text-[var(--hud-soft)]">
                     {angle.toFixed(0)}°
                   </span>
                 </div>
-                <div className="h-1 bg-[#1a1a2e] rounded-full overflow-hidden">
+                <div className="h-1 bg-[var(--hud-track)] rounded-full overflow-hidden">
                   <div
                     className="h-full rounded-full transition-all duration-150"
                     style={{
                       width: `${normalizedAngle * 100}%`,
                       backgroundColor: color,
-                      boxShadow: `0 0 6px ${color}60`,
                     }}
                   />
                 </div>

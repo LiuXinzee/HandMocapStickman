@@ -536,8 +536,8 @@ export default function CollectSentence() {
    * 最上面之后这件事更明显：不钉死视口高度，按钮会被整页滚动推到屏幕外。
    */
   return (
-    <div className="h-screen overflow-hidden flex flex-col" style={{ backgroundColor: "#0a0e1a" }}>
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+    <div className="h-screen overflow-hidden flex flex-col" style={{ backgroundColor: "var(--hud-page)" }}>
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -546,19 +546,19 @@ export default function CollectSentence() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
+          <div className="w-px h-5 bg-[#1677ff]/20" />
           <span
             className="text-xs font-bold tracking-widest"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
               // 紫色是时序链路的标识色，与 /collect-seq、/train-seq、/translate 的
               // MODE 开关一致。青色留给静态链路
-              color: "#a855f7",
+              color: "var(--hud-violet)",
             }}
           >
             SENTENCE COLLECTION
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             连续手语 · 整句自动收句
           </span>
         </div>
@@ -566,19 +566,19 @@ export default function CollectSentence() {
           <div className="flex items-center gap-4 text-[10px] font-mono">
             {/* 视觉不是特征，所以这里**不能**用红色报警色 —— 摄像头关着照样能采，
                 只是裁得少、不参与 overlap_ms 标定。用灰色表示"少了个工具"而不是"坏了" */}
-            <span className={cameraRunning ? "text-[#00e5a0]" : "text-[#556677]"}>
+            <span className={cameraRunning ? "text-[var(--hud-ok)]" : "text-[var(--hud-dim)]"}>
               <Camera className="w-3 h-3 inline mr-1" />
               {cameraRunning ? `CAM ${cameraFps}fps` : "CAM OFF"}
             </span>
-            <span className="text-[#556677]">
+            <span className="text-[var(--hud-dim)]">
               第一批{" "}
-              <span className="text-[#a855f7]">
+              <span className="text-[var(--hud-violet)]">
                 {batchDone}/{batchTarget}
               </span>
             </span>
-            <span className="text-[#556677]">
+            <span className="text-[var(--hud-dim)]">
               句子样本总数{" "}
-              <span className="text-[#00f0ff]">{stats?.sentenceCount ?? 0}</span>
+              <span className="text-[var(--hud-accent)]">{stats?.sentenceCount ?? 0}</span>
             </span>
           </div>
           <StepNav />
@@ -587,9 +587,9 @@ export default function CollectSentence() {
 
       <div className="flex-1 flex overflow-hidden">
         {/* 左：句型表 */}
-        <div className="w-72 border-r border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
+        <div className="w-72 border-r border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
           <div className="flex items-center justify-between">
-            <span className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <span className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Templates ({templates.length})
             </span>
             <button
@@ -604,7 +604,7 @@ export default function CollectSentence() {
             </button>
           </div>
           {!showAll && (
-            <div className="text-[9px] text-[#334455] font-mono leading-relaxed">
+            <div className="text-[9px] text-[var(--hud-faint)] font-mono leading-relaxed">
               第一批只采这 {BATCH1_TEMPLATES.length} 句，每句{" "}
               {RECOMMENDED_PER_TEMPLATE} 条。剩下的句型仍由合成数据兜着。
             </div>
@@ -619,12 +619,12 @@ export default function CollectSentence() {
                 onClick={() => pickTemplate(t)}
                 className={`w-full text-left px-2.5 py-2 rounded-sm border transition-all duration-150 ${
                   selected
-                    ? "border-[#a855f7]/60 bg-[#a855f7]/10"
-                    : "border-[#00f0ff]/10 hover:border-[#00f0ff]/30"
+                    ? "border-[#7c3aed]/60 bg-[#7c3aed]/10"
+                    : "border-[#1677ff]/10 hover:border-[#1677ff]/30"
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <span className="text-[11px] text-[#ccd6e0]">
+                  <span className="text-[11px] text-[var(--hud-text)]">
                     {t.map((w) => getDisplayLabel(w)).join(" ")}
                   </span>
                   <span
@@ -632,16 +632,16 @@ export default function CollectSentence() {
                     style={{
                       color:
                         n >= RECOMMENDED_PER_TEMPLATE
-                          ? "#00e5a0"
+                          ? "var(--hud-ok)"
                           : n > 0
-                            ? "#f59e0b"
-                            : "#334455",
+                            ? "var(--hud-warn)"
+                            : "var(--hud-faint)",
                     }}
                   >
                     {n}/{RECOMMENDED_PER_TEMPLATE}
                   </span>
                 </div>
-                <div className="text-[9px] text-[#556677] mt-0.5">
+                <div className="text-[9px] text-[var(--hud-dim)] mt-0.5">
                   {resolveSentence([...t]).text}
                 </div>
               </button>
@@ -661,10 +661,10 @@ export default function CollectSentence() {
           <div className="cyber-panel p-3 rounded-sm">
             <div className="flex items-center justify-between mb-2">
               <div>
-                <span className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+                <span className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                   Vision — 只做标注，不进特征
                 </span>
-                <div className="text-[9px] text-[#334455] font-mono mt-0.5">
+                <div className="text-[9px] text-[var(--hud-faint)] font-mono mt-0.5">
                   关键点用于裁剪的可见段判据 + 量词间过渡时长（校准合成端 overlap_ms）
                 </div>
               </div>
@@ -684,12 +684,12 @@ export default function CollectSentence() {
               videoRef={videoRef}
             />
             {cameraError && (
-              <div className="text-[10px] text-[#ff2d7b] mt-1 font-mono">
+              <div className="text-[10px] text-[var(--hud-err)] mt-1 font-mono">
                 {cameraError}
               </div>
             )}
             {!cameraRunning && !cameraError && (
-              <div className="text-[9px] text-[#556677] mt-1 font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-dim)] mt-1 font-mono leading-relaxed">
                 摄像头关着也能采 —— 触觉是唯一进模型的通道。代价是这些条只能靠触觉静止段
                 裁剪（需要弯折两点标定做过），而且不参与过渡时长的标定。
               </div>
@@ -707,8 +707,8 @@ export default function CollectSentence() {
                 disabled={!gloveConnected}
                 className={`flex-1 py-3 rounded-sm border text-[12px] font-mono tracking-wider transition-all ${
                   active
-                    ? "border-[#ff2d7b] bg-[#ff2d7b]/20 text-[#ff2d7b]"
-                    : "border-[#a855f7]/50 text-[#a855f7] hover:bg-[#a855f7]/10"
+                    ? "border-[var(--hud-err)] bg-[#e11d48]/20 text-[var(--hud-err)]"
+                    : "border-[#7c3aed]/50 text-[var(--hud-violet)] hover:bg-[#7c3aed]/10"
                 }`}
               >
                 {active ? (
@@ -722,31 +722,31 @@ export default function CollectSentence() {
               </button>
             </div>
             {!gloveConnected && (
-              <div className="text-[10px] text-[#f59e0b] mt-2 font-mono">
+              <div className="text-[10px] text-[var(--hud-warn)] mt-2 font-mono">
                 手套未连接 —— 触觉是部署时唯一的输入，必须连
               </div>
             )}
             {warn && (
-              <div className="text-[10px] text-[#f59e0b] mt-2 font-mono">{warn}</div>
+              <div className="text-[10px] text-[var(--hud-warn)] mt-2 font-mono">{warn}</div>
             )}
             {message && (
-              <div className="text-[10px] text-[#00e5a0] mt-2 font-mono">{message}</div>
+              <div className="text-[10px] text-[var(--hud-ok)] mt-2 font-mono">{message}</div>
             )}
           </div>
 
           <div className="cyber-panel p-3 rounded-sm">
-            <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Target
             </div>
-            <div className="text-[20px] text-[#a855f7] tracking-wide">
+            <div className="text-[20px] text-[var(--hud-violet)] tracking-wide">
               {template.map((w) => getDisplayLabel(w)).join("  ")}
             </div>
-            <div className="text-[12px] text-[#ccd6e0] mt-0.5">{preview.text}</div>
-            <div className="text-[9px] text-[#556677] font-mono mt-1">
+            <div className="text-[12px] text-[var(--hud-text)] mt-0.5">{preview.text}</div>
+            <div className="text-[9px] text-[var(--hud-dim)] font-mono mt-1">
               {template.join(" ")} · 已采 {done}/{RECOMMENDED_PER_TEMPLATE}
               {preview.rule === null && "（顺句规则没命中，上面是原样拼接）"}
             </div>
-            <div className="text-[9px] text-[#556677] mt-2 leading-relaxed">
+            <div className="text-[9px] text-[var(--hud-dim)] mt-2 leading-relaxed">
               连着打完整句，词之间不要停顿。打完把手停住不动，{SETTLE_MS}ms
               后自动收句入库。
             </div>
@@ -756,12 +756,12 @@ export default function CollectSentence() {
           {lastSample && energy && (
             <div className="cyber-panel p-3 rounded-sm">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+                <span className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                   Last Take — Motion Energy
                 </span>
                 <button
                   onClick={() => handleDelete(lastSampleId ?? undefined)}
-                  className="cyber-btn px-2 py-1 rounded-sm text-[10px] text-[#ff2d7b]"
+                  className="cyber-btn px-2 py-1 rounded-sm text-[10px] text-[var(--hud-err)]"
                 >
                   <Trash2 className="w-3 h-3 inline mr-1" />
                   删除这条
@@ -794,7 +794,7 @@ export default function CollectSentence() {
             </div>
           )}
 
-          <div className="text-[9px] text-[#334455] font-mono leading-relaxed">
+          <div className="text-[9px] text-[var(--hud-faint)] font-mono leading-relaxed">
             视觉只做标注：关键点一个都不进模型输入（合成数据也一律丢掉视觉），
             部署端没有摄像头。它的两个用途是给裁剪补上可见段判据、以及量出词间过渡的
             真实时长去校准合成端的 overlap_ms（现在那个 100~250ms 是估的）。
@@ -802,33 +802,33 @@ export default function CollectSentence() {
         </div>
 
         {/* 右：这个句型已有的样本 */}
-        <div className="w-72 border-l border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+        <div className="w-72 border-l border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
             {template.map((w) => getDisplayLabel(w)).join(" ")} — {samples.length} 条
           </div>
           {samples.length === 0 && (
-            <div className="text-[10px] text-[#334455] font-mono">还没有样本</div>
+            <div className="text-[10px] text-[var(--hud-faint)] font-mono">还没有样本</div>
           )}
           {/* 过渡时长汇总。`usable/total` 必须一起显示：只报中位数会被当成全体的结论 */}
           {transitionSummary.total > 0 && (
-            <div className="px-2 py-1.5 rounded-sm border border-[#a855f7]/20 bg-[#a855f7]/5">
-              <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="px-2 py-1.5 rounded-sm border border-[#7c3aed]/20 bg-[#7c3aed]/5">
+              <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                 词间过渡（overlap_ms 依据）
               </div>
               {transitionSummary.usable === 0 ? (
-                <div className="text-[9px] text-[#f59e0b] font-mono mt-0.5 leading-relaxed">
+                <div className="text-[9px] text-[var(--hud-warn)] font-mono mt-0.5 leading-relaxed">
                   {transitionSummary.total} 条里 0 条可用 —— 没有视觉，或分段与词数对不上
                 </div>
               ) : (
                 <>
-                  <div className="text-[11px] font-mono text-[#a855f7] mt-0.5">
+                  <div className="text-[11px] font-mono text-[var(--hud-violet)] mt-0.5">
                     中位 {Math.round(transitionSummary.medianMoveMs)}ms
-                    <span className="text-[#556677] text-[9px] ml-1">
+                    <span className="text-[var(--hud-dim)] text-[9px] ml-1">
                       （p10 {Math.round(transitionSummary.p10MoveMs)} / p90{" "}
                       {Math.round(transitionSummary.p90MoveMs)}）
                     </span>
                   </div>
-                  <div className="text-[9px] text-[#556677] font-mono mt-0.5">
+                  <div className="text-[9px] text-[var(--hud-dim)] font-mono mt-0.5">
                     {transitionSummary.usable}/{transitionSummary.total} 条可用 · 合成端现用
                     100~250ms
                   </div>
@@ -841,23 +841,23 @@ export default function CollectSentence() {
             return (
               <div
                 key={s.id}
-                className="flex items-center justify-between px-2 py-1.5 rounded-sm border border-[#00f0ff]/10"
+                className="flex items-center justify-between px-2 py-1.5 rounded-sm border border-[#1677ff]/10"
               >
-                <div className="text-[10px] font-mono text-[#ccd6e0]">
+                <div className="text-[10px] font-mono text-[var(--hud-text)]">
                   #{s.id}
-                  <span className="text-[#556677] ml-2">
+                  <span className="text-[var(--hud-dim)] ml-2">
                     {s.frameCount}f / {Math.round(s.durationMs)}ms
                   </span>
                   <div className="text-[9px]" style={{ color: v.color }}>
                     {Math.round(v.perWordMs)}ms/词
                     {s.origin === "synthesized" && (
-                      <span className="text-[#f59e0b] ml-1">合成</span>
+                      <span className="text-[var(--hud-warn)] ml-1">合成</span>
                     )}
                   </div>
                 </div>
                 <button
                   onClick={() => handleDelete(s.id)}
-                  className="text-[#ff2d7b] hover:text-[#ff6b9d]"
+                  className="text-[var(--hud-err)] hover:text-[var(--hud-err-hover)]"
                   title="删除这条"
                 >
                   <Trash2 className="w-3 h-3" />
@@ -882,8 +882,8 @@ function CaptureBanner({ ui }: { ui: CaptureUi }) {
   if (ui.state === "idle") {
     return (
       <div>
-        <div className="text-[24px] text-[#556677]">待机</div>
-        <div className="text-[10px] text-[#556677] font-mono mt-1">
+        <div className="text-[24px] text-[var(--hud-dim)]">待机</div>
+        <div className="text-[10px] text-[var(--hud-dim)] font-mono mt-1">
           按空格 → 见到你起手自动开始录
         </div>
       </div>
@@ -892,8 +892,8 @@ function CaptureBanner({ ui }: { ui: CaptureUi }) {
   if (ui.state === "armed") {
     return (
       <div>
-        <div className="text-[24px] text-[#f59e0b]">等你起手</div>
-        <div className="text-[10px] text-[#f59e0b] font-mono mt-1">
+        <div className="text-[24px] text-[var(--hud-warn)]">等你起手</div>
+        <div className="text-[10px] text-[var(--hud-warn)] font-mono mt-1">
           {((ui.armRemainMs ?? 0) / 1000).toFixed(1)}s 内没动作就放弃这一句
         </div>
       </div>
@@ -902,10 +902,10 @@ function CaptureBanner({ ui }: { ui: CaptureUi }) {
   if (ui.state === "capturing") {
     return (
       <div>
-        <div className="text-[24px] text-[#ff2d7b]">
+        <div className="text-[24px] text-[var(--hud-err)]">
           正在录 {(ui.elapsedMs / 1000).toFixed(1)}s
         </div>
-        <div className="text-[10px] text-[#556677] font-mono mt-1">
+        <div className="text-[10px] text-[var(--hud-dim)] font-mono mt-1">
           连着打完，词之间不要停。上限 {MAX_UTTERANCE_MS / 1000}s
         </div>
       </div>
@@ -915,19 +915,19 @@ function CaptureBanner({ ui }: { ui: CaptureUi }) {
   const remain = ui.settleRemainMs ?? 0;
   return (
     <div>
-      <div className="text-[24px] text-[#00e5a0]">
+      <div className="text-[24px] text-[var(--hud-ok)]">
         停手中… {(remain / 1000).toFixed(1)}s 后收句
       </div>
       {/* 进度条读状态机报的实时门限，不读常量：采集页 `adaptive` 是 false、
           门限恒等于 `SETTLE_MS`，所以这一行行为不变；但常量和实际判据一旦分家，
           条子会填满后卡在 100% 干等 */}
-      <div className="h-1.5 mt-2 rounded-sm bg-[#00e5a0]/15 overflow-hidden">
+      <div className="h-1.5 mt-2 rounded-sm bg-[#16a34a]/15 overflow-hidden">
         <div
-          className="h-full bg-[#00e5a0] transition-[width] duration-100"
+          className="h-full bg-[var(--hud-ok)] transition-[width] duration-100"
           style={{ width: `${(1 - remain / ui.settleMs) * 100}%` }}
         />
       </div>
-      <div className="text-[10px] text-[#556677] font-mono mt-1">
+      <div className="text-[10px] text-[var(--hud-dim)] font-mono mt-1">
         又动一下就回到"正在录"（词间过渡不算句尾）
       </div>
     </div>
@@ -952,25 +952,25 @@ function perWordVerdict(s: SequenceSample): {
   if (perWordMs < MIN_MS_PER_WORD) {
     return {
       perWordMs,
-      color: "#ff2d7b",
+      color: "var(--hud-err)",
       note: `每词只有 ${Math.round(perWordMs)}ms —— 打太快了，很可能漏词，建议删掉重录`,
     };
   }
   if (perWordMs > MAX_MS_PER_WORD) {
     return {
       perWordMs,
-      color: "#f59e0b",
+      color: "var(--hud-warn)",
       note: `每词 ${Math.round(perWordMs)}ms —— 词之间大概停顿了。连续手语不该有停顿（合成数据里也没有），模型会学错`,
     };
   }
-  return { perWordMs, color: "#00f0ff", note: null };
+  return { perWordMs, color: "var(--hud-accent)", note: null };
 }
 
 function PerWordMetric({ sample }: { sample: SequenceSample }) {
   const v = perWordVerdict(sample);
   return (
     <div>
-      <div className="text-[#556677] uppercase text-[8px]">每词时长</div>
+      <div className="text-[var(--hud-dim)] uppercase text-[8px]">每词时长</div>
       <div style={{ color: v.color }}>{Math.round(v.perWordMs)}ms</div>
     </div>
   );
@@ -996,12 +996,12 @@ function TransitionLine({
 }) {
   const v = transitionVerdict(transitions, wordCount);
   const color =
-    v.kind === "match" ? "#a855f7" : v.kind === "unmeasured" ? "#556677" : "#f59e0b";
+    v.kind === "match" ? "var(--hud-violet)" : v.kind === "unmeasured" ? "var(--hud-dim)" : "var(--hud-warn)";
   return (
     <div className="text-[9px] font-mono mt-1.5 leading-relaxed" style={{ color }}>
       {v.note}
       {v.kind !== "unmeasured" && (
-        <span className="text-[#334455] ml-1">
+        <span className="text-[var(--hud-faint)] ml-1">
           · 视觉覆盖 {Math.round(coverage * 100)}%
         </span>
       )}

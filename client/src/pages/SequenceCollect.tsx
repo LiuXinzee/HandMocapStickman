@@ -290,9 +290,9 @@ export default function SequenceCollect() {
   return (
     <div
       className="h-screen overflow-hidden flex flex-col"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -301,22 +301,22 @@ export default function SequenceCollect() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
+          <div className="w-px h-5 bg-[#1677ff]/20" />
           <span
             className="text-xs font-bold tracking-widest"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
               // 紫色是时序链路的标识色，与 /translate 的 MODE 开关、/train-seq 一致；
               // 青色留给静态链路。进错页面时颜色比文字先被注意到
-              color: "#a855f7",
+              color: "var(--hud-violet)",
             }}
           >
             SEQUENCE COLLECTION
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             时序滑窗 · 动态词
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             DYNAMIC WORD / TEMPORAL
           </span>
         </div>
@@ -324,18 +324,18 @@ export default function SequenceCollect() {
           <div className="flex items-center gap-4 text-[10px] font-mono">
             <span
               className={
-                cameraRunning ? "text-[#00e5a0]" : "text-[#556677]"
+                cameraRunning ? "text-[var(--hud-ok)]" : "text-[var(--hud-dim)]"
               }
             >
               <Camera className="w-3 h-3 inline mr-1" />
               {cameraRunning ? `CAM ${cameraFps}fps` : "CAM OFF"}
             </span>
-            <span className="text-[#556677]">
+            <span className="text-[var(--hud-dim)]">
               SEQ:{" "}
-              <span className="text-[#00f0ff]">
+              <span className="text-[var(--hud-accent)]">
                 {stats?.totalSequences ?? 0}
               </span>
-              <span className="text-[#334455]">
+              <span className="text-[var(--hud-faint)]">
                 {" "}
                 ({stats?.recordedCount ?? 0}真/{stats?.synthesizedCount ?? 0}合)
               </span>
@@ -348,15 +348,17 @@ export default function SequenceCollect() {
 
       <div className="flex-1 flex overflow-hidden">
         {/* 左：词汇 */}
-        <div className="w-64 border-r border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-3">
+        <div className="w-64 border-r border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-3">
           <div className="space-y-1.5">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Category Filter
             </div>
             <div className="flex flex-wrap gap-1">
+              {/* ⚠ 这里必须是十六进制字面量，不能写 var(--hud-accent)：
+                    CategoryChip 里会拼 `${color}80` 做透明度 */}
               <CategoryChip
                 label="全部"
-                color="#00f0ff"
+                color="#1677ff"
                 active={selectedCategory === "all"}
                 onClick={() => setSelectedCategory("all")}
               />
@@ -373,7 +375,7 @@ export default function SequenceCollect() {
           </div>
 
           <div className="space-y-1">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               Vocabulary ({words.length})
             </div>
             {words.map((w) => {
@@ -389,8 +391,8 @@ export default function SequenceCollect() {
                   onClick={() => setSelectedWord(w)}
                   className={`w-full text-left px-2.5 py-2 rounded-sm border transition-all duration-150 ${
                     selected
-                      ? "border-[#00f0ff]/60 bg-[#00f0ff]/10"
-                      : "border-[#00f0ff]/10 hover:border-[#00f0ff]/30"
+                      ? "border-[#1677ff]/60 bg-[#1677ff]/10"
+                      : "border-[#1677ff]/10 hover:border-[#1677ff]/30"
                   }`}
                 >
                   <div className="flex items-center justify-between">
@@ -400,15 +402,15 @@ export default function SequenceCollect() {
                         style={{
                           backgroundColor:
                             w.id === IDLE_LABEL
-                              ? "#556677"
+                              ? "var(--hud-dim)"
                               : getCategoryColor(w.category),
                         }}
                       />
-                      <span className="text-[11px] text-[#ccd6e0]">
+                      <span className="text-[11px] text-[var(--hud-text)]">
                         {w.label}
                       </span>
                       {w.dynamic && (
-                        <span className="text-[8px] font-mono text-[#a855f7] border border-[#a855f7]/40 px-1 rounded-sm">
+                        <span className="text-[8px] font-mono text-[var(--hud-violet)] border border-[#7c3aed]/40 px-1 rounded-sm">
                           DYN
                         </span>
                       )}
@@ -418,15 +420,15 @@ export default function SequenceCollect() {
                       style={{
                         color:
                           recorded >= target
-                            ? "#00e5a0"
+                            ? "var(--hud-ok)"
                             : recorded > 0
-                              ? "#f59e0b"
-                              : "#334455",
+                              ? "var(--hud-warn)"
+                              : "var(--hud-faint)",
                       }}
                     >
                       {recorded}
                       {synth > 0 && (
-                        <span className="text-[#334455]">+{synth}</span>
+                        <span className="text-[var(--hud-faint)]">+{synth}</span>
                       )}
                     </span>
                   </div>
@@ -440,7 +442,7 @@ export default function SequenceCollect() {
         <div className="flex-1 min-h-0 flex flex-col p-4 gap-3 overflow-y-auto">
           <div className="cyber-panel p-3 rounded-sm">
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+              <span className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                 Live Preview
               </span>
               <div className="flex gap-2">
@@ -463,7 +465,7 @@ export default function SequenceCollect() {
               videoRef={videoRef}
             />
             {cameraError && (
-              <div className="text-[10px] text-[#ff2d7b] mt-1 font-mono">
+              <div className="text-[10px] text-[var(--hud-err)] mt-1 font-mono">
                 {cameraError}
               </div>
             )}
@@ -473,23 +475,23 @@ export default function SequenceCollect() {
           <div className="cyber-panel p-3 rounded-sm">
             <div className="flex items-center justify-between mb-3">
               <div>
-                <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+                <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                   Target
                 </div>
-                <div className="text-[15px] text-[#00f0ff]">
+                <div className="text-[15px] text-[var(--hud-accent)]">
                   {selectedWord.label}
                 </div>
-                <div className="text-[10px] text-[#556677] mt-0.5">
+                <div className="text-[10px] text-[var(--hud-dim)] mt-0.5">
                   {selectedWord.description}
                 </div>
               </div>
-              <div className="text-right font-mono text-[10px] text-[#556677]">
+              <div className="text-right font-mono text-[10px] text-[var(--hud-dim)]">
                 <div>
                   L {recorder.stats.leftFrames} / R{" "}
                   {recorder.stats.rightFrames}
                 </div>
                 <div>VIS {recorder.stats.visionFrames}</div>
-                <div className="text-[#00f0ff]">
+                <div className="text-[var(--hud-accent)]">
                   {Math.round(recorder.stats.elapsedMs)}ms
                 </div>
               </div>
@@ -501,8 +503,8 @@ export default function SequenceCollect() {
                 disabled={!gloveConnected || countdown > 0}
                 className={`flex-1 py-3 rounded-sm border text-[12px] font-mono tracking-wider transition-all ${
                   recorder.isRecording
-                    ? "border-[#ff2d7b] bg-[#ff2d7b]/20 text-[#ff2d7b]"
-                    : "border-[#00f0ff]/40 text-[#00f0ff] hover:bg-[#00f0ff]/10"
+                    ? "border-[var(--hud-err)] bg-[#e11d48]/20 text-[var(--hud-err)]"
+                    : "border-[#1677ff]/40 text-[var(--hud-accent)] hover:bg-[#1677ff]/10"
                 }`}
               >
                 {recorder.isRecording ? (
@@ -527,14 +529,14 @@ export default function SequenceCollect() {
             </div>
 
             {!bothReady && (
-              <div className="text-[10px] text-[#f59e0b] mt-2 font-mono">
+              <div className="text-[10px] text-[var(--hud-warn)] mt-2 font-mono">
                 {!gloveConnected
                   ? "手套未连接 —— 触觉是部署时唯一的输入，必须连"
                   : "摄像头未启动 —— 不开就没有视觉教师，只能训出无蒸馏的学生"}
               </div>
             )}
             {message && (
-              <div className="text-[10px] text-[#00e5a0] mt-2 font-mono">
+              <div className="text-[10px] text-[var(--hud-ok)] mt-2 font-mono">
                 {message}
               </div>
             )}
@@ -544,12 +546,12 @@ export default function SequenceCollect() {
           {lastSample && energy && (
             <div className="cyber-panel p-3 rounded-sm">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+                <span className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                   Last Take — Motion Energy
                 </span>
                 <button
                   onClick={() => handleDelete(lastSampleId ?? undefined)}
-                  className="cyber-btn px-2 py-1 rounded-sm text-[10px] text-[#ff2d7b]"
+                  className="cyber-btn px-2 py-1 rounded-sm text-[10px] text-[var(--hud-err)]"
                 >
                   <Trash2 className="w-3 h-3 inline mr-1" />
                   删除这条
@@ -578,16 +580,16 @@ export default function SequenceCollect() {
         </div>
 
         {/* 右：该词已有样本 */}
-        <div className="w-72 border-l border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
+        <div className="w-72 border-l border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-2">
           <div className="flex items-center justify-between gap-2">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
               {getDisplayLabel(selectedWord.id)} — {labelSamples.length} 条
             </div>
             {/* 只在真有样本时出现：空列表上摆一个"全删"只会让人误点 */}
             {labelSamples.length > 0 && (
               <button
                 onClick={handleDeleteAllOfWord}
-                className="text-[9px] font-mono text-[#556677] hover:text-[#ff2d7b] transition-colors shrink-0"
+                className="text-[9px] font-mono text-[var(--hud-dim)] hover:text-[var(--hud-err)] transition-colors shrink-0"
                 title="删除这个词的全部样本（换打法重录时用）"
               >
                 全部删除
@@ -595,27 +597,27 @@ export default function SequenceCollect() {
             )}
           </div>
           {labelSamples.length === 0 && (
-            <div className="text-[10px] text-[#334455] font-mono">
+            <div className="text-[10px] text-[var(--hud-faint)] font-mono">
               还没有样本
             </div>
           )}
           {labelSamples.map((s) => (
             <div
               key={s.id}
-              className="flex items-center justify-between px-2 py-1.5 rounded-sm border border-[#00f0ff]/10"
+              className="flex items-center justify-between px-2 py-1.5 rounded-sm border border-[#1677ff]/10"
             >
-              <div className="text-[10px] font-mono text-[#ccd6e0]">
+              <div className="text-[10px] font-mono text-[var(--hud-text)]">
                 #{s.id}
-                <span className="text-[#556677] ml-2">
+                <span className="text-[var(--hud-dim)] ml-2">
                   {s.frameCount}f / {Math.round(s.durationMs)}ms
                 </span>
                 {s.origin === "synthesized" && (
-                  <span className="text-[8px] text-[#f59e0b] ml-1">合成</span>
+                  <span className="text-[8px] text-[var(--hud-warn)] ml-1">合成</span>
                 )}
               </div>
               <button
                 onClick={() => handleDelete(s.id)}
-                className="text-[#ff2d7b] hover:text-[#ff6b9d]"
+                className="text-[var(--hud-err)] hover:text-[var(--hud-err-hover)]"
                 title="删除这条"
               >
                 <Trash2 className="w-3 h-3" />
@@ -644,8 +646,8 @@ function CategoryChip({
       onClick={onClick}
       className="px-2 py-0.5 rounded-sm text-[9px] font-mono border transition-all"
       style={{
-        borderColor: active ? color : "#00f0ff20",
-        color: active ? color : "#556677",
+        borderColor: active ? color : "#1677ff20",
+        color: active ? color : "var(--hud-dim)",
         backgroundColor: active ? `${color}15` : "transparent",
       }}
     >

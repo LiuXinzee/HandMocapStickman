@@ -48,6 +48,16 @@ export interface AxisQuality {
   separationDeg: number;
 }
 
+/**
+ * 重力核对的结论（见 `validateAxisMapWithGravity`）。
+ * `upY` 是"零位那一刻传感器测到的上，经矩阵换算到模型系之后的 Y 分量"，
+ * 期望 +1；`corrected` 表示解出来的矩阵整体翻转了、已被自动纠正。
+ */
+export interface GravityCheck {
+  upY: number;
+  corrected: boolean;
+}
+
 export interface OrientationCalib {
   /** 竖立、**手心朝自己** 的姿态四元数 = 零位（约定见文件头，改不得） */
   reference: Quat;
@@ -58,6 +68,8 @@ export interface OrientationCalib {
   /** 3×3 轴向重映射；缺省表示只做了零位（轴向识别没通过门限） */
   axisMap?: number[][];
   axisQuality?: AxisQuality;
+  /** 重力核对结论；缺省表示这次没做（手套不上报加速度，或零位那步没采到） */
+  gravityCheck?: GravityCheck;
 }
 
 /**
@@ -227,16 +239,114 @@ export function buildAxisMap(
   return map;
 }
 
+/** 3×3 矩阵作用在向量上 */
+export function applyMap(map: number[][], v: Vec3): Vec3 {
+  return [
+    map[0][0] * v[0] + map[0][1] * v[1] + map[0][2] * v[2],
+    map[1][0] * v[0] + map[1][1] * v[1] + map[1][2] * v[2],
+    map[2][0] * v[0] + map[2][1] * v[1] + map[2][2] * v[2],
+  ];
+}
+
+/**
+ * 绕单位轴 m 转 180° 的旋转矩阵，Rodrigues 在 θ=180° 的退化形式：`R = 2mmᵀ − I`。
+ * 对 m = (−1,0,0) 就是 diag(1,−1,−1)。这里按 m 通用地算，
+ * 免得 `MODEL_MOTION_AXES` 哪天改了俯仰轴、这段却还写死成 diag。
+ */
+function rotation180About(m: Vec3): number[][] {
+  const n = normalize3(m);
+  if (!n) return [[1,0,0],[0,1,0],[0,0,1]];
+  const out: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let r = 0; r < 3; r++)
+    for (let c = 0; c < 3; c++) out[r][c] = 2 * n[r] * n[c] - (r === c ? 1 : 0);
+  return out;
+}
+
+function matMul(a: number[][], b: number[][]): number[][] {
+  const out: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
+  for (let r = 0; r < 3; r++)
+    for (let c = 0; c < 3; c++)
+      for (let k = 0; k < 3; k++) out[r][c] += a[r][k] * b[k][c];
+  return out;
+}
+
+/**
+ * 判据的容差：|upY| 要过这个数才敢下结论（cos 60° = 0.5，即偏差 60° 以内）。
+ * 松是故意的 —— 这一关只用来分辨"正着"和"整体翻转 180°"这两种相差极远的情况，
+ * 不是用来量精度的。零位那步前臂没竖直、或人没站直，都会让 upY 离 ±1 有距离。
+ */
+const GRAVITY_DECISIVE = 0.5;
+
+/**
+ * 用**重力**核对轴向矩阵有没有整体翻转，翻了就纠正回来。
+ *
+ * ===== 为什么需要这一关 =====
+ *
+ * `buildAxisMap` 只吃两个**转轴**，而转轴反解不出方向的正负：③ 那步左手往内翻还是
+ * 往外翻，实测转轴恰好差一个负号。往外翻的话 s₂ → −s₂、s₃ = s₁×s₂ → −s₃，于是
+ *
+ *   A' = m₁s₁ᵀ − m₂s₂ᵀ − m₃s₃ᵀ = R_{m₁}(180°) · A
+ *
+ * —— 一个**合法的旋转矩阵**，`buildAxisMap` 从不失败，三个质量数（俯仰 90°、
+ * 偏摆 90°、分离 90°）也**全部正常**。界面只显示一个绿色✓，而用户看到的是：
+ * 绕模型 Y/Z 的旋转全部反号、绕 X 的正确。摆"拇指朝上"显示成拇指朝下，
+ * 手指方向也跟着左右镜像。这是三个质量数结构上抓不到的一类错。
+ *
+ * ===== 判据 =====
+ *
+ * 静止时加速度计测的是**比力**，方向朝上（`imuHealth.ts` 拿 `acc` 与
+ * `gravityInHandFrame(q) = R⁻¹·[0,0,1]` 比夹角，两者同向，见那里的注释）。
+ * 零位那一步前臂竖直、指尖朝上，模型此刻是单位旋转，所以**模型系的上就是 +Y**：
+ *
+ *   A · normalize(acc_零位) ≈ (0, +1, 0)
+ *
+ * 翻转的那份会得到 R_{m₁}(180°)·(0,1,0) = (0,−1,0)，相差整整 180° —— 这两种情况
+ * 离得足够远，用一个很松的门限（`GRAVITY_DECISIVE`）就分得开。纠正就是再乘一次
+ * R_{m₁}(180°)（它是自逆的）。
+ *
+ * ===== 这一关抓不到什么 =====
+ *
+ * 重力只定一个方向，所以绕**竖直轴**的误差它看不见 —— 也就是② 零位做成"手心朝
+ * 屏幕"（差 180° 绕 Y）那种。那种错另有信号：① 会从 90° 变成 180° 复合旋转，
+ * 被 `FLIP_RISK_DEG` 那条警告拦下。两条互补，都不能省。
+ *
+ * @param acc 零位那一步的平均加速度（原始机体系）。null / 近零 / 旧款手套不上报
+ *   → 返回 null，表示这次没法核对（**不是**"核对通过"，调用方要区分开）。
+ */
+export function validateAxisMapWithGravity(
+  handKey: HandKey,
+  map: number[][],
+  acc: Vec3 | null
+): { map: number[][]; check: GravityCheck } | null {
+  if (!acc) return null;
+  const up = normalize3(acc);
+  if (!up) return null; // 全零：这一路没数据，不是"朝下"
+  const upY = applyMap(map, up)[1];
+  if (upY >= GRAVITY_DECISIVE) return { map, check: { upY, corrected: false } };
+  if (upY <= -GRAVITY_DECISIVE) {
+    const fixed = matMul(rotation180About(MODEL_MOTION_AXES[handKey].pitch), map);
+    return { map: fixed, check: { upY, corrected: true } };
+  }
+  // 落在中间带：零位那步大概没竖直（或者人没站直），不足以下结论。
+  // 既不纠正也不算通过 —— 把 upY 原样带出去，由 axisQualityWarning 提示重做。
+  return { map, check: { upY, corrected: false } };
+}
+
 /**
  * 从向导四步采到的三个姿态四元数组装一份标定。
  * 零位（竖立）是必需的；平铺与手心相对齐了才尝试轴向识别，
  * 没过门限就只留零位 —— 宁可少修一层，也不要用一个乱解出来的矩阵把朝向搅得更差。
+ *
+ * @param zeroAcc 零位那一步的平均加速度。给了就用重力核对矩阵有没有整体翻转
+ *   （见 `validateAxisMapWithGravity`）—— 这是唯一能拦住"③ 翻反方向"的一关，
+ *   三个质量数对那种错是全绿的。旧款手套不上报加速度，传 null 即可。
  */
 export function assembleOrientationCalib(
   handKey: HandKey,
   zero: Quat | null,
   flat: Quat | null,
-  palmsIn: Quat | null
+  palmsIn: Quat | null,
+  zeroAcc: Vec3 | null = null
 ): OrientationCalib | null {
   if (!zero) return null;
   const calib: OrientationCalib = { reference: zero };
@@ -269,7 +379,11 @@ export function assembleOrientationCalib(
     axes.pitch,
     axes.swing
   );
-  if (map) calib.axisMap = map;
+  if (!map) return calib;
+  // 重力核对：③ 翻反方向解出来的矩阵在这里才会露出来（三个质量数是全绿的）
+  const checked = validateAxisMapWithGravity(handKey, map, zeroAcc);
+  calib.axisMap = checked ? checked.map : map;
+  if (checked) calib.gravityCheck = checked.check;
   return calib;
 }
 
@@ -292,14 +406,26 @@ export function axisMapFailReason(calib: OrientationCalib): string | null {
  * 那个管"没写入"，这个管"写进去了却不好使"—— 后者才是实际踩到的坑，
  * 因为过了门限界面就只显示一个绿色的✓，用户没有任何线索知道该重做。
  *
- * 三种情况，按危害排：
- *  1. 转角接近 180° → 转轴符号不稳（见 `FLIP_RISK_DEG`）
- *  2. 转角远离 90° → 转过头/没转够，轴向本身仍可用但精度差
- *  3. 轴分离远离 90° → Gram-Schmidt 补出来的成分占比大
+ * 四种情况，按危害排：
+ *  1. 重力核对没定论 → 零位那步前臂没竖直，整体翻转这一关等于没设防（见下）
+ *  2. 转角接近 180° → 转轴符号不稳（见 `FLIP_RISK_DEG`）
+ *  3. 转角远离 90° → 转过头/没转够，轴向本身仍可用但精度差
+ *  4. 轴分离远离 90° → Gram-Schmidt 补出来的成分占比大
+ *
+ * "已自动纠正翻转"**不在这里报** —— 那是个已解决的事实，不是待办警告，
+ * 由向导汇总那边当普通结论显示（`gravityCheck.corrected`）。
  */
 export function axisQualityWarning(calib: OrientationCalib): string | null {
   const q = calib.axisQuality;
   if (!calib.axisMap || !q) return null;
+  const g = calib.gravityCheck;
+  if (g && Math.abs(g.upY) < GRAVITY_DECISIVE) {
+    return (
+      `重力核对没定论（零位那步测到的"上"换算到模型系只有 ${g.upY.toFixed(2)}，` +
+      `应接近 +1）—— 说明②竖立那步前臂没真正竖直。这一关是唯一能拦住"③翻反方向"的，` +
+      `没过就等于没设防：建议站直、前臂竖直，重做一遍`
+    );
+  }
   const flip = [
     ["平铺", q.pitchDeg],
     ["手心相对", q.swingDeg],
@@ -376,6 +502,13 @@ export function loadOrientationCalib(hand: HandKey): OrientationCalib | null {
     if (!isValidQuat(parsed?.reference)) return null;
     // 矩阵脏了就丢掉矩阵、保留零位：零位仍然有用，而坏矩阵会把朝向彻底搅乱
     if (parsed.axisMap && !isValidMap(parsed.axisMap)) delete parsed.axisMap;
+    // 矩阵没了，重力结论就是无主的；留着会让界面报一份不存在矩阵的核对结果
+    if (!parsed.axisMap) delete parsed.gravityCheck;
+    if (
+      parsed.gravityCheck &&
+      !isFinite(parsed.gravityCheck.upY as unknown as number)
+    )
+      delete parsed.gravityCheck;
     return parsed;
   } catch {
     return null;

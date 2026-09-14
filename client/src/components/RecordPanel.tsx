@@ -54,24 +54,24 @@ export default function RecordPanel({
         <DataRow
           label="STATUS"
           value={isRecording ? "● REC" : hasData ? "STOPPED" : "IDLE"}
-          color={isRecording ? "#ff2d7b" : hasData ? "#f59e0b" : "#556677"}
+          color={isRecording ? "var(--hud-err)" : hasData ? "var(--hud-warn)" : "var(--hud-dim)"}
         />
         {(isRecording || hasData) && (
           <>
             <DataRow
               label="DURATION"
               value={formatDuration(recordingDuration)}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <DataRow
               label="VIDEO"
               value={`${videoFrameCount} frames`}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <DataRow
               label="GLOVE"
               value={`${gloveFrameCount} frames`}
-              color={gloveConnected ? "#00e5a0" : "#556677"}
+              color={gloveConnected ? "var(--hud-ok)" : "var(--hud-dim)"}
             />
             {isRecording && videoFrameCount > 0 && (
               <DataRow
@@ -79,7 +79,7 @@ export default function RecordPanel({
                 value={`~${Math.round(
                   videoFrameCount / (recordingDuration / 1000 || 1)
                 )}`}
-                color="#556677"
+                color="var(--hud-dim)"
               />
             )}
             {isRecording && gloveFrameCount > 0 && (
@@ -88,7 +88,7 @@ export default function RecordPanel({
                 value={`~${Math.round(
                   gloveFrameCount / (recordingDuration / 1000 || 1)
                 )}`}
-                color="#556677"
+                color="var(--hud-dim)"
               />
             )}
           </>
@@ -97,13 +97,13 @@ export default function RecordPanel({
 
       {/* 同步指示 */}
       {isRecording && (
-        <div className="flex items-center gap-2 py-1 px-2 border border-[#ff2d7b]/30 rounded-sm bg-[#ff2d7b]/5">
-          <div className="w-2 h-2 rounded-full bg-[#ff2d7b] animate-pulse shadow-[0_0_8px_rgba(255,45,123,0.6)]" />
-          <span className="text-[9px] font-mono text-[#ff2d7b]">
+        <div className="flex items-center gap-2 py-1 px-2 border border-[#e11d48]/30 rounded-sm bg-[#e11d48]/5">
+          <div className="w-2 h-2 rounded-full bg-[var(--hud-err)] animate-pulse shadow-[0_0_8px_rgba(255,45,123,0.6)]" />
+          <span className="text-[9px] font-mono text-[var(--hud-err)]">
             同步录制中...
           </span>
           {!gloveConnected && (
-            <span className="text-[8px] font-mono text-[#f59e0b] ml-auto">
+            <span className="text-[8px] font-mono text-[var(--hud-warn)] ml-auto">
               仅视频
             </span>
           )}
@@ -118,7 +118,7 @@ export default function RecordPanel({
             className="flex-1 cyber-btn px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
             style={{
               borderColor: "rgba(255, 45, 123, 0.4)",
-              color: "#ff2d7b",
+              color: "var(--hud-err)",
             }}
           >
             <Circle className="w-3 h-3 fill-current" />
@@ -146,7 +146,7 @@ export default function RecordPanel({
               </button>
               {showExportMenu && (
                 <div
-                  className="absolute bottom-full left-0 mb-1 w-32 py-1 rounded-sm border border-[#00f0ff]/30 z-50"
+                  className="absolute bottom-full left-0 mb-1 w-32 py-1 rounded-sm border border-[#1677ff]/30 z-50"
                   style={{ backgroundColor: "rgba(10, 14, 26, 0.98)" }}
                 >
                   <button
@@ -154,7 +154,7 @@ export default function RecordPanel({
                       onExportCSV();
                       setShowExportMenu(false);
                     }}
-                    className="w-full text-left px-3 py-1.5 text-[10px] font-mono text-[#8899aa] hover:text-[#00f0ff] hover:bg-[#00f0ff]/5 transition-colors"
+                    className="w-full text-left px-3 py-1.5 text-[10px] font-mono text-[var(--hud-soft)] hover:text-[var(--hud-accent)] hover:bg-[#1677ff]/5 transition-colors"
                   >
                     同步 CSV
                   </button>
@@ -163,7 +163,7 @@ export default function RecordPanel({
                       onExportJSON();
                       setShowExportMenu(false);
                     }}
-                    className="w-full text-left px-3 py-1.5 text-[10px] font-mono text-[#8899aa] hover:text-[#00f0ff] hover:bg-[#00f0ff]/5 transition-colors"
+                    className="w-full text-left px-3 py-1.5 text-[10px] font-mono text-[var(--hud-soft)] hover:text-[var(--hud-accent)] hover:bg-[#1677ff]/5 transition-colors"
                   >
                     原始 JSON
                   </button>
@@ -183,10 +183,10 @@ export default function RecordPanel({
 
       {/* 提示信息 */}
       {!isRecording && !hasData && (
-        <div className="text-[9px] font-mono text-[#334455] leading-relaxed px-1">
+        <div className="text-[9px] font-mono text-[var(--hud-faint)] leading-relaxed px-1">
           点击录制按钮开始同步采集视频关键点和手套传感器数据。
           {!gloveConnected && (
-            <span className="text-[#f59e0b]">
+            <span className="text-[var(--hud-warn)]">
               {" "}
               未连接手套，将仅录制视频数据。
             </span>
@@ -199,13 +199,13 @@ export default function RecordPanel({
 
 function PanelHeader({ title }: { title: string }) {
   return (
-    <div className="flex items-center gap-2 pb-1 border-b border-[#00f0ff]/15">
-      <div className="w-1 h-3 bg-[#ff2d7b] rounded-full shadow-[0_0_4px_rgba(255,45,123,0.6)]" />
+    <div className="flex items-center gap-2 pb-1 border-b border-[#1677ff]/15">
+      <div className="w-1 h-3 bg-[var(--hud-err)] rounded-full shadow-[0_0_4px_rgba(255,45,123,0.6)]" />
       <span
         className="text-[10px] font-bold tracking-widest"
         style={{
           fontFamily: "'JetBrains Mono', monospace",
-          color: "#ff2d7b",
+          color: "var(--hud-err)",
         }}
       >
         {title}
@@ -217,7 +217,7 @@ function PanelHeader({ title }: { title: string }) {
 function DataRow({
   label,
   value,
-  color = "#00f0ff",
+  color = "var(--hud-accent)",
 }: {
   label: string;
   value: string;
@@ -225,8 +225,9 @@ function DataRow({
 }) {
   return (
     <div className="flex items-center justify-between text-[10px] font-mono">
-      <span style={{ color: "#556677" }}>{label}</span>
-      <span style={{ color, textShadow: `0 0 6px ${color}40` }}>{value}</span>
+      <span style={{ color: "var(--hud-dim)" }}>{label}</span>
+      {/* 浅色底不做辉光：白底描不出光晕，只会糊出一圈脏边 */}
+      <span style={{ color }}>{value}</span>
     </div>
   );
 }

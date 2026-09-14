@@ -64,12 +64,71 @@ export const IDLE_LABEL = "_idle";
 /** 空闲类的展示名（不在 SIGN_VOCABULARY 中，getWordById 查不到） */
 export const IDLE_DISPLAY_LABEL = "—";
 
+/*
+ * ===== 库里录制与词表描述不符的那批（08-13） =====
+ *
+ * 文件头那段把这件事写清楚了，但**只写在注释里**。这三个导出把它变成代码能读的
+ * 东西，起因很具体：翻译页的离线演示要"放库里的真录制"来驱动手模，而 `hello`
+ * 恰好就在这批里 —— 演示会一本正经地播一个已知是错的手势。注释拦不住那件事，
+ * 只有一份能查的名单能，页面上因此可以把这句话标在画面里。
+ *
+ * 两档分开，因为证据强度不同：`hello` 是按弯折特征逐段核对过的，其余是
+ * "同一批采的、同一个口径" 的连坐嫌疑，没有逐条查。合并成一档会让"已确认错"
+ * 和"待查"看起来一样重，而后者里已经出过一个 `sad`（查完是对的，已撤销）。
+ */
+
+/** 这批采集日期。写出来是为了让"是不是这批"能靠 `sample.timestamp` 自己判 */
+export const SUSPECT_BATCH_DATE = "2026-08-13";
+
+/** **已确认**与词表描述不符：库里的录制是旧口径的手势（见文件头 hello 那段） */
+export const WRONG_RECORDING_WORDS = ["hello"] as const;
+
+/**
+ * 同批**嫌疑**（未逐条核对）。`sad` 曾在此列，2026-08-30 查过是对的、已撤销 ——
+ * 别照着文件头那段旧名单把它加回来。
+ */
+export const SUSPECT_RECORDING_WORDS = [
+  "angry",
+  "goodbye",
+  "happy",
+  "help",
+  "sorry",
+  "study",
+  "thank_you",
+  "welcome",
+  "work",
+] as const;
+
+/**
+ * 这个词的库存录制可不可信。
+ *
+ * 传进来的应该是**原始词 id**，不是合并类 —— 合并类先过 `resolveToMember`，
+ * 否则 `merged_pron_sg` 永远查不中（名单里是 `you`/`he` 那一层的东西）。
+ */
+export function recordingCaveat(id: string): "wrong" | "suspect" | null {
+  if ((WRONG_RECORDING_WORDS as readonly string[]).includes(id)) return "wrong";
+  if ((SUSPECT_RECORDING_WORDS as readonly string[]).includes(id)) return "suspect";
+  return null;
+}
+
+/*
+ * 词类的标识色。
+ *
+ * ⚠ **必须是 6 位十六进制字面量，不能写成 `var(--hud-*)`**：调用方有
+ * `` `${color}80` `` 这种拼透明度后缀的用法（DataCollect / SequenceCollect 的
+ * CategoryChip、TrainSentence 的边框），var() 拼出来是非法色值、整条声明被丢掉。
+ *
+ * 原来这五个是给深色底调的高亮色（#00f0ff 青 / #00e5a0 绿 / #f59e0b 琥珀 /
+ * #ff2d7b 粉 / #a855f7 紫）。全站换浅色之后它们**不能留** —— 青和绿在白底上
+ * 对比度不到 1.5:1，而这些值除了当小色块，还直接当过识别结果那个 7xl 大字的
+ * 前景色，会变成看不见的字。现在这套是同色相压暗一档的版本。
+ */
 export const SIGN_CATEGORIES = [
-  { id: "greeting", label: "问候", color: "#00f0ff" },
-  { id: "number", label: "数字", color: "#00e5a0" },
-  { id: "daily", label: "日常", color: "#f59e0b" },
-  { id: "emotion", label: "情感", color: "#ff2d7b" },
-  { id: "action", label: "动作", color: "#a855f7" },
+  { id: "greeting", label: "问候", color: "#0e7490" },
+  { id: "number", label: "数字", color: "#047857" },
+  { id: "daily", label: "日常", color: "#b45309" },
+  { id: "emotion", label: "情感", color: "#be123c" },
+  { id: "action", label: "动作", color: "#6d28d9" },
 ] as const;
 
 export const SIGN_VOCABULARY: SignWord[] = [
@@ -201,7 +260,8 @@ export function getWordsByCategory(category: string): SignWord[] {
 }
 
 export function getCategoryColor(category: string): string {
-  return SIGN_CATEGORIES.find((c) => c.id === category)?.color ?? "#556677";
+  // 兜底也得是字面量，同上：调用方会往后面拼透明度
+  return SIGN_CATEGORIES.find((c) => c.id === category)?.color ?? "#7a8899";
 }
 
 /** 带轨迹的动态词 */

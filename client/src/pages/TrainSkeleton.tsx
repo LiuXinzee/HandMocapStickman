@@ -150,10 +150,10 @@ export default function TrainSkeleton() {
   return (
     <div
       className="min-h-screen flex flex-col"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -162,17 +162,17 @@ export default function TrainSkeleton() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
-          <span className="text-xs font-bold tracking-widest text-[#f59e0b] font-mono">
+          <div className="w-px h-5 bg-[#1677ff]/20" />
+          <span className="text-xs font-bold tracking-widest text-[var(--hud-warn)] font-mono">
             SKELETON REGRESSION
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             TACTILE → SKELETON
           </span>
         </div>
         <div className="flex items-center gap-3 text-[10px] font-mono">
           {modelLoaded && (
-            <span className="text-[#f59e0b] flex items-center gap-1">
+            <span className="text-[var(--hud-warn)] flex items-center gap-1">
               <Bone className="w-3 h-3" />
               SKELETON MODEL ACTIVE
             </span>
@@ -182,30 +182,30 @@ export default function TrainSkeleton() {
 
       <div className="flex-1 flex overflow-hidden">
         {/* 左侧：数据集和参数 */}
-        <div className="w-72 border-r border-[#00f0ff]/15 overflow-y-auto p-4 space-y-4 shrink-0">
+        <div className="w-72 border-r border-[#1677ff]/15 overflow-y-auto p-4 space-y-4 shrink-0">
           <Section title="DATASET">
             <DataRow
               label="TOTAL SAMPLES"
               value={String(stats?.totalSamples ?? 0)}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <DataRow
               label="WITH LANDMARKS"
               value={String(validSampleCount)}
-              color="#00e5a0"
+              color="var(--hud-ok)"
             />
             <DataRow
               label="INPUT DIM"
               value="141 (tactile)"
-              color="#f59e0b"
+              color="var(--hud-warn)"
             />
             <DataRow
               label="OUTPUT DIM"
               value="63 (skeleton)"
-              color="#da77f2"
+              color="var(--hud-wrist)"
             />
             {validSampleCount < (stats?.totalSamples ?? 0) && (
-              <p className="text-[8px] text-[#f59e0b] mt-1">
+              <p className="text-[8px] text-[var(--hud-warn)] mt-1">
                 ⚠ {(stats?.totalSamples ?? 0) - validSampleCount} 个样本缺少视觉数据，将被跳过
               </p>
             )}
@@ -254,7 +254,7 @@ export default function TrainSkeleton() {
           >
             {isTraining ? (
               <>
-                <div className="w-3 h-3 border border-[#f59e0b] border-t-transparent rounded-full animate-spin" />
+                <div className="w-3 h-3 border border-[var(--hud-warn)] border-t-transparent rounded-full animate-spin" />
                 训练中...
               </>
             ) : (
@@ -266,12 +266,12 @@ export default function TrainSkeleton() {
           </button>
 
           {validSampleCount < 10 && (
-            <p className="text-[9px] text-[#556677] text-center">
+            <p className="text-[9px] text-[var(--hud-dim)] text-center">
               需要至少 10 个含视觉骨架数据的样本
             </p>
           )}
 
-          <div className="pt-3 border-t border-[#00f0ff]/10 space-y-1.5">
+          <div className="pt-3 border-t border-[#1677ff]/10 space-y-1.5">
             <Link
               href="/collect"
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
@@ -293,19 +293,19 @@ export default function TrainSkeleton() {
           {isTraining && progress && (
             <div className="w-full max-w-lg space-y-4">
               <div className="text-center space-y-1">
-                <span className="text-sm font-mono text-[#f59e0b]">
+                <span className="text-sm font-mono text-[var(--hud-warn)]">
                   Epoch {progress.epoch} / {progress.totalEpochs}
                 </span>
-                <div className="text-[10px] font-mono text-[#8899aa]">
+                <div className="text-[10px] font-mono text-[var(--hud-soft)]">
                   触觉(141D) → 骨架(63D) 回归训练
                 </div>
               </div>
-              <div className="h-2 bg-[#1a2030] rounded-full overflow-hidden border border-[#f59e0b]/20">
+              <div className="h-2 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#d97706]/20">
                 <div
                   className="h-full rounded-full transition-all duration-300"
                   style={{
                     width: `${(progress.epoch / progress.totalEpochs) * 100}%`,
-                    background: "linear-gradient(90deg, #f59e0b, #00e5a0)",
+                    background: "linear-gradient(90deg, #d97706, #16a34a)",
                     boxShadow: "0 0 10px rgba(245,158,11,0.5)",
                   }}
                 />
@@ -314,22 +314,22 @@ export default function TrainSkeleton() {
                 <MetricCard
                   label="MSE Loss"
                   value={progress.loss.toFixed(6)}
-                  color="#ff2d7b"
+                  color="var(--hud-err)"
                 />
                 <MetricCard
                   label="Val Loss"
                   value={progress.valLoss.toFixed(6)}
-                  color="#f59e0b"
+                  color="var(--hud-warn)"
                 />
                 <MetricCard
                   label="MAE"
                   value={progress.mae.toFixed(6)}
-                  color="#00e5a0"
+                  color="var(--hud-ok)"
                 />
                 <MetricCard
                   label="Val MAE"
                   value={progress.valMae.toFixed(6)}
-                  color="#00f0ff"
+                  color="var(--hud-accent)"
                 />
               </div>
             </div>
@@ -343,11 +343,11 @@ export default function TrainSkeleton() {
 
           {!isTraining && history.length === 0 && (
             <div className="text-center space-y-3">
-              <Bone className="w-16 h-16 mx-auto text-[#334455]" />
-              <p className="text-sm text-[#556677]">
+              <Bone className="w-16 h-16 mx-auto text-[var(--hud-faint)]" />
+              <p className="text-sm text-[var(--hud-dim)]">
                 触觉 → 骨架回归训练
               </p>
-              <p className="text-[10px] text-[#334455] max-w-sm mx-auto">
+              <p className="text-[10px] text-[var(--hud-faint)] max-w-sm mx-auto">
                 用同步采集的视觉骨架关键点作为 ground truth，训练模型从触觉传感器数据预测手部骨架姿态。训练完成后，仅需手套即可驱动火柴人动画。
               </p>
             </div>
@@ -358,10 +358,10 @@ export default function TrainSkeleton() {
               className="text-[11px] font-mono px-4 py-2 rounded-sm border"
               style={{
                 color: message.startsWith("✓")
-                  ? "#00e5a0"
+                  ? "var(--hud-ok)"
                   : message.startsWith("✗")
-                  ? "#ff2d7b"
-                  : "#8899aa",
+                  ? "var(--hud-err)"
+                  : "var(--hud-soft)",
                 borderColor: message.startsWith("✓")
                   ? "rgba(0,229,160,0.3)"
                   : message.startsWith("✗")
@@ -375,10 +375,10 @@ export default function TrainSkeleton() {
         </div>
 
         {/* 右侧：已保存模型 */}
-        <div className="w-60 border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-3 shrink-0">
+        <div className="w-60 border-l border-[#1677ff]/15 overflow-y-auto p-3 space-y-3 shrink-0">
           <Section title="SAVED MODELS">
             {models.length === 0 ? (
-              <p className="text-[9px] text-[#334455] italic">暂无骨架模型</p>
+              <p className="text-[9px] text-[var(--hud-faint)] italic">暂无骨架模型</p>
             ) : (
               <div className="space-y-2">
                 {models.map((m) => (
@@ -387,17 +387,17 @@ export default function TrainSkeleton() {
                     className="cyber-panel p-2 rounded-sm space-y-1"
                   >
                     <div className="flex items-center justify-between">
-                      <span className="text-[9px] font-mono text-[#8899aa] truncate max-w-[120px]">
+                      <span className="text-[9px] font-mono text-[var(--hud-soft)] truncate max-w-[120px]">
                         {m.name}
                       </span>
                       <button
                         onClick={() => handleDeleteModel(m.id!)}
-                        className="text-[#556677] hover:text-[#ff2d7b] transition-colors"
+                        className="text-[var(--hud-dim)] hover:text-[var(--hud-err)] transition-colors"
                       >
                         <Trash2 className="w-2.5 h-2.5" />
                       </button>
                     </div>
-                    <div className="flex justify-between text-[8px] font-mono text-[#556677]">
+                    <div className="flex justify-between text-[8px] font-mono text-[var(--hud-dim)]">
                       <span>MAE: {m.valMae.toFixed(6)}</span>
                       <span>Loss: {m.valLoss.toFixed(6)}</span>
                     </div>
@@ -406,12 +406,12 @@ export default function TrainSkeleton() {
                         className="px-1 rounded-sm"
                         style={{
                           backgroundColor: "rgba(245,158,11,0.15)",
-                          color: "#f59e0b",
+                          color: "var(--hud-warn)",
                         }}
                       >
                         骨架回归
                       </span>
-                      <span className="text-[#334455]">
+                      <span className="text-[var(--hud-faint)]">
                         {new Date(m.createdAt).toLocaleDateString("zh-CN")}
                       </span>
                     </div>
@@ -430,16 +430,16 @@ export default function TrainSkeleton() {
           </Section>
 
           <Section title="ARCHITECTURE">
-            <div className="text-[8px] font-mono text-[#556677] space-y-0.5">
-              <p className="text-[#f59e0b]">— 回归网络 —</p>
+            <div className="text-[8px] font-mono text-[var(--hud-dim)] space-y-0.5">
+              <p className="text-[var(--hud-warn)]">— 回归网络 —</p>
               <p>Input: 141D (137 sensors + 4 quat)</p>
               <p>Dense(256) → BN → Drop(0.2)</p>
               <p>Dense(128) → BN → Drop(0.15)</p>
               <p>Dense(64) → Drop(0.1)</p>
               <p>Dense(63) → Sigmoid</p>
-              <p className="pt-1 text-[#334455]">Loss: MSE</p>
-              <p className="text-[#334455]">Metric: MAE</p>
-              <p className="text-[#334455]">Optimizer: Adam</p>
+              <p className="pt-1 text-[var(--hud-faint)]">Loss: MSE</p>
+              <p className="text-[var(--hud-faint)]">Metric: MAE</p>
+              <p className="text-[var(--hud-faint)]">Optimizer: Adam</p>
             </div>
           </Section>
         </div>
@@ -459,9 +459,9 @@ function Section({
 }) {
   return (
     <div className="space-y-2">
-      <div className="flex items-center gap-2 pb-1 border-b border-[#f59e0b]/15">
-        <div className="w-1 h-3 bg-[#f59e0b] rounded-full shadow-[0_0_4px_rgba(245,158,11,0.6)]" />
-        <span className="text-[10px] font-bold tracking-widest text-[#f59e0b] font-mono">
+      <div className="flex items-center gap-2 pb-1 border-b border-[#d97706]/15">
+        <div className="w-1 h-3 bg-[var(--hud-warn)] rounded-full shadow-[0_0_4px_rgba(245,158,11,0.6)]" />
+        <span className="text-[10px] font-bold tracking-widest text-[var(--hud-warn)] font-mono">
           {title}
         </span>
       </div>
@@ -481,7 +481,7 @@ function DataRow({
 }) {
   return (
     <div className="flex justify-between text-[10px] font-mono">
-      <span className="text-[#556677]">{label}</span>
+      <span className="text-[var(--hud-dim)]">{label}</span>
       <span style={{ color }}>{value}</span>
     </div>
   );
@@ -506,7 +506,7 @@ function ParamInput({
 }) {
   return (
     <div className="flex items-center justify-between text-[10px] font-mono">
-      <span className="text-[#556677]">{label}</span>
+      <span className="text-[var(--hud-dim)]">{label}</span>
       <input
         type="number"
         value={value}
@@ -519,7 +519,7 @@ function ParamInput({
         min={min}
         max={max}
         step={step}
-        className="w-16 bg-[#1a2030] border border-[#f59e0b]/20 rounded-sm px-1.5 py-0.5 text-[#f59e0b] text-center text-[10px]"
+        className="w-16 bg-[var(--hud-track)] border border-[#d97706]/20 rounded-sm px-1.5 py-0.5 text-[var(--hud-warn)] text-center text-[10px]"
       />
     </div>
   );
@@ -536,12 +536,13 @@ function MetricCard({
 }) {
   return (
     <div className="cyber-panel p-2 rounded-sm text-center">
-      <div className="text-[8px] font-mono text-[#556677] uppercase">
+      <div className="text-[8px] font-mono text-[var(--hud-dim)] uppercase">
         {label}
       </div>
       <div
         className="text-sm font-bold font-mono mt-0.5"
-        style={{ color, textShadow: `0 0 8px ${color}40` }}
+        /* 浅色底不做辉光：白底描不出光晕，只会糊出一圈脏边 */
+        style={{ color }}
       >
         {value}
       </div>
@@ -584,7 +585,7 @@ function RegressionChart({
 
   return (
     <div className="cyber-panel p-3 rounded-sm">
-      <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider mb-2">
+      <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-2">
         Regression Training Curves
       </div>
       <svg
@@ -603,16 +604,16 @@ function RegressionChart({
             strokeDasharray="4 4"
           />
         ))}
-        <path d={lossPath} fill="none" stroke="#ff2d7b" strokeWidth="1.5" opacity="0.8" />
-        <path d={valLossPath} fill="none" stroke="#f59e0b" strokeWidth="1.5" opacity="0.6" strokeDasharray="4 2" />
-        <path d={maePath} fill="none" stroke="#00e5a0" strokeWidth="1.5" opacity="0.8" />
-        <path d={valMaePath} fill="none" stroke="#00f0ff" strokeWidth="1.5" opacity="0.6" strokeDasharray="4 2" />
+        <path d={lossPath} fill="none" style={{ stroke: "var(--hud-err)" }} strokeWidth="1.5" opacity="0.8" />
+        <path d={valLossPath} fill="none" style={{ stroke: "var(--hud-warn)" }} strokeWidth="1.5" opacity="0.6" strokeDasharray="4 2" />
+        <path d={maePath} fill="none" style={{ stroke: "var(--hud-ok)" }} strokeWidth="1.5" opacity="0.8" />
+        <path d={valMaePath} fill="none" style={{ stroke: "var(--hud-accent)" }} strokeWidth="1.5" opacity="0.6" strokeDasharray="4 2" />
       </svg>
       <div className="flex items-center justify-center gap-4 mt-2 text-[8px] font-mono">
-        <Legend color="#ff2d7b" label="MSE Loss" />
-        <Legend color="#f59e0b" label="Val Loss" dashed />
-        <Legend color="#00e5a0" label="MAE" />
-        <Legend color="#00f0ff" label="Val MAE" dashed />
+        <Legend color="var(--hud-err)" label="MSE Loss" />
+        <Legend color="var(--hud-warn)" label="Val Loss" dashed />
+        <Legend color="var(--hud-ok)" label="MAE" />
+        <Legend color="var(--hud-accent)" label="Val MAE" dashed />
       </div>
     </div>
   );
@@ -636,7 +637,7 @@ function Legend({
           borderTop: dashed ? `1px dashed ${color}` : undefined,
         }}
       />
-      <span style={{ color: "#556677" }}>{label}</span>
+      <span style={{ color: "var(--hud-dim)" }}>{label}</span>
     </div>
   );
 }

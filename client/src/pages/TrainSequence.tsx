@@ -705,9 +705,9 @@ export default function TrainSequence() {
   return (
     <div
       className="h-screen overflow-hidden flex flex-col"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -716,27 +716,27 @@ export default function TrainSequence() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
+          <div className="w-px h-5 bg-[#1677ff]/20" />
           <span
             className="text-xs font-bold tracking-widest"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
               // 紫＝时序链路（与 /collect-seq、/translate 的 MODE 开关同色），
               // 青＝静态链路（/train）。两个训练页长得像，颜色是第一道区分
-              color: "#a855f7",
+              color: "var(--hud-violet)",
             }}
           >
             SEQUENCE TRAINING
           </span>
-          <span className="text-[9px] text-[#556677] font-mono ml-2">
+          <span className="text-[9px] text-[var(--hud-dim)] font-mono ml-2">
             时序滑窗 · TCN + DISTILLATION
           </span>
           <TfBackendBadge />
         </div>
         <div className="flex items-center gap-4">
-          <div className="text-[10px] font-mono text-[#556677]">
+          <div className="text-[10px] font-mono text-[var(--hud-dim)]">
             MODEL:{" "}
-            <span className={modelLoaded ? "text-[#00e5a0]" : "text-[#556677]"}>
+            <span className={modelLoaded ? "text-[var(--hud-ok)]" : "text-[var(--hud-dim)]"}>
               {modelLoaded ? "LOADED" : "NONE"}
             </span>
           </div>
@@ -748,23 +748,23 @@ export default function TrainSequence() {
           overflow 又白设了一次 */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* 左：数据集 + 参数 */}
-        <div className="w-80 border-r border-[#00f0ff]/15 overflow-y-auto shrink-0 p-3 space-y-4">
+        <div className="w-80 border-r border-[#1677ff]/15 overflow-y-auto shrink-0 p-3 space-y-4">
           <Section title="DATASET">
             <div className="space-y-1">
               <DataRow
                 label="序列总数"
                 value={String(stats?.totalSequences ?? 0)}
-                color="#00f0ff"
+                color="var(--hud-accent)"
               />
               <DataRow
                 label="真实录制"
                 value={String(stats?.recordedCount ?? 0)}
-                color="#00e5a0"
+                color="var(--hud-ok)"
               />
               <DataRow
                 label="静态合成"
                 value={String(stats?.synthesizedCount ?? 0)}
-                color="#f59e0b"
+                color="var(--hud-warn)"
               />
               {/* 只在真有句子样本时出现。它们不进下面的每词条数（primaryLabel 是第一个词，
                   算进去会给那个词虚增），所以必须在这里单独有一行，否则"总数比每词之和多"
@@ -773,33 +773,33 @@ export default function TrainSequence() {
                 <DataRow
                   label="句子样本"
                   value={`${stats?.sentenceCount} · 不参与孤立词`}
-                  color="#a855f7"
+                  color="var(--hud-violet)"
                 />
               )}
               <DataRow
                 label="平均时长"
                 value={`${Math.round(stats?.avgDurationMs ?? 0)}ms`}
-                color="#ccd6e0"
+                color="var(--hud-text)"
               />
               <DataRow
                 label="估算占用"
                 value={`${((stats?.estimatedBytes ?? 0) / 1024 / 1024).toFixed(1)} MB`}
-                color="#ccd6e0"
+                color="var(--hud-text)"
               />
               <DataRow
                 label="视觉覆盖"
                 value={`${(visionRatio * 100).toFixed(0)}%`}
-                color={visionRatio >= 0.8 ? "#00e5a0" : "#f59e0b"}
+                color={visionRatio >= 0.8 ? "var(--hud-ok)" : "var(--hud-warn)"}
               />
               <DataRow
                 label="IMU 可疑"
                 value={`${imuSuspect} / ${recordedTotal} 条`}
-                color={imuSuspect === 0 ? "#00e5a0" : "#f59e0b"}
+                color={imuSuspect === 0 ? "var(--hud-ok)" : "var(--hud-warn)"}
               />
               <DataRow
                 label="手套连接"
                 value={`左 ${hc.leftOnly} · 右 ${hc.rightOnly} · 双 ${hc.both}`}
-                color={handSkewed ? "#f59e0b" : "#00e5a0"}
+                color={handSkewed ? "var(--hud-warn)" : "var(--hud-ok)"}
               />
               <DataRow
                 label="主手分布"
@@ -808,7 +808,7 @@ export default function TrainSequence() {
                     ? `左 ${handedness.left} · 右 ${handedness.right} · 静止 ${handedness.idle}`
                     : "—"
                 }
-                color={handMixed ? "#a855f7" : "#00e5a0"}
+                color={handMixed ? "var(--hud-violet)" : "var(--hud-ok)"}
               />
             </div>
             {/*
@@ -819,21 +819,21 @@ export default function TrainSequence() {
               槽位，网络只能退回类先验 —— 症状是"打什么都输出同一个词"。
             */}
             {tieHeavy && (
-              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-warn)] font-mono leading-relaxed">
                 有 {handedness!.nearTie} 条样本左右手活动量接近，主手判定基本是掷硬币。
                 多为双手词（镜像与否影响本来就小）；如果里面有单手词，说明闲着那只手
                 动得太多，采集时让它自然垂下。
               </div>
             )}
             {handedness && handedness.calibrated < handedness.total && (
-              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-warn)] font-mono leading-relaxed">
                 有 {handedness.total - handedness.calibrated} 条样本判定时没有两点标定可用，
                 走了兜底量程。左右手弯折量程实测差 40~176，不标定会系统性偏向量程大的那只手。
                 去第 1 步给两只手都做一次张开/握拳标定。
               </div>
             )}
             {handSkewed && (
-              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-warn)] font-mono leading-relaxed">
                 只连了一只手套的样本全在{hc.leftOnly === 0 ? "右" : "左"}手 ——
                 这些样本的另一段槽位是**全 0**，而两只手套都戴着录的样本，闲着那只手
                 出的是静止基线、不是 0。两种输入长得不一样，混在一起训会多出一个
@@ -849,13 +849,13 @@ export default function TrainSequence() {
                  校准向导了，没有那个按钮。要是将来把这条提示加回来，别再照抄那句。
             */}
             {visionRatio < 0.8 && (stats?.totalSequences ?? 0) > 0 && (
-              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-warn)] font-mono leading-relaxed">
                 视觉覆盖低于 80%，训练会跳过教师与蒸馏，直接用 hard label
                 训学生 —— 准确率通常会明显下降。
               </div>
             )}
             {!hasIdle && (stats?.totalSequences ?? 0) > 0 && (
-              <div className="text-[9px] text-[#ff2d7b] font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-err)] font-mono leading-relaxed">
                 还没有 `_idle` 样本。滑窗推理下模型对任意窗口都会强行输出一个词，
                 没有空闲类，翻译页会在手放松时持续乱吐词。去 /collect-seq 补录。
               </div>
@@ -863,7 +863,7 @@ export default function TrainSequence() {
           </Section>
 
           <Section title="PER LABEL">
-            <div className="text-[9px] text-[#334455] font-mono">
+            <div className="text-[9px] text-[var(--hud-faint)] font-mono">
               点一个词把它从训练里排除（不删数据，再点一下恢复）
             </div>
             {trioPresent.length > 0 && (
@@ -878,8 +878,8 @@ export default function TrainSequence() {
                 className={
                   "w-full px-2 py-1 rounded-sm text-[10px] font-mono border " +
                   (trioOff
-                    ? "border-[#ff2d7b] text-[#ff2d7b]"
-                    : "border-[#334455] text-[#556677] hover:border-[#00f0ff] hover:text-[#00f0ff]")
+                    ? "border-[var(--hud-err)] text-[var(--hud-err)]"
+                    : "border-[var(--hud-faint)] text-[var(--hud-dim)] hover:border-[var(--hud-accent)] hover:text-[var(--hud-accent)]")
                 }
               >
                 {trioOff ? "✓ 已排除" : "排除"}开头那三个词（
@@ -888,18 +888,18 @@ export default function TrainSequence() {
             )}
             {/* 训练前的口径。数字对不上就别点训练 —— 上一轮就是这么读反的 */}
             <div className="text-[9px] font-mono">
-              <span className="text-[#334455]">本次将训练 </span>
-              <span className="text-[#00e5a0]">{plan.labels}</span>
-              <span className="text-[#334455]"> 类 / </span>
-              <span className="text-[#00e5a0]">{plan.rows}</span>
-              <span className="text-[#334455]"> 条</span>
+              <span className="text-[var(--hud-faint)]">本次将训练 </span>
+              <span className="text-[var(--hud-ok)]">{plan.labels}</span>
+              <span className="text-[var(--hud-faint)]"> 类 / </span>
+              <span className="text-[var(--hud-ok)]">{plan.rows}</span>
+              <span className="text-[var(--hud-faint)]"> 条</span>
               {plan.droppedLabels > 0 && (
-                <span className="text-[#ff2d7b]">
+                <span className="text-[var(--hud-err)]">
                   ，排除 {plan.droppedLabels} 类 / {plan.droppedRows} 条
                 </span>
               )}
               {mergedAway > 0 && (
-                <span className="text-[#a855f7]">（含合并省掉 {mergedAway} 类）</span>
+                <span className="text-[var(--hud-violet)]">（含合并省掉 {mergedAway} 类）</span>
               )}
             </div>
             {/*
@@ -917,7 +917,7 @@ export default function TrainSequence() {
               带动左栏（再往上带动整页），于是"在词表里往下翻"和"把整页推走"是同一个
               手势。有了它，滚动到边界就停在这里。
             */}
-            <div className="space-y-0.5 max-h-64 overflow-y-auto overscroll-contain rounded-sm border border-[#00f0ff]/10 p-1">
+            <div className="space-y-0.5 max-h-64 overflow-y-auto overscroll-contain rounded-sm border border-[#1677ff]/10 p-1">
               {labelRows.map(([label, c]) => {
                 const off = excluded.has(label);
                 return (
@@ -930,25 +930,25 @@ export default function TrainSequence() {
                         ? "已排除：本次训练不含这个词，模型也不会输出它。点一下恢复"
                         : "点一下把这个词从训练里排除（只是过滤，数据不删）"
                     }
-                    className="w-full flex justify-between items-center text-[10px] font-mono px-1 py-0.5 rounded-sm hover:bg-[#00f0ff]/5"
+                    className="w-full flex justify-between items-center text-[10px] font-mono px-1 py-0.5 rounded-sm hover:bg-[#1677ff]/5"
                   >
                     <span
                       className={
-                        off ? "text-[#ff2d7b] line-through" : "text-[#556677]"
+                        off ? "text-[var(--hud-err)] line-through" : "text-[var(--hud-dim)]"
                       }
                     >
                       {getDisplayLabel(label)}
                     </span>
                     <span className={off ? "opacity-25" : ""}>
-                      <span className="text-[#00e5a0]">{c.recorded}</span>
-                      <span className="text-[#334455]">/</span>
-                      <span className="text-[#f59e0b]">{c.synthesized}</span>
+                      <span className="text-[var(--hud-ok)]">{c.recorded}</span>
+                      <span className="text-[var(--hud-faint)]">/</span>
+                      <span className="text-[var(--hud-warn)]">{c.synthesized}</span>
                     </span>
                   </button>
                 );
               })}
               {labelRows.length === 0 && (
-                <div className="text-[10px] text-[#334455] font-mono">
+                <div className="text-[10px] text-[var(--hud-faint)] font-mono">
                   还没有序列样本
                 </div>
               )}
@@ -965,7 +965,7 @@ export default function TrainSequence() {
                   下面那条 `_idle` 警告保留：它是会毁掉实验结论的具体错误，不是背景说明。
                 */}
                 {excluded.has(IDLE_LABEL) && (
-                  <div className="text-[9px] text-[#ff2d7b] font-mono leading-relaxed">
+                  <div className="text-[9px] text-[var(--hud-err)] font-mono leading-relaxed">
                     你把 `_idle` 也排除了。没有空闲类，滑窗推理时手放松的窗口会被强行
                     判成某个词 —— 这正是要查的那个症状，排除它会让实验结论没法读。
                   </div>
@@ -994,7 +994,7 @@ export default function TrainSequence() {
             <button
               onClick={handleDeleteSynth}
               disabled={isBusy || isTraining}
-              className="cyber-btn w-full px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1 text-[#ff2d7b]"
+              className="cyber-btn w-full px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1 text-[var(--hud-err)]"
             >
               <Trash2 className="w-3 h-3" />
               删除全部合成序列
@@ -1011,18 +1011,18 @@ export default function TrainSequence() {
             <ParamInput label="增强副本数" value={augmentCopies} onChange={setAugmentCopies} min={0} max={5} />
             <ParamInput label="时间扭曲" value={timeWarp} onChange={setTimeWarp} min={0} max={0.5} step={0.05} isFloat />
             <div className="flex items-center justify-between text-[10px] font-mono">
-              <span className="text-[#556677]">骨干网络</span>
+              <span className="text-[var(--hud-dim)]">骨干网络</span>
               <select
                 value={backbone}
                 onChange={(e) => setBackbone(e.target.value as SeqBackbone)}
-                className="bg-[#1a2030] border border-[#00f0ff]/20 rounded-sm px-1.5 py-0.5 text-[#00f0ff] text-[10px]"
+                className="bg-[var(--hud-track)] border border-[#1677ff]/20 rounded-sm px-1.5 py-0.5 text-[var(--hud-accent)] text-[10px]"
               >
                 <option value="tcn">tcn</option>
                 <option value="tcn_bigru">tcn_bigru</option>
               </select>
             </div>
             {backbone === "tcn_bigru" && (
-              <div className="text-[9px] text-[#f59e0b] font-mono leading-relaxed">
+              <div className="text-[9px] text-[var(--hud-warn)] font-mono leading-relaxed">
                 BiGRU 在浏览器里训练明显更慢（RNN 无法在时间维并行）。
                 孤立词阶段建议留在 tcn，这一项主要留给句子阶段的 Python 训练。
               </div>
@@ -1057,7 +1057,7 @@ export default function TrainSequence() {
         {/* 右：进度 + 模型列表 */}
         <div className="flex-1 p-4 space-y-4 overflow-y-auto">
           {message && (
-            <div className="cyber-panel p-2 rounded-sm text-[10px] font-mono text-[#00e5a0] leading-relaxed">
+            <div className="cyber-panel p-2 rounded-sm text-[10px] font-mono text-[var(--hud-ok)] leading-relaxed">
               {message}
             </div>
           )}
@@ -1065,7 +1065,7 @@ export default function TrainSequence() {
           {auditText && (
             <div className="cyber-panel p-3 rounded-sm">
               <div className="flex items-center justify-between mb-2">
-                <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider">
+                <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                   Dataset Audit · 只读
                 </div>
                 <div className="flex items-center gap-1">
@@ -1085,7 +1085,7 @@ export default function TrainSequence() {
                   </button>
                 </div>
               </div>
-              <pre className="text-[10px] font-mono text-[#ccd6e0] leading-relaxed whitespace-pre-wrap max-h-[60vh] overflow-y-auto select-text">
+              <pre className="text-[10px] font-mono text-[var(--hud-text)] leading-relaxed whitespace-pre-wrap max-h-[60vh] overflow-y-auto select-text">
                 {auditText}
               </pre>
             </div>
@@ -1095,56 +1095,56 @@ export default function TrainSequence() {
             <MetricCard
               label="Phase"
               value={progress?.phase ?? "—"}
-              color="#a855f7"
+              color="var(--hud-violet)"
             />
             <MetricCard
               label="Epoch"
               value={
                 progress ? `${progress.epoch}/${progress.totalEpochs}` : "—"
               }
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
             <MetricCard
               label="Train Acc"
               value={progress ? `${(progress.accuracy * 100).toFixed(1)}%` : "—"}
-              color="#00e5a0"
+              color="var(--hud-ok)"
             />
             <MetricCard
               label="Val Acc"
               value={
                 progress ? `${(progress.valAccuracy * 100).toFixed(1)}%` : "—"
               }
-              color="#f59e0b"
+              color="var(--hud-warn)"
             />
           </div>
 
           <div className="cyber-panel p-3 rounded-sm">
-            <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-2">
+            <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-2">
               Training Curve
             </div>
             <SeqTrainingChart history={history} />
           </div>
 
           <div className="cyber-panel p-3 rounded-sm">
-            <div className="text-[10px] font-mono text-[#556677] uppercase tracking-wider mb-2">
+            <div className="text-[10px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-2">
               Saved Sequence Models
             </div>
             {/* 自己滚，不把整页顶长。overscroll-contain 让滚到底之后停在这里，
                 而不是接着带走右栏（与两个训练页的词表一致） */}
             <div className="space-y-1 max-h-56 overflow-y-auto overscroll-contain pr-1">
               {models.length === 0 && (
-                <div className="text-[10px] text-[#334455] font-mono">
+                <div className="text-[10px] text-[var(--hud-faint)] font-mono">
                   还没有时序模型
                 </div>
               )}
               {models.map((m) => (
                 <div
                   key={m.id}
-                  className="flex items-center justify-between px-2 py-1.5 rounded-sm border border-[#00f0ff]/10 text-[10px] font-mono"
+                  className="flex items-center justify-between px-2 py-1.5 rounded-sm border border-[#1677ff]/10 text-[10px] font-mono"
                 >
                   <div>
-                    <span className="text-[#ccd6e0]">{m.name}</span>
-                    <span className="text-[#556677] ml-2">
+                    <span className="text-[var(--hud-text)]">{m.name}</span>
+                    <span className="text-[var(--hud-dim)] ml-2">
                       {m.modelType} · T={m.seqLen} · {m.backbone} ·{" "}
                       {m.labels.length}类 · {(m.accuracy * 100).toFixed(1)}%
                     </span>
@@ -1159,7 +1159,7 @@ export default function TrainSequence() {
                     </button>
                     <button
                       onClick={() => void handleDeleteModel(m.id)}
-                      className="text-[#ff2d7b]"
+                      className="text-[var(--hud-err)]"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -1188,12 +1188,12 @@ export default function TrainSequence() {
           */}
           <div className="cyber-panel p-3 rounded-sm space-y-2">
             <div className="flex items-center gap-1.5">
-              <Brain className="w-3 h-3 text-[#a855f7]" />
-              <span className="text-[10px] font-mono text-[#a855f7] uppercase tracking-wider">
+              <Brain className="w-3 h-3 text-[var(--hud-violet)]" />
+              <span className="text-[10px] font-mono text-[var(--hud-violet)] uppercase tracking-wider">
                 Sentence · 给句子模型送数据
               </span>
             </div>
-            <div className="text-[9px] font-mono text-[#556677] leading-relaxed">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] leading-relaxed">
               句子（CTC）训练在本机 Python 里跑，不在浏览器。本页只负责把数据交过去。
             </div>
             <div className="flex items-center gap-2">
@@ -1202,7 +1202,7 @@ export default function TrainSequence() {
                 disabled={isTraining || isBusy || !hasBridge}
                 title={hasBridge ? undefined : BRIDGE_ABSENT_REASON}
                 className="cyber-btn flex-1 px-2 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1"
-                style={{ borderColor: "rgba(168,85,247,0.4)", color: "#a855f7" }}
+                style={{ borderColor: "rgba(168,85,247,0.4)", color: "var(--hud-violet)" }}
               >
                 <Upload className="w-3 h-3" />
                 直送 python_train/data/
@@ -1227,7 +1227,7 @@ export default function TrainSequence() {
             </div>
             {!hasBridge && (
               // 不留成一个点了没反应的死按钮：桥不在就说清为什么
-              <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed">
+              <div className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed">
                 直送不可用（桥只在 npm run dev 下挂载），用「下载两个文件」再手动拷进
                 python_train/data/。
               </div>
@@ -1255,7 +1255,7 @@ function SeqTrainingChart({ history }: { history: SeqTrainingProgress[] }) {
   const pad = 28;
   if (history.length < 2) {
     return (
-      <div className="text-[10px] text-[#334455] font-mono h-[160px] flex items-center justify-center">
+      <div className="text-[10px] text-[var(--hud-faint)] font-mono h-[160px] flex items-center justify-center">
         等待训练数据...
       </div>
     );
@@ -1272,25 +1272,25 @@ function SeqTrainingChart({ history }: { history: SeqTrainingProgress[] }) {
   return (
     <div>
       <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
-        <line x1={pad} y1={y(0)} x2={W - pad} y2={y(0)} stroke="#00f0ff20" />
-        <line x1={pad} y1={y(1)} x2={W - pad} y2={y(1)} stroke="#00f0ff20" />
+        <line x1={pad} y1={y(0)} x2={W - pad} y2={y(0)} style={{ stroke: "var(--hud-track)" }} />
+        <line x1={pad} y1={y(1)} x2={W - pad} y2={y(1)} style={{ stroke: "var(--hud-track)" }} />
         {switchIdx > 0 && (
           <line
             x1={x(switchIdx)}
             y1={pad}
             x2={x(switchIdx)}
             y2={H - pad}
-            stroke="#a855f7"
+            style={{ stroke: "var(--hud-violet)" }}
             strokeDasharray="3 3"
           />
         )}
-        <polyline points={line((p) => p.accuracy)} fill="none" stroke="#00e5a0" strokeWidth="1.5" />
-        <polyline points={line((p) => p.valAccuracy)} fill="none" stroke="#f59e0b" strokeWidth="1.5" />
+        <polyline points={line((p) => p.accuracy)} fill="none" style={{ stroke: "var(--hud-ok)" }} strokeWidth="1.5" />
+        <polyline points={line((p) => p.valAccuracy)} fill="none" style={{ stroke: "var(--hud-warn)" }} strokeWidth="1.5" />
       </svg>
       <div className="flex gap-3 text-[9px] font-mono mt-1">
-        <span className="text-[#00e5a0]">train acc</span>
-        <span className="text-[#f59e0b]">val acc</span>
-        {switchIdx > 0 && <span className="text-[#a855f7]">教师→学生切换</span>}
+        <span className="text-[var(--hud-ok)]">train acc</span>
+        <span className="text-[var(--hud-warn)]">val acc</span>
+        {switchIdx > 0 && <span className="text-[var(--hud-violet)]">教师→学生切换</span>}
       </div>
     </div>
   );

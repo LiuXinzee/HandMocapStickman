@@ -146,7 +146,7 @@ function HandDot({
   return (
     <span
       className="font-mono text-[10px]"
-      style={{ color: connected ? "#00e5a0" : "#556677" }}
+      style={{ color: connected ? "var(--hud-ok)" : "var(--hud-dim)" }}
       title={connected ? `${label} 已连接 ${fps}Hz` : `${label} 未连接`}
     >
       {label}
@@ -168,9 +168,9 @@ export default function StepNav() {
 
   return (
     <div className="flex items-center gap-3">
-      <span className="font-mono text-[9px] text-[#556677] tracking-wider whitespace-nowrap">
+      <span className="font-mono text-[9px] text-[var(--hud-dim)] tracking-wider whitespace-nowrap">
         STEP{" "}
-        <span className="text-[#00f0ff]">
+        <span className="text-[var(--hud-accent)]">
           {entry.step}/{TOTAL_STEPS}
         </span>{" "}
         {entry.title}
@@ -179,7 +179,7 @@ export default function StepNav() {
       <span className="flex items-center gap-1.5 whitespace-nowrap">
         <Hand
           className="w-3 h-3"
-          style={{ color: anyConnected ? "#00e5a0" : "#556677" }}
+          style={{ color: anyConnected ? "var(--hud-ok)" : "var(--hud-dim)" }}
         />
         <HandDot
           label="LH"
@@ -196,7 +196,7 @@ export default function StepNav() {
       {showConnectHint && (
         <Link
           href="/mocap"
-          className="font-mono text-[10px] text-[#f59e0b] hover:underline whitespace-nowrap"
+          className="font-mono text-[10px] text-[var(--hud-warn)] hover:underline whitespace-nowrap"
         >
           ← 去第 1 步连接
         </Link>
@@ -208,8 +208,8 @@ export default function StepNav() {
           href={n.href}
           className={`px-2 py-1 rounded-sm border font-mono text-[10px] flex items-center gap-1 whitespace-nowrap transition-colors ${
             n.primary
-              ? "border-[#00f0ff]/50 text-[#00f0ff] hover:bg-[#00f0ff]/10"
-              : "border-[#00f0ff]/15 text-[#556677] hover:text-[#00f0ff]"
+              ? "border-[var(--hud-accent)] text-[var(--hud-accent)] hover:bg-[var(--hud-line)]"
+              : "border-[var(--hud-line)] text-[var(--hud-dim)] hover:text-[var(--hud-accent)]"
           }`}
         >
           {n.label}

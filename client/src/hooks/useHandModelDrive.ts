@@ -18,6 +18,9 @@
  *
  * 注意 `bendRatios` 必须传 `frame.hand`：左右手在 137 维里的五指顺序是**相反**的
  * （`sensorMapping.ts:30` vs `:66`），自己按下标取值会把左手弄错。
+ *
+ * 唯一的例外是 `playbackRef`（离线演示回放）：它顶掉手套数据，且**已经在上游算完**
+ * ——不在这里再套一次标定。见那个参数上的注释。
  */
 import { useEffect, useRef, type RefObject } from "react";
 import type { HandChannel } from "@/hooks/useDualGloveSerial";
@@ -43,9 +46,19 @@ export interface HandModelDrive {
   orientCalibrated: boolean;
 }
 
+/**
+ * @param playbackRef 非空时**顶掉手套数据**，手模照它摆（翻译页的离线演示用它播
+ *   库里的真录制，见 `demoPlayback.ts`）。
+ *
+ *   做成"传进来一个 ref、由本 hook 的循环去读"，而不是让调用方直接写 `driveRef`：
+ *   `driveRef` 必须只有一个写者。两边各自 rAF 写同一个对象的话，谁最后写的取决于
+ *   两个回调的注册顺序，表现是手模在演示动作和"没数据"之间每帧闪一次 —— 而这
+ *   两个循环一个在页面里、一个在 hook 里，看代码时根本不在一起。
+ */
 export function useHandModelDrive(
   channel: HandChannel,
-  handKey: HandKey
+  handKey: HandKey,
+  playbackRef?: RefObject<HandDrive | null>
 ): HandModelDrive {
   const driveRef = useRef<HandDrive>(makeHandDrive());
   // handKey 在一个实例里是常量（useDualGloveSerial 把 handType 写死成 0x01/0x02），
@@ -67,7 +80,15 @@ export function useHandModelDrive(
     let raf = 0;
     const loop = () => {
       const frame = frameRef.current;
-      if (frame) {
+      const played = playbackRef?.current;
+      if (played) {
+        // 回放优先。片段里的姿态与手型已经在 demoPlayback 里换算好了
+        // （朝向按"相对片段首帧"、弯折走与实时同一份 bendRatios 数学），
+        // 这里不能再套一次标定 —— 套第二次就是把零位减两遍
+        driveRef.current.quaternion = played.quaternion;
+        driveRef.current.curl = played.curl;
+        driveRef.current.hasData = true;
+      } else if (frame) {
         driveRef.current.quaternion = applyOrientationCalib(
           frame.quaternion,
           orientRef.current
@@ -86,7 +107,7 @@ export function useHandModelDrive(
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [frameRef]);
+  }, [frameRef, playbackRef]);
 
   return {
     driveRef,

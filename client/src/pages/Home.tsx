@@ -35,8 +35,13 @@ import {
 import { Link } from "wouter";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const HERO_BG =
-  "https://d2xsxph8kpxj0f.cloudfront.net/310519663331800787/fHYEVehh6kc4x7HNL7px46/hero-bg-gbyGpPuyfHg6jNpdxkYd78.webp";
+/*
+ * 封面原来铺一张深蓝赛博背景图（CloudFront 上那张 hero-bg.webp），上面盖 70% 的
+ * #f4f6fa。全站翻成浅色皮之后那个组合只剩缺点：合成出来是一片去饱和的 #a8adb5 灰，
+ * 比 --hud-page 暗一大截，白卡片（cyber-panel）等于浮在灰底上；图里的青色高光还会
+ * 从雾里透出来，跟蓝色强调打架。现在底色直接用 --hud-page，纹理改成 CSS 画
+ * —— 网格与 .hud-stage 同款，顺带省掉一次 1920×1080 的外链请求。
+ */
 const HAND_DEMO =
   "https://d2xsxph8kpxj0f.cloudfront.net/310519663331800787/fHYEVehh6kc4x7HNL7px46/hand-skeleton-demo-RLuzXBfnbi7PPAb9guYRWF.webp";
 
@@ -144,36 +149,41 @@ export default function Home() {
     return (
       <div
         className="min-h-screen flex flex-col items-center justify-center relative overflow-hidden"
-        style={{
-          backgroundImage: `url(${HERO_BG})`,
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-        }}
+        style={{ backgroundColor: "var(--hud-page)" }}
       >
-        <div className="absolute inset-0 bg-[#0a0e1a]/70 pointer-events-none" />
+        {/* 浅网格：和 3D 视口的 .hud-stage 同一套画法、同一个 28px 步长 */}
+        <div
+          className="absolute inset-0 pointer-events-none"
+          style={{
+            backgroundImage:
+              "linear-gradient(to right, rgba(148,163,184,0.14) 1px, transparent 1px), linear-gradient(to bottom, rgba(148,163,184,0.14) 1px, transparent 1px)",
+            backgroundSize: "28px 28px",
+          }}
+        />
+        {/* logo/标题背后一团柔和蓝光，替掉原来那层青色雾 */}
         <div
           className="absolute inset-0 pointer-events-none"
           style={{
             background:
-              "repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,240,255,0.015) 2px, rgba(0,240,255,0.015) 3px)",
+              "radial-gradient(60% 45% at 50% 32%, rgba(22,119,255,0.10), transparent 70%)",
           }}
         />
 
         <div className="relative z-10 flex flex-col items-center gap-8 max-w-3xl px-6">
           {/* Logo */}
           <div className="flex flex-col items-center gap-5">
-            <div className="w-32 h-32 rounded-full border border-[#00f0ff]/30 flex items-center justify-center relative overflow-hidden group">
+            <div className="w-32 h-32 rounded-full border border-[#1677ff]/30 flex items-center justify-center relative overflow-hidden group">
               <img
                 src={HAND_DEMO}
                 alt="Hand Skeleton"
                 className="w-28 h-28 object-cover rounded-full opacity-80 group-hover:opacity-100 transition-opacity duration-300"
               />
-              <div className="absolute inset-0 border border-[#00f0ff]/20 rounded-full animate-[pulse-glow_2s_ease-in-out_infinite] pointer-events-none" />
+              <div className="absolute inset-0 border border-[#1677ff]/20 rounded-full animate-[pulse-glow_2s_ease-in-out_infinite] pointer-events-none" />
               <div
                 className="absolute inset-0 rounded-full pointer-events-none"
                 style={{
                   background:
-                    "radial-gradient(circle, transparent 60%, rgba(0,240,255,0.08) 100%)",
+                    "radial-gradient(circle, transparent 60%, rgba(22,119,255,0.10) 100%)",
                 }}
               />
             </div>
@@ -182,9 +192,10 @@ export default function Home() {
               className="text-4xl md:text-5xl font-bold tracking-tight text-center"
               style={{
                 fontFamily: "'JetBrains Mono', monospace",
-                color: "#00f0ff",
-                textShadow:
-                  "0 0 30px rgba(0,240,255,0.3), 0 0 60px rgba(0,240,255,0.1)",
+                color: "var(--hud-accent)",
+                // 浅底上"辉光"是不成立的（发不出光，只会糊）。改成一层很淡的蓝色
+                // 落影，作用是把标题从网格上托起来，不是让它发亮
+                textShadow: "0 2px 12px rgba(22,119,255,0.18)",
               }}
             >
               HAND MOCAP
@@ -194,14 +205,14 @@ export default function Home() {
                 className="text-sm md:text-base leading-relaxed"
                 style={{
                   fontFamily: "'Space Grotesk', sans-serif",
-                  color: "rgba(136, 153, 170, 0.9)",
+                  color: "var(--hud-soft)",
                 }}
               >
                 实时手部动作捕捉 + 触觉手套同步采集系统
               </p>
               <p
                 className="text-xs"
-                style={{ color: "rgba(0, 240, 255, 0.5)" }}
+                style={{ color: "var(--hud-accent)" }}
               >
                 21 关键点 · 256 传感器 · IMU 四元数 · 同步录制
               </p>
@@ -218,25 +229,24 @@ export default function Home() {
             ].map(({ label, value, desc }) => (
               <div
                 key={label}
-                className="cyber-panel p-3 rounded-sm text-center group hover:border-[#00f0ff]/50 transition-all duration-200"
+                className="cyber-panel p-3 rounded-sm text-center group hover:border-[#1677ff]/50 transition-all duration-200"
               >
                 <div
                   className="text-xl font-bold"
                   style={{
                     fontFamily: "'JetBrains Mono', monospace",
-                    color: "#00f0ff",
-                    textShadow: "0 0 10px rgba(0,240,255,0.4)",
+                    color: "var(--hud-accent)",
                   }}
                 >
                   {value}
                 </div>
                 <div
                   className="text-[9px] uppercase tracking-widest mt-1"
-                  style={{ color: "#556677" }}
+                  style={{ color: "var(--hud-dim)" }}
                 >
                   {label}
                 </div>
-                <div className="text-[9px] mt-0.5" style={{ color: "#445566" }}>
+                <div className="text-[9px] mt-0.5" style={{ color: "var(--hud-faint)" }}>
                   {desc}
                 </div>
               </div>
@@ -251,14 +261,14 @@ export default function Home() {
             }}
             className="cyber-btn px-10 py-3.5 rounded-sm text-sm flex items-center gap-3 group relative overflow-hidden z-20"
           >
-            <div className="absolute inset-0 bg-gradient-to-r from-[#00f0ff]/0 via-[#00f0ff]/10 to-[#00f0ff]/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 pointer-events-none" />
+            <div className="absolute inset-0 bg-gradient-to-r from-[#1677ff]/0 via-[#1677ff]/10 to-[#1677ff]/0 translate-x-[-100%] group-hover:translate-x-[100%] transition-transform duration-700 pointer-events-none" />
             <Camera className="w-4 h-4" />
             <span>启动摄像头</span>
           </button>
 
           {error && (
-            <div className="cyber-panel p-3 rounded-sm border-[#ff2d7b]/50 max-w-md">
-              <p className="text-[#ff2d7b] text-xs font-mono">{error}</p>
+            <div className="cyber-panel p-3 rounded-sm border-[#e11d48]/50 max-w-md">
+              <p className="text-[var(--hud-err)] text-xs font-mono">{error}</p>
             </div>
           )}
 
@@ -276,7 +286,7 @@ export default function Home() {
               isSentenceSample）。所以颜色上让时序采集同时连着两条训练，
               而句子采集只连句子训练。 */}
           <div className="w-full">
-            <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider text-center mb-3">
+            <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider text-center mb-3">
               Sign Language Recognition System · 按顺序操作
             </div>
 
@@ -284,10 +294,10 @@ export default function Home() {
               <FlowStep n="1" title="准备" hint="先插手套">
                 <StepLink
                   href="/mocap"
-                  icon={<Hand className="w-3.5 h-3.5 text-[#da77f2] shrink-0" />}
+                  icon={<Hand className="w-3.5 h-3.5 text-[var(--hud-wrist)] shrink-0" />}
                   label="手套体检"
                   sub="IMU 自检 · 弯折标定"
-                  hoverCls="hover:border-[#da77f2]/60"
+                  hoverCls="hover:border-[#c026d3]/60"
                 />
               </FlowStep>
 
@@ -296,49 +306,49 @@ export default function Home() {
               <FlowStep n="2" title="采集数据" hint="手套 + 摄像头">
                 <StepLink
                   href="/collect"
-                  icon={<Database className="w-3.5 h-3.5 text-[#00f0ff] shrink-0" />}
+                  icon={<Database className="w-3.5 h-3.5 text-[var(--hud-accent)] shrink-0" />}
                   label="静态采集"
                   sub="单帧手型"
-                  hoverCls="hover:border-[#00f0ff]/60"
+                  hoverCls="hover:border-[#1677ff]/60"
                 />
                 {/* sub 里写"两条训练都要"是因为这件事完全反直觉：多数人以为
                     句子训练只吃句子录制。它是句子训练的必要输入，缺了训不动 */}
                 <StepLink
                   href="/collect-seq"
-                  icon={<Video className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  icon={<Video className="w-3.5 h-3.5 text-[var(--hud-violet)] shrink-0" />}
                   label="时序采集"
                   sub="动态词 · 两条训练都要"
-                  hoverCls="hover:border-[#a855f7]/60"
+                  hoverCls="hover:border-[#7c3aed]/60"
                 />
                 {/* 句子采集与时序采集共用一个 store、一条时序链路，但它只喂 CTC
                     那条路（孤立词训练会把句子样本滤掉）。紫色标的就是这条路 */}
                 <StepLink
                   href="/collect-sentence"
-                  icon={<Waves className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  icon={<Waves className="w-3.5 h-3.5 text-[var(--hud-violet)] shrink-0" />}
                   label="句子采集"
                   sub="连续手语 · 只喂句子训练"
-                  hoverCls="hover:border-[#a855f7]/60"
+                  hoverCls="hover:border-[#7c3aed]/60"
                 />
               </FlowStep>
 
               <FlowArrow />
 
               <FlowStep n="3" title="训练模型" hint="离线，可拔手套">
-                {/* 青色，与 /train 页自己的标题色一致。原来这里是绿色 #00e5a0，
+                {/* 青色，与 /train 页自己的标题色一致。原来这里是绿色（--hud-ok），
                     而绿色在本项目里表示"已连接/已就绪"，不是链路色 */}
                 <StepLink
                   href="/train"
-                  icon={<Brain className="w-3.5 h-3.5 text-[#00f0ff] shrink-0" />}
+                  icon={<Brain className="w-3.5 h-3.5 text-[var(--hud-accent)] shrink-0" />}
                   label="静态训练"
                   sub="配静态采集 · 单帧 MLP"
-                  hoverCls="hover:border-[#00f0ff]/60"
+                  hoverCls="hover:border-[#1677ff]/60"
                 />
                 <StepLink
                   href="/train-seq"
-                  icon={<Waves className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  icon={<Waves className="w-3.5 h-3.5 text-[var(--hud-violet)] shrink-0" />}
                   label="时序训练"
                   sub="配时序采集 · TCN 含蒸馏"
-                  hoverCls="hover:border-[#a855f7]/60"
+                  hoverCls="hover:border-[#7c3aed]/60"
                 />
                 {/*
                   也是紫色。约定是**紫＝时序链路、青＝静态链路**
@@ -354,10 +364,10 @@ export default function Home() {
                 */}
                 <StepLink
                   href="/train-sentence"
-                  icon={<Brain className="w-3.5 h-3.5 text-[#a855f7] shrink-0" />}
+                  icon={<Brain className="w-3.5 h-3.5 text-[var(--hud-violet)] shrink-0" />}
                   label="句子训练"
                   sub="CTC 连续手语 · 本机 Python"
-                  hoverCls="hover:border-[#a855f7]/60"
+                  hoverCls="hover:border-[#7c3aed]/60"
                 />
               </FlowStep>
 
@@ -366,28 +376,28 @@ export default function Home() {
               <FlowStep n="4" title="使用" hint="只要手套">
                 <StepLink
                   href="/translate"
-                  icon={<MessageSquare className="w-3.5 h-3.5 text-[#ff2d7b] shrink-0" />}
+                  icon={<MessageSquare className="w-3.5 h-3.5 text-[var(--hud-err)] shrink-0" />}
                   label="手语翻译"
                   sub="纯触觉推理，不开摄像头"
-                  hoverCls="hover:border-[#ff2d7b]/60"
+                  hoverCls="hover:border-[#e11d48]/60"
                 />
               </FlowStep>
             </div>
 
             {/* 旁支：不在识别链路上，放在流程外面免得被当成必经步骤 */}
             <div className="mt-2 flex items-center gap-2">
-              <span className="text-[8px] font-mono text-[#334455] uppercase tracking-wider shrink-0">
+              <span className="text-[8px] font-mono text-[var(--hud-faint)] uppercase tracking-wider shrink-0">
                 旁支
               </span>
-              <div className="h-px flex-1 bg-[#00f0ff]/10" />
+              <div className="h-px flex-1 bg-[#1677ff]/10" />
               <Link
                 href="/train-skeleton"
-                className="rounded-sm border border-[#f59e0b]/20 hover:border-[#f59e0b]/60 px-2 py-1 flex items-center gap-1.5 transition-colors shrink-0"
+                className="rounded-sm border border-[#d97706]/20 hover:border-[#d97706]/60 px-2 py-1 flex items-center gap-1.5 transition-colors shrink-0"
               >
-                <Bone className="w-3.5 h-3.5 text-[#f59e0b] shrink-0" />
-                <span className="text-[10px] text-[#8899aa]">骨架训练</span>
+                <Bone className="w-3.5 h-3.5 text-[var(--hud-warn)] shrink-0" />
+                <span className="text-[10px] text-[var(--hud-soft)]">骨架训练</span>
               </Link>
-              <span className="text-[8px] text-[#334455] hidden sm:inline">
+              <span className="text-[8px] text-[var(--hud-faint)] hidden sm:inline">
                 触觉→骨架回归，只驱动手套体检页的火柴人，不参与识别
               </span>
             </div>
@@ -395,10 +405,10 @@ export default function Home() {
 
           {/* 底部提示 */}
           <div className="text-center space-y-1">
-            <p className="text-[10px] text-[#334455] font-mono">
+            <p className="text-[10px] text-[var(--hud-faint)] font-mono">
               POWERED BY MEDIAPIPE HANDS · TENSORFLOW.JS · WEB SERIAL API
             </p>
-            <p className="text-[10px] text-[#2a3a4a] font-mono">
+            <p className="text-[10px] text-[var(--hud-faint)] font-mono">
               需要浏览器摄像头权限 · 手套通过 Web Serial 直连（Chrome/Edge）
             </p>
           </div>
@@ -412,15 +422,15 @@ export default function Home() {
     return (
       <div
         className="min-h-screen flex flex-col items-center justify-center"
-        style={{ backgroundColor: "#0a0e1a" }}
+        style={{ backgroundColor: "var(--hud-page)" }}
       >
         <div className="flex flex-col items-center gap-6">
           <div className="relative w-24 h-24">
-            <div className="absolute inset-0 rounded-full border-2 border-[#00f0ff]/20" />
-            <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[#00f0ff] animate-spin" />
-            <div className="absolute inset-3 rounded-full border border-[#00f0ff]/10" />
+            <div className="absolute inset-0 rounded-full border-2 border-[#1677ff]/20" />
+            <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-[var(--hud-accent)] animate-spin" />
+            <div className="absolute inset-3 rounded-full border border-[#1677ff]/10" />
             <div
-              className="absolute inset-3 rounded-full border border-transparent border-b-[#ff2d7b]/60 animate-spin"
+              className="absolute inset-3 rounded-full border border-transparent border-b-[#e11d48]/60 animate-spin"
               style={{
                 animationDirection: "reverse",
                 animationDuration: "1.5s",
@@ -452,11 +462,11 @@ export default function Home() {
                 }
               />
             </div>
-            <p className="text-[10px] text-[#334455] font-mono mt-4">
+            <p className="text-[10px] text-[var(--hud-faint)] font-mono mt-4">
               首次加载模型约需 5-15 秒，请耐心等待...
             </p>
             {loadingStatus === "model" && (
-              <p className="text-[10px] text-[#556677] font-mono">
+              <p className="text-[10px] text-[var(--hud-dim)] font-mono">
                 正在从 CDN 下载模型文件 (~5MB)...
               </p>
             )}
@@ -471,11 +481,11 @@ export default function Home() {
     <div
       ref={mainRef}
       className="h-screen flex flex-col overflow-hidden select-none"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
       {/* 顶部状态栏 */}
       <header
-        className="h-10 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0"
+        className="h-10 flex items-center justify-between px-4 border-b border-[#1677ff]/15 shrink-0"
         style={{ backgroundColor: "rgba(10, 14, 26, 0.95)" }}
       >
         <div className="flex items-center gap-3">
@@ -483,26 +493,26 @@ export default function Home() {
             className="text-xs font-bold tracking-widest"
             style={{
               fontFamily: "'JetBrains Mono', monospace",
-              color: "#00f0ff",
+              color: "var(--hud-accent)",
               textShadow: "0 0 8px rgba(0,240,255,0.4)",
             }}
           >
             HAND MOCAP
           </span>
-          <div className="w-px h-4 bg-[#00f0ff]/20" />
+          <div className="w-px h-4 bg-[#1677ff]/20" />
           <div className="flex items-center gap-1.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-[#00f0ff] shadow-[0_0_6px_rgba(0,240,255,0.8)] animate-pulse" />
-            <span className="text-[10px] text-[#00f0ff]/80 font-mono">
+            <div className="w-1.5 h-1.5 rounded-full bg-[var(--hud-accent)] shadow-[0_0_6px_rgba(0,240,255,0.8)] animate-pulse" />
+            <span className="text-[10px] text-[#1677ff]/80 font-mono">
               LIVE
             </span>
           </div>
           {/* 手套连接指示 */}
           {gloveConnected && (
             <>
-              <div className="w-px h-4 bg-[#00f0ff]/20" />
+              <div className="w-px h-4 bg-[#1677ff]/20" />
               <div className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-[#00e5a0] shadow-[0_0_6px_rgba(0,229,160,0.8)] animate-pulse" />
-                <span className="text-[10px] text-[#00e5a0]/80 font-mono">
+                <div className="w-1.5 h-1.5 rounded-full bg-[var(--hud-ok)] shadow-[0_0_6px_rgba(0,229,160,0.8)] animate-pulse" />
+                <span className="text-[10px] text-[#16a34a]/80 font-mono">
                   GLOVE
                 </span>
               </div>
@@ -511,10 +521,10 @@ export default function Home() {
           {/* 录制指示 */}
           {recorder.isRecording && (
             <>
-              <div className="w-px h-4 bg-[#00f0ff]/20" />
+              <div className="w-px h-4 bg-[#1677ff]/20" />
               <div className="flex items-center gap-1.5">
-                <div className="w-1.5 h-1.5 rounded-full bg-[#ff2d7b] shadow-[0_0_6px_rgba(255,45,123,0.8)] animate-pulse" />
-                <span className="text-[10px] text-[#ff2d7b]/80 font-mono">
+                <div className="w-1.5 h-1.5 rounded-full bg-[var(--hud-err)] shadow-[0_0_6px_rgba(255,45,123,0.8)] animate-pulse" />
+                <span className="text-[10px] text-[#e11d48]/80 font-mono">
                   REC
                 </span>
               </div>
@@ -522,19 +532,19 @@ export default function Home() {
           )}
         </div>
 
-        <div className="flex items-center gap-5 text-[10px] font-mono text-[#556677]">
+        <div className="flex items-center gap-5 text-[10px] font-mono text-[var(--hud-dim)]">
           <span>
-            FPS: <span className="text-[#00f0ff]">{fps}</span>
+            FPS: <span className="text-[var(--hud-accent)]">{fps}</span>
           </span>
           <span>
             HANDS:{" "}
-            <span className="text-[#00f0ff]">
+            <span className="text-[var(--hud-accent)]">
               {handResults?.landmarks.length ?? 0}
             </span>
           </span>
           {gloveConnected && (
             <span>
-              GLOVE: <span className="text-[#00e5a0]">{gloveFps}Hz</span>
+              GLOVE: <span className="text-[var(--hud-ok)]">{gloveFps}Hz</span>
             </span>
           )}
         </div>
@@ -547,7 +557,7 @@ export default function Home() {
           {/* Canvas 区域 */}
           <div className="flex-1 flex items-center justify-center p-2 relative">
             <div
-              className="relative border border-[#00f0ff]/20 rounded-sm overflow-hidden"
+              className="relative border border-[#1677ff]/20 rounded-sm overflow-hidden"
               style={{
                 width: canvasSize.width,
                 height: canvasSize.height,
@@ -566,20 +576,20 @@ export default function Home() {
               />
 
               {/* 左上角时间戳 */}
-              <div className="absolute top-2 left-3 text-[9px] font-mono text-[#00f0ff]/40 pointer-events-none">
+              <div className="absolute top-2 left-3 text-[9px] font-mono text-[#1677ff]/40 pointer-events-none">
                 <TimeDisplay />
               </div>
 
               {/* 右上角分辨率 */}
-              <div className="absolute top-2 right-3 text-[9px] font-mono text-[#00f0ff]/40 pointer-events-none">
+              <div className="absolute top-2 right-3 text-[9px] font-mono text-[#1677ff]/40 pointer-events-none">
                 {canvasSize.width}x{canvasSize.height}
               </div>
 
               {/* 录制指示器（左下角） */}
               {recorder.isRecording && (
                 <div className="absolute bottom-2 left-3 flex items-center gap-1.5 pointer-events-none">
-                  <div className="w-2 h-2 rounded-full bg-[#ff2d7b] animate-pulse shadow-[0_0_8px_rgba(255,45,123,0.8)]" />
-                  <span className="text-[10px] font-mono text-[#ff2d7b]">
+                  <div className="w-2 h-2 rounded-full bg-[var(--hud-err)] animate-pulse shadow-[0_0_8px_rgba(255,45,123,0.8)]" />
+                  <span className="text-[10px] font-mono text-[var(--hud-err)]">
                     REC{" "}
                     {formatDurationShort(recorder.recordingDuration)}
                   </span>
@@ -589,7 +599,7 @@ export default function Home() {
           </div>
 
           {/* 底部控制栏 */}
-          <div className="h-12 flex items-center justify-center gap-2 px-4 border-t border-[#00f0ff]/10 shrink-0">
+          <div className="h-12 flex items-center justify-center gap-2 px-4 border-t border-[#1677ff]/10 shrink-0">
             <ControlButton
               icon={
                 showVideo ? (
@@ -625,7 +635,7 @@ export default function Home() {
               onClick={() => setShowSidebar(!showSidebar)}
               active={showSidebar}
             />
-            <div className="w-px h-5 bg-[#00f0ff]/15 mx-1" />
+            <div className="w-px h-5 bg-[#1677ff]/15 mx-1" />
             <button
               onClick={stopTracking}
               className="cyber-btn cyber-btn-accent px-4 py-1.5 rounded-sm text-[11px] flex items-center gap-2"
@@ -639,11 +649,11 @@ export default function Home() {
         {/* 右侧数据面板 */}
         {showSidebar && (
           <aside
-            className="w-60 border-l border-[#00f0ff]/15 overflow-y-auto shrink-0"
+            className="w-60 border-l border-[#1677ff]/15 overflow-y-auto shrink-0"
             style={{
               backgroundColor: "rgba(10, 14, 26, 0.95)",
               scrollbarWidth: "thin",
-              scrollbarColor: "#00f0ff30 transparent",
+              scrollbarColor: "var(--hud-line-strong) transparent",
             }}
           >
             <div className="p-3 space-y-4">
@@ -725,14 +735,14 @@ function FlowStep({
     <div className="flex-1 cyber-panel rounded-sm p-2 flex flex-col gap-1.5 min-w-0">
       <div className="flex items-center gap-1.5">
         <span
-          className="w-4 h-4 rounded-full border border-[#00f0ff]/40 text-[#00f0ff] flex items-center justify-center shrink-0 text-[9px]"
+          className="w-4 h-4 rounded-full border border-[#1677ff]/40 text-[var(--hud-accent)] flex items-center justify-center shrink-0 text-[9px]"
           style={{ fontFamily: "'JetBrains Mono', monospace" }}
         >
           {n}
         </span>
-        <span className="text-[11px] text-[#ccd6e0] truncate">{title}</span>
+        <span className="text-[11px] text-[var(--hud-text)] truncate">{title}</span>
       </div>
-      <div className="text-[8px] text-[#445566] pl-[22px] -mt-1">{hint}</div>
+      <div className="text-[8px] text-[var(--hud-faint)] pl-[22px] -mt-1">{hint}</div>
       <div className="flex flex-col gap-1">{children}</div>
     </div>
   );
@@ -741,7 +751,7 @@ function FlowStep({
 /** 步骤之间的箭头：窄屏竖排朝下，宽屏横排朝右 */
 function FlowArrow() {
   return (
-    <div className="flex items-center justify-center text-[#00f0ff]/25 shrink-0 text-[10px] leading-none">
+    <div className="flex items-center justify-center text-[#1677ff]/25 shrink-0 text-[10px] leading-none">
       <span className="md:hidden">▼</span>
       <span className="hidden md:inline">▶</span>
     </div>
@@ -768,15 +778,15 @@ function StepLink({
   return (
     <Link
       href={href}
-      className={`rounded-sm border border-[#00f0ff]/10 bg-[#00f0ff]/[0.02] px-2 py-1.5 block transition-colors group ${hoverCls}`}
+      className={`rounded-sm border border-[#1677ff]/15 bg-[#1677ff]/[0.03] px-2 py-1.5 block transition-colors group ${hoverCls}`}
     >
       <div className="flex items-center gap-1.5 min-w-0">
         {icon}
-        <span className="text-[10px] text-[#8899aa] group-hover:text-[#ccd6e0] transition-colors truncate">
+        <span className="text-[10px] text-[var(--hud-soft)] group-hover:text-[var(--hud-text)] transition-colors truncate">
           {label}
         </span>
       </div>
-      <div className="text-[8px] text-[#334455] pl-[20px] leading-tight">
+      <div className="text-[8px] text-[var(--hud-faint)] pl-[20px] leading-tight">
         {sub}
       </div>
     </Link>
@@ -798,7 +808,7 @@ function ControlButton({
     <button
       onClick={onClick}
       className={`cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center gap-1.5 ${
-        active ? "bg-[#00f0ff]/15 border-[#00f0ff]/40" : ""
+        active ? "bg-[#1677ff]/15 border-[#1677ff]/40" : ""
       }`}
       title={label}
     >
@@ -822,21 +832,21 @@ function LoadingStep({
   return (
     <div className="flex items-center gap-2 text-[11px] font-mono">
       {done ? (
-        <span className="text-[#00e5a0]">✓</span>
+        <span className="text-[var(--hud-ok)]">✓</span>
       ) : active ? (
-        <span className="text-[#f59e0b] animate-pulse">●</span>
+        <span className="text-[var(--hud-warn)] animate-pulse">●</span>
       ) : pending ? (
-        <span className="text-[#556677]">○</span>
+        <span className="text-[var(--hud-dim)]">○</span>
       ) : (
-        <span className="text-[#556677]">○</span>
+        <span className="text-[var(--hud-dim)]">○</span>
       )}
       <span
         className={
           done
-            ? "text-[#556677]"
+            ? "text-[var(--hud-dim)]"
             : active
-            ? "text-[#8899aa]"
-            : "text-[#334455]"
+            ? "text-[var(--hud-soft)]"
+            : "text-[var(--hud-faint)]"
         }
       >
         {text}

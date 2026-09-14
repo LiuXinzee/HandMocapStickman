@@ -38,7 +38,14 @@ function Router() {
 function App() {
   return (
     <ErrorBoundary>
-      <ThemeProvider defaultTheme="dark">
+      {/*
+        light 而不是 dark。这个 provider 只干一件事：给 <html> 加 / 去 `.dark` 类。
+        它管的不是本项目的 --hud-* 那套皮，而是 `components/ui/` 里那批 shadcn
+        组件身上的 28 处 `dark:` 变体（`dark:bg-input/30` 这类深色微调）。
+        全站换成浅色后还留着 `.dark`，那些微调会盖在浅色 token 上，
+        输入框 / 开关 / 标签页会莫名比周围深一档。
+      */}
+      <ThemeProvider defaultTheme="light">
         <TooltipProvider>
           <Toaster />
           {/* 手套连接提到 Router 之上：全应用只开一次串口，换页不再重连。

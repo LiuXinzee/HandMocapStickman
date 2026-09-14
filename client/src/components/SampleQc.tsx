@@ -26,10 +26,10 @@ export const IMU_VERDICT_TEXT: Record<ImuVerdict, string> = {
   unknown: "未知",
 };
 export const IMU_VERDICT_COLOR: Record<ImuVerdict, string> = {
-  ok: "#00f0ff",
-  warn: "#f59e0b",
-  bad: "#ff2d7b",
-  unknown: "#556677",
+  ok: "var(--hud-accent)",
+  warn: "var(--hud-warn)",
+  bad: "var(--hud-err)",
+  unknown: "var(--hud-dim)",
 };
 const IMU_RANK: Record<ImuVerdict, number> = { ok: 0, unknown: 1, warn: 2, bad: 3 };
 
@@ -44,8 +44,8 @@ export function Metric({
 }) {
   return (
     <div>
-      <div className="text-[#556677] uppercase text-[8px]">{label}</div>
-      <div style={{ color: warn ? "#f59e0b" : "#00f0ff" }}>{value}</div>
+      <div className="text-[var(--hud-dim)] uppercase text-[8px]">{label}</div>
+      <div style={{ color: warn ? "var(--hud-warn)" : "var(--hud-accent)" }}>{value}</div>
     </div>
   );
 }
@@ -78,12 +78,12 @@ export function EnergyChart({ energy }: { energy: Float32Array }) {
         <polyline
           points={pts}
           fill="none"
-          stroke={nearlyStatic ? "#f59e0b" : "#00f0ff"}
+          style={{ stroke: nearlyStatic ? "var(--hud-warn)" : "var(--hud-accent)" }}
           strokeWidth="1.5"
         />
       </svg>
       {nearlyStatic && (
-        <div className="text-[9px] text-[#f59e0b] font-mono mt-1">
+        <div className="text-[9px] text-[var(--hud-warn)] font-mono mt-1">
           几乎没有运动 —— 如果这是动态词，很可能录废了
         </div>
       )}
@@ -143,21 +143,21 @@ export function useSampleImuVerdict(
  */
 export function ImuHealthLine({ imu }: { imu: SampleImuVerdict }) {
   return (
-    <div className="mt-2 pt-2 border-t border-[#00f0ff]/10 font-mono">
+    <div className="mt-2 pt-2 border-t border-[#1677ff]/10 font-mono">
       <div className="text-[10px]" style={{ color: IMU_VERDICT_COLOR[imu.verdict] }}>
         IMU 陀螺漂移：{IMU_VERDICT_TEXT[imu.verdict]}
         {imu.detail.usableFrames > 0 && (
-          <span className="text-[#556677] ml-2">
+          <span className="text-[var(--hud-dim)] ml-2">
             倾角偏差 {imu.detail.tiltInconsistencyDeg.toFixed(1)}° · 可用帧{" "}
             {imu.detail.usableFrames}
           </span>
         )}
       </div>
       {imu.verdict !== "ok" && (
-        <div className="text-[9px] text-[#556677] mt-0.5 leading-relaxed">
+        <div className="text-[9px] text-[var(--hud-dim)] mt-0.5 leading-relaxed">
           {imu.detail.reason}
           {imu.verdict === "bad" && (
-            <span className="text-[#ff2d7b]">
+            <span className="text-[var(--hud-err)]">
               {" "}
               建议删掉重录：把手套放平不动，短按主控按键做陀螺校准后再录。
             </span>

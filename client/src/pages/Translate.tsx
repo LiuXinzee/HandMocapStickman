@@ -1,14 +1,26 @@
 /*
  * Translate — 实时手语翻译页面
- * DESIGN: Cyberpunk HUD 风格
+ *
+ * DESIGN: **浅色**（白卡片 + 浅蓝灰底 + 蓝色强调）。这是 index.css 里 `:root` 的
+ * 默认皮肤、全站共用，这一页不需要自己贴类。深色那套原样留在 `.theme-dark` 里。
+ * 这一页里凡是颜色都走 `var(--hud-*)`，**别再往回写死十六进制**，写死的那一刻
+ * 这一页就又只有一套配色了。
+ *
+ * 版式：**两个大圆角框**。左＝双手 3D 画面（一张卡，里面并排两个视口），
+ * 右＝译文。句子档下右边那张卡整个是聊天窗口（见 SentencePanel）。
  *
  * 功能:
  * 1. 连接手套后实时推理
  * 2. 显示识别结果（大字体 + 置信度）
  * 3. 历史翻译记录（句子拼接）
- * 4. Top-K 候选词显示
  *
- * 三种推理模式，可在右侧面板切换：
+ * ⚠ 右侧面板（MODE 开关 / 主手能量条 / Top-K 候选 / 阈值滑杆 / MODEL INFO /
+ * 逐词历史 / 采集训练导航 / 手套 Hz）**已经撤掉**，这一页现在只剩主区。
+ * 后果只有一个要记住的：**MODE 不能在界面上切了**，唯一来源是 URL，默认句子档
+ * （见下面 `urlMode`）。置信度阈值和平滑窗口跟着变成固定值（0.7 / 5 帧），
+ * 那两个状态还在，只是没有滑杆能调。
+ *
+ * 三种推理模式（现在靠 `?mode=` 选）：
  * - static：旧的单帧 MLP，每 100ms 独立推理一帧（原有逻辑，一行没动）
  * - sequence：TCN 时序模型，手套帧全速写进环形缓冲，每 100ms 取最近 `WINDOW_MS`
  *   窗口推理一次。动态词（再见、来、工作…）只有这条路能识别。
@@ -21,8 +33,15 @@
  * 打不出来，而 CTC 本来就靠 blank 区分重复词。它只用那个 100ms 循环做一件事 ——
  * 判断"这一句什么时候结束"（`sentenceCapture.ts` 的状态机），推理是收句时跑一次。
  *
- * 底部是**一手一个视口**（`HandModel` × 2，与第 1 步 /mocap 的自检同一个组件、
- * 同一份标定、同一套驱动，见 useHandModelDrive）。
+ * 左框是**一手一个视口**（`HandModel` × 2），与第 1 步 /mocap 的自检**同一个组件、
+ * 同一份标定、同一套驱动**（见 useHandModelDrive）。默认档也和自检页一致（实心手模），
+ * 所以手模看着不对劲时，两页应该长得一模一样 —— 不一样才说明是这一页的问题。
+ * 顶栏另有一档骨架：藏掉蒙皮只留关节球，用来看清指节到底停在哪。
+ *
+ * ⚠ **朝向对不上不是这一页能修的**。这两格只是显示 `applyOrientationCalib` 的结果；
+ * 朝向标定（零位 + 轴向矩阵）只在第 1 步 /mocap 做。没标定时 `applyOrientationCalib`
+ * 原样返回原始 IMU 四元数，指向完全取决于 IMU 怎么装在手套上，和实手差多少都可能。
+ * 所以标题行有那个「朝向未标定」，别把它当成可以忽略的提示。
  *
  * ⚠ 这里**曾经**是一块两手合一的「手语舞台」（`SigningStage` + 躯干剪影），
  * 已经撤掉了。撤的理由不是观感，是它承诺了一个做不到的东西：
@@ -46,13 +65,11 @@ import type { HandKey } from "@/lib/bendRange";
 import {
   predict,
   isModelLoaded,
-  getLoadedLabels,
   loadModelFromSaved,
 } from "@/lib/signLanguageModel";
 import {
   predictSequence,
   isSequenceModelLoaded,
-  getLoadedSequenceLabels,
   loadSequenceModelFromSaved,
 } from "@/lib/sequenceModel";
 import {
@@ -75,6 +92,23 @@ import { SentenceEnvelope } from "@/lib/sentenceEnvelope";
 import SentencePanel from "@/components/SentencePanel";
 import { speakChinese, stopSpeaking, warmUpVoices } from "@/lib/speech";
 import { resolveSentence } from "@/lib/sentenceGrammar";
+import {
+  buildDemoTimeline,
+  gestureAt,
+  gestureWindows,
+  DEMO_SCRIPT,
+} from "@/lib/translateDemo";
+import {
+  clipDurations,
+  demoClipQualityNote,
+  describeDemoClips,
+  frameAt,
+  loadDemoClips,
+  poseAt,
+  type DemoClipSet,
+} from "@/lib/demoPlayback";
+// 演示期的临时东西，连同 demoSubtitles.ts 一起删（那个文件头说了怎么关）
+import { demoSubtitleAt } from "@/lib/demoSubtitles";
 import { SequenceWindowBuffer } from "@/lib/sequenceWindow";
 import { judgeWindowMotion } from "@/lib/motionGate";
 import { mirrorStaticInputs, normalizeHandedness } from "@/lib/handMirror";
@@ -89,7 +123,6 @@ import { getLatestModel, getLatestSequenceModel } from "@/lib/datasetStore";
 import {
   getWordById,
   getCategoryColor,
-  getDisplayLabel,
   getTranslationLabel,
   resolveToMember,
   IDLE_LABEL,
@@ -107,7 +140,6 @@ import {
 import {
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
   type RefObject,
@@ -123,6 +155,10 @@ import {
   Zap,
   Eye,
   EyeOff,
+  ChevronRight,
+  ChevronDown,
+  Play,
+  Square,
 } from "lucide-react";
 
 interface TranslationEntry {
@@ -130,6 +166,25 @@ interface TranslationEntry {
   label: string;
   confidence: number;
   timestamp: number;
+}
+
+/**
+ * 已成句的一条。**句子档专用**，和上面那个逐词档的 `TranslationEntry` 是两回事
+ * （一个是"一个词"，一个是"一整句"），别合并。
+ *
+ * 为什么不只存 `text`：历史气泡点开要能看**模型的原始词序**。只留顺句结果的话，
+ * 事后翻看一句翻错的话，分不清是模型认错了词、还是顺句规则顺错了 ——
+ * 而这两件事一个要补数据重训、一个只要改一行规则表（同 SentencePanel 文件头那段）。
+ * `rule` 一并记下来：没记的话，事后重算规则可能命中的已经是另一条了。
+ */
+export interface SentenceEntry {
+  /** 顺句结果，气泡里的大字 */
+  text: string;
+  /** 模型解出来的原始词序（原始类别 id，含合并类），展开时逐词显示 */
+  words: string[];
+  /** 命中的顺句规则名；null = 没命中/规则已关 */
+  rule: string | null;
+  at: number;
 }
 
 type ModelMode = "static" | "sequence" | "sentence";
@@ -178,13 +233,23 @@ const DOMINANCE_RECHECK_MS = 300;
 
 export default function Translate() {
   /*
-   * URL 指定了 MODE 就用它，并且**锁住**自动选择 —— 不然自动加载 effect 跑完
-   * （异步，晚于首帧）会把它改掉，用户看到的是先闪一下句子档再跳去时序。
+   * MODE 的**唯一**来源是 URL，默认落在连续句子档。
+   *
+   * 右侧面板（含三档 MODE 开关）已经撤掉，页面上不再有切档的入口，所以初值不能
+   * 再是静态 —— 那样进来就永久停在一个没有开始按钮的档上（逐词档的「开始翻译」
+   * 按钮在主区，但这一页的用途已经是连续句子）。
+   *
+   * `?mode=static` / `?mode=sequence` 仍然认，作为逐词两档的后门：那两条推理链路
+   * 和它们的主区 UI 一行没动，只是没有按钮能走过去了。
+   *
+   * 同时**锁住**下面自动加载 effect 里的自动选档 —— 那段逻辑只认识静态/时序两条
+   * （句子模型不在 IndexedDB 里，`getLatestModel` 系列查不到它），留着会让页面
+   * 先闪一下句子档再跳去时序。
    */
   const urlMode = useRef<ModelMode | null>(null);
   if (urlMode.current === null) urlMode.current = modeFromUrl();
   const [modelMode, setModelMode] = useState<ModelMode>(
-    urlMode.current ?? "static"
+    urlMode.current ?? "sentence"
   );
   const windowBufRef = useRef<SequenceWindowBuffer | null>(null);
   if (windowBufRef.current === null) {
@@ -252,7 +317,6 @@ export default function Translate() {
   const { left: gloveLeft, right: gloveRight, anyConnected } = useGloves();
   useGloveFrames(onLeftFrame, onRightFrame);
   const isConnected = anyConnected;
-  const bothConnected = gloveLeft.isConnected && gloveRight.isConnected;
   const gloveError = gloveLeft.error || gloveRight.error;
 
   /*
@@ -262,8 +326,17 @@ export default function Translate() {
    * 连接/标定汇总也要读 `bendCalibrated` / `orientCalibrated`。它自带 rAF、
    * 写 ref 不触发 React 重渲染，100Hz 的手套数据不会打到这个页面组件上。
    */
-  const leftHand = useHandModelDrive(gloveLeft, "LH");
-  const rightHand = useHandModelDrive(gloveRight, "RH");
+  /*
+   * 离线演示的回放姿态。非 null 时顶掉手套数据（见 `useHandModelDrive` 的第三个参数）。
+   *
+   * 由下面 `startDemo` 那个 rAF 循环写，不在演示中时置回 null —— 置 null 而不是
+   * 留一个"最后的姿态"，是为了让手模回到"没数据"那一档（停在静止姿态），
+   * 否则停止演示之后手会永远举在最后一个词的收势位置上。
+   */
+  const demoPoseLeftRef = useRef<HandDrive | null>(null);
+  const demoPoseRightRef = useRef<HandDrive | null>(null);
+  const leftHand = useHandModelDrive(gloveLeft, "LH", demoPoseLeftRef);
+  const rightHand = useHandModelDrive(gloveRight, "RH", demoPoseRightRef);
 
   // 状态
   const [staticReady, setStaticReady] = useState(isModelLoaded());
@@ -311,7 +384,18 @@ export default function Translate() {
    * 关掉就退回"一句一次"（每句都要点「开始一句」），采集页不受影响。
    */
   const [continuousMode, setContinuousMode] = useState(true);
-  const [sentenceHistory, setSentenceHistory] = useState<string[]>([]);
+  /*
+   * 已成句的历史 —— 右列聊天窗口里那些气泡。
+   *
+   * 它同时是「定版」和 `lastLive` 那套语义的账本：连续模式下每句解出来就往这里
+   * 追一条，之后的改代词/删词靠下面那个 effect 同步回最后一条，手动「定版」= 停止同步。
+   *
+   * ⚠ **最后一条可能就是屏幕上那句 live**（`lastLive === true` 时）。渲染前必须切掉，
+   * 否则同一句会在窗口里上下出现两次 —— 见下面 `settledHistory`。
+   *
+   * 只在内存里，刷新即清空：这一档的用法是"现场对话一次"，没有跨会话回看的需求。
+   */
+  const [sentenceHistory, setSentenceHistory] = useState<SentenceEntry[]>([]);
   /**
    * 历史里最后一条是不是"当前这一句"（自动成句进去的、还能改）。
    *
@@ -322,6 +406,210 @@ export default function Translate() {
   const [lastLive, setLastLive] = useState(false);
   const [sentenceNote, setSentenceNote] = useState<string | null>(null);
   const [captureStatus, setCaptureStatus] = useState<CaptureStatus | null>(null);
+
+  /*
+   * ===== 演示译文覆盖的句子计数器 =====
+   *
+   * `demoSeq` = 屏幕上这一句是第几句（从 0 起；-1 = 还没收过任何一句）。
+   * 一次真解码 = 一句，所以在 `decodeUtterance` 里 +1 —— 「一句一次」和「连续」
+   * 两档都走那一条路，挂在那儿就不用分别处理两种模式。
+   *
+   * ref 和 state 两份不是冗余：`decodeUtterance` 是 `[reportMirrored]` 依赖的
+   * useCallback，闭包里读到的 state 永远是第一次渲染那个值，只能读 ref；
+   * 而渲染和下面那个同步 effect 要的是会触发重渲染的 state。
+   *
+   * 覆盖是什么、怎么关，见 `@/lib/demoSubtitles`。演示结束后这几行一起删。
+   */
+  const demoSeqRef = useRef(-1);
+  const [demoSeq, setDemoSeq] = useState(-1);
+  /** 当前这句要不要换成假字幕（`null` = 不换）。四句之外会自动退回真译文 */
+  const subtitleOverride = demoSubtitleAt(demoSeq);
+
+  /*
+   * ===== 离线演示 =====
+   *
+   * 没手套时也能看译文区的效果。`demoOn` 为真时**绕过 `isConnected` 门禁**
+   * 渲染真的 `SentencePanel`，词序由 `translateDemo.ts` 的脚本按时序喂进
+   * 上面那几个 state；顺句、历史结构、面板全都是真的（理由见那个文件的头注释）。
+   *
+   * ⚠ 手套真连上时**不给进演示**（下面按钮会 disabled）。两边都在写
+   * `sentenceWords`，同时跑的话屏幕上是真词和演示词交替闪 —— 那比看不到效果更糟。
+   *
+   * timers 存成数组是为了能一把清掉：嵌套 setTimeout 的取消要跟着句子和词两层
+   * 索引走，很容易漏掉最里层那个，表现为点了停止又蹦出一个词。
+   *
+   * ===== 手模动作 =====
+   *
+   * 演示不只出字，手模也跟着比划：动作是**库里那几个词的真录制**回放
+   * （`demoPlayback.ts`，IMU + 弯折逐帧喂进 `demoPose*Ref`），不是合成的曲线。
+   *
+   * 由此来的两个连带后果，都是刻意的：
+   *
+   *  - **字的节奏跟着动作走**。一个词停多久 = 那条录制裁剪后的实际长度，不再是
+   *    固定的 550ms。整段因此从约 12s 变成 30s 上下 —— 那才是真打手语的速度，
+   *    把 2 秒的手势压进 550ms 会播成抽搐，而且那就不是真数据了。
+   *  - **库里没有的词手模不动，字照出**。`missing` 会如实报出来，不拿另一个词的
+   *    动作凑数：演示里播错的手势比不播更糟。
+   *
+   * ⚠ 库里 08-13 那批录制与词表描述不符（`signLanguageVocab.ts` 文件头）。脚本里
+   * `hello`/`thank_you` 就在这批里，也就是说演示会一本正经地播两个已知/疑似打错的
+   * 手势。这件事**走 console.warn，不上屏**（见下面取库那段）；上屏的 `demoClipNote`
+   * 只留"看起来像故障其实不是"的那几条。要真修只能重录。
+   */
+  const [demoOn, setDemoOn] = useState(false);
+  const demoTimersRef = useRef<number[]>([]);
+  /** 手势回放的 rAF 句柄 + 起点时刻；`clipsRef` 是本轮取到的片段 */
+  const demoRafRef = useRef(0);
+  const demoClipsRef = useRef<DemoClipSet | null>(null);
+  /** 每点一次「演示」自增：异步取库回来时用它判断这一轮是不是已经被取消了 */
+  const demoRunRef = useRef(0);
+  /** 手模动作那一行提示（缺录制 / 已知打错），与译文区的 `sentenceNote` 分开 */
+  const [demoClipNote, setDemoClipNote] = useState<string | null>(null);
+  const [demoLoading, setDemoLoading] = useState(false);
+
+  const stopDemo = useCallback(() => {
+    demoRunRef.current++;
+    for (const id of demoTimersRef.current) clearTimeout(id);
+    demoTimersRef.current = [];
+    cancelAnimationFrame(demoRafRef.current);
+    demoRafRef.current = 0;
+    demoClipsRef.current = null;
+    // 置 null 让手模回到"没数据"那一档，而不是举在最后一个词的收势位置上
+    demoPoseLeftRef.current = null;
+    demoPoseRightRef.current = null;
+    setDemoOn(false);
+    setDemoLoading(false);
+    setDemoClipNote(null);
+    setSentenceWords(null);
+    setSentenceHistory([]);
+    setPronOverrides({});
+    setLastLive(false);
+    setSentenceNote(null);
+  }, []);
+
+  const startDemo = useCallback(async () => {
+    // 重播 = 先清干净再来一遍，不然第二次会接在上一轮的 5 句后面。
+    // stopDemo 自带 `demoRunRef++`，所以连点两下时第一轮的异步回调会自己作废
+    stopDemo();
+    const run = demoRunRef.current;
+    setDemoOn(true);
+    setDemoLoading(true);
+
+    /*
+     * 先把动作片段取回来，**再**排时间轴 —— 顺序不能反：每个词停多久由它那条
+     * 录制的长度决定，时间轴排完了才知道时长就等于排错了。
+     *
+     * 取库失败不让演示整个失败：`loadDemoClips` 自己吞掉异常、把词记进 missing，
+     * 于是最坏情况退回"纯文字演示 + 手模不动"，也就是加手模之前的样子。
+     */
+    const clips = await loadDemoClips(DEMO_SCRIPT.flatMap((s) => s.words));
+    if (demoRunRef.current !== run) return; // 取库期间被停掉了
+    demoClipsRef.current = clips;
+    setDemoLoading(false);
+    setDemoClipNote(describeDemoClips(clips));
+    /*
+     * 录制质量存疑的那几条只进 console，**不上屏** —— 演示是给人看的，
+     * 观众读不懂"与词表描述不符"，只看见产品自己挂了个橙色警告。
+     * 信息没丢，受众换了：这条本来就是给做演示的人自己看的。见 demoPlayback 文件头。
+     */
+    const quality = demoClipQualityNote(clips);
+    if (quality) console.warn("[demo] 录制存疑：" + quality);
+
+    // 时间轴只排一次，字和手都从它派生 —— 排两次就等于两张表，必然漂
+    const timeline = buildDemoTimeline(DEMO_SCRIPT, clipDurations(clips));
+    const windows = gestureWindows(timeline);
+    const t0 = performance.now();
+
+    /*
+     * 手势回放循环。走 rAF 而不是给每一帧排一个 timer：一条 2 秒的录制在 50Hz
+     * 下是 100 帧，14 个词就是 1400 个 timer，而 rAF 天然与屏幕刷新对齐、
+     * 掉帧时自己按 `elapsed` 跳到该在的位置（timer 会整体滞后并越积越多）。
+     */
+    const tick = () => {
+      if (demoRunRef.current !== run) return;
+      const hit = gestureAt(windows, performance.now() - t0);
+      const clip = hit ? demoClipsRef.current?.clips.get(hit.gesture.wordId) : null;
+      if (hit && clip) {
+        const frame = frameAt(clip, hit.offsetMs);
+        for (const side of ["left", "right"] as const) {
+          const pose = poseAt(clip, side, frame);
+          const ref = side === "left" ? demoPoseLeftRef : demoPoseRightRef;
+          /*
+           * 单手词的另一只手：`poseAt` 返回 null，这里就**保持上一个词留下的姿态**
+           * 不动，而不是置 null。置 null 会让那只手在"有数据/没数据"之间反复切，
+           * 表现为一只手每隔一个词就弹一下。它不动才是对的 —— 单手词里那只手
+           * 本来就垂着没参与。
+           */
+          if (pose) ref.current = { ...pose, hasData: true };
+        }
+      }
+      demoRafRef.current = requestAnimationFrame(tick);
+    };
+    demoRafRef.current = requestAnimationFrame(tick);
+
+    for (const ev of timeline) {
+      const id = window.setTimeout(() => {
+        if (ev.kind === "word") {
+          if (ev.first) {
+            /*
+             * 新的一句开门。这两下的顺序和真机 `decodeUtterance` 一样，但**必须
+             * 显式写在这里**，因为演示是逐词喂的、真机是整句一次到位：
+             *
+             *  - `setLastLive(false)`：上一句就此定版。不放掉的话，下面那个
+             *    "编辑同步回历史最后一条"的 effect 会拿**这一句才打了一个词**的
+             *    译文去改写上一句的历史记录 —— 屏幕上"你好！"会变成"你"。
+             *    真机上不会撞见这个，是因为那边换词和推历史在同一批 setState 里，
+             *    effect 跑的时候两边已经是同一句了。
+             *  - `setPronOverrides({})`：它按词下标存（`Record<number, string>`）。
+             *    看效果的人多半会点一下上一句的「代词」，不清的话那个 `{0: …}`
+             *    会落到这一句的第 0 个词上，而 5 句里代词位置各不相同。
+             */
+            setLastLive(false);
+            setPronOverrides({});
+          }
+          setSentenceWords(ev.words);
+        } else if (ev.kind === "settle") {
+          /*
+           * 收句：推进历史，`lastLive = true`，**live 保持原样不清**。
+           *
+           * 三点都是照着真机 `decodeUtterance` 抄的，尤其"不清 live"——
+           * 清了的话句子刚译完就自己缩小成历史那一档，而真机是大字继续留着
+           * 当前句、等下一句的第一个词进来才退档。面板那边靠 `lastLive` 把历史
+           * 最后一条切掉（`settledHistory`），所以不会画两遍。
+           *
+           * 顺句走真的 `resolveSentence`（和 `commitSentence` 同一个调用），
+           * 历史条目里的 `rule` 是真命中的规则名 —— 展开历史气泡看到的
+           * 「原始词序 + 规则名」跟真机一模一样。
+           *
+           * 代词覆盖传 `{}`：演示不预设"用户改过代词"，屏幕上显示的是
+           * **模型按位置猜的默认值**，正是要展示的那一层。
+           */
+          const solved = resolveSentence(ev.words, {}, grammarOnRef.current);
+          setSentenceHistory((prev) => [
+            ...prev,
+            { text: solved.text, words: ev.words, rule: solved.rule, at: Date.now() },
+          ]);
+          setLastLive(true);
+        } else {
+          // 播完停住，不循环：自动循环会让人分不清"卡住了"和"又播了一遍"
+          setSentenceNote("演示播完了。点「演示」重播，或连上手套开始真的翻译。");
+          /*
+           * 手模停在最后一个词的收势姿态上（不置 null）。真人打完最后一句也是
+           * 手停在那里，而不是弹回原位；而且这时候屏幕上写着"播完了"，
+           * 一只静止的手不会被误读成卡住。回放循环留着不停也无所谓 ——
+           * `gestureAt` 在末尾之后一直返回最后那一帧。
+           */
+        }
+      }, ev.at);
+      demoTimersRef.current.push(id);
+    }
+  }, [stopDemo]);
+  // 卸载时清 timer 和 rAF：不清的话切走页面之后回调还在往已卸载的组件里 setState
+  useEffect(() => () => {
+    demoRunRef.current++;
+    for (const id of demoTimersRef.current) clearTimeout(id);
+    cancelAnimationFrame(demoRafRef.current);
+  }, []);
 
   /*
    * 自动朗读要读的两个开关走 **ref**，不直接读 state。
@@ -373,16 +661,54 @@ export default function Translate() {
   } | null>(null);
   const [history, setHistory] = useState<TranslationEntry[]>([]);
   const [isTranslating, setIsTranslating] = useState(false);
-  const [confidenceThreshold, setConfidenceThreshold] = useState(0.7);
-  const [smoothingWindow, setSmoothingWindow] = useState(5); // 平滑窗口
+  /*
+   * 置信度阈值与平滑窗口。**右栏的两个滑杆撤掉之后这两个值不可调了**，
+   * 就是下面这两个初值。留成 state（而不是写成模块级常量）是为了保住下游那一整套
+   * ref 同步：推理循环读的是 `confidenceThresholdRef` / `smoothingWindowRef`，
+   * 要重新加回滑杆，把 setter 接到界面上就行，循环那一侧一行都不用改。
+   */
+  const [confidenceThreshold] = useState(0.7);
+  const [smoothingWindow] = useState(5);
+  /**
+   * 只放**出问题**的提示。它会占一整行，所以只有真出错才写这里。
+   *
+   * ⚠ 启动时"加载成功"的回执**不要**再塞进来 —— 那条改走 `loadedModels`
+   * （挂在 header 的 MODEL 徽标上，收起时零高度）。理由见 `loadedModels`。
+   */
   const [message, setMessage] = useState("");
+  /**
+   * 当前生效的两条模型（静态 / 时序），给 header 那个 MODEL 徽标点开看。
+   *
+   * 这原来是正文里一条 `✓ 已自动加载：静态单帧 "student_2026..." · 时序滑窗
+   * "seq_student(部署)" · 27 词` 的提示带，一行 15px，**开着页面就一直占着**，
+   * 而它讲的是启动那一瞬间的事。翻译的时候没人看它，出问题时才想查。
+   * 所以挪到徽标上：MODEL 这个字本来就是"模型就绪"的指示灯，"就绪的是哪两个"
+   * 正是它该回答的问题，点一下展开成浮层（absolute，不占版面）。
+   *
+   * 顺带从"这次加载了什么"改成"现在生效的是什么"：返回这一页时模型已经在内存里、
+   * 不会重新加载，旧写法下徽标就没得可点了 —— 而"我训的那条到底在不在用"
+   * 这个问题跟是不是刚加载完没有关系。
+   */
+  const [loadedModels, setLoadedModels] = useState<string[]>([]);
+  /** MODEL 徽标的浮层开没开 */
+  const [modelInfoOpen, setModelInfoOpen] = useState(false);
+  /** ⇄ 镜像徽标的浮层开没开 */
+  const [mirrorInfoOpen, setMirrorInfoOpen] = useState(false);
   /** 底部手模条开关。默认开；两个 WebGL 画面与 tfjs 推理共用 GPU，卡就关掉 */
   const [showHands, setShowHands] = useState(true);
-  /** 两条链路各自实际加载的模型名，显示在 MODEL INFO —— 用来回答"现在到底在用哪个模型" */
-  const [loadedNames, setLoadedNames] = useState<{
-    static: string | null;
-    sequence: string | null;
-  }>({ static: null, sequence: null });
+  /**
+   * 左框画骨架还是实心手模。**默认实心手模** —— 和 `/mocap` 第 1 步自检、向导、
+   * VirtualMocap 全站一致（那几处都不传 mode，`AnimatedHand` 的默认就是 mesh）。
+   *
+   * 曾经默认过骨架，被退回来了：骨架读的是同一套骨头世界矩阵、姿态和实心档
+   * **完全一致**，但没有蒙皮遮挡，原先被手掌那块肉挡住的指节偏差全暴露出来，
+   * 观感上就是"手模变不准了"。要判断是真不准还是画法差异，得能和 `/mocap`
+   * 那页比 —— 两页画法一致才比得了，所以基准档必须是 mesh。
+   *
+   * 骨架那一档留着（下面那排「骨架 / 手模」），它能看清关节位置，是反过来查
+   * 遮挡问题的工具；只是不该当默认。
+   */
+  const [handRender, setHandRender] = useState<"skeleton" | "mesh">("mesh");
 
   // 平滑缓冲区
   const predictionBufferRef = useRef<string[]>([]);
@@ -405,29 +731,28 @@ export default function Translate() {
   /*
    * 自动加载最新模型 —— 两条链路各自独立加载，互不影响。
    *
-   * 这里以前只播报静态那一条（"✓ 已自动加载静态模型 xxx"），时序模型是**默默**加载的，
-   * 而 MODE 初值又固定是静态。于是刚在 /train-seq 训完时序模型的人一进来，
-   * 看到的是"已加载静态模型"、用的也是静态模型，会以为自己训的模型没生效。
-   * 现在：两条都播报（各自写清是哪一条），并且**默认停在更新的那一个模型上**
-   * ——刚训完哪条就用哪条。用户手动点 MODE 之后不再自动改（这是挂载时跑一次的 effect）。
+   * 这里以前只播报静态那一条（"✓ 已自动加载静态模型 xxx"），时序模型是**默默**加载的。
+   * 两条都播报（各自写清是哪一条）：不然刚训完的人看不出自己训的那条有没有加载上。
+   * 播报的**去处**后来变了：不再写进 `message` 那条占一行的提示带，而是存进
+   * `loadedModels`、挂在 header 的 MODEL 徽标上点开看（理由见那个 state）。
+   * 出错的 `seqWarn` 仍然走 `message` —— 它必须自己撞到人眼前。
+   *
+   * 它**不再选 MODE**（那段逻辑已经删掉，见 `urlMode`）：右栏撤掉后默认档是句子，
+   * 而这里的比较只认识静态/时序两条，让它插手只会把默认档覆盖成时序。
    *
    * 顺带一句会救人的对照：静态模型叫 `student_...`、时序模型叫 `seq_student_...`
    * （`Train.tsx:136` / `TrainSequence.tsx:211`），名字里没有 seq_ 前缀的一定是静态模型。
    */
   useEffect(() => {
     let cancelled = false;
-    const loaded: string[] = [];
     /** 部署的词模型读取出错（不是"没部署"）。必须显示出来，见下 */
     let seqWarn: string | null = null;
 
-    // 两条都**先查后判**：已在内存里的模型也要把名字查出来显示在 MODEL INFO 里，
-    // 否则"到底在用哪个模型"这个问题在页面上无处可查
+    // 两条都**先查后判**：已在内存里的模型也要走一遍查询，`staticReady` /
+    // `seqReady` 是靠这里的结果置上去的（`modelReady` 又靠它们）
     const staticJob = getLatestModel().then(async (model) => {
       if (!model) return null;
-      if (!isModelLoaded()) {
-        await loadModelFromSaved(model);
-        loaded.push(`静态单帧 "${model.name}"`);
-      }
+      if (!isModelLoaded()) await loadModelFromSaved(model);
       return model;
     });
 
@@ -461,42 +786,36 @@ export default function Translate() {
 
       const deployedAt = deployed?.exportedAt ?? 0;
       if (deployed && deployedAt >= (saved?.createdAt ?? -1)) {
-        if (!isSequenceModelLoaded()) {
-          await loadDeployedWordModel();
-          loaded.push(`时序滑窗 "seq_student(部署)" · ${deployed.labels.length} 词`);
-        }
-        return { name: "seq_student(部署)", createdAt: deployedAt };
+        if (!isSequenceModelLoaded()) await loadDeployedWordModel();
+        return {
+          name: "seq_student(部署)",
+          createdAt: deployedAt,
+          words: deployed.labels.length,
+        };
       }
       if (!saved) return null;
-      if (!isSequenceModelLoaded()) {
-        await loadSequenceModelFromSaved(saved);
-        loaded.push(`时序滑窗 "${saved.name}"`);
-      }
-      return { name: saved.name, createdAt: saved.createdAt };
+      if (!isSequenceModelLoaded()) await loadSequenceModelFromSaved(saved);
+      return {
+        name: saved.name,
+        createdAt: saved.createdAt,
+        words: saved.labels.length,
+      };
     })();
 
     Promise.all([staticJob, seqJob]).then(([staticModel, seqModel]) => {
       if (cancelled) return;
       if (staticModel) setStaticReady(true);
       if (seqModel) setSeqReady(true);
-      setLoadedNames({
-        static: staticModel?.name ?? null,
-        sequence: seqModel?.name ?? null,
-      });
-      // URL 明确指定了 MODE 就不抢方向盘。这里的比较只认识静态/时序两条，
-      // 句子模型不在 IndexedDB 里，让它插手会把 ?mode=sentence 覆盖掉
-      if (urlMode.current === null) {
-        // 谁的 createdAt 更新就切到谁；只有一个就用那一个
-        if (seqModel && (!staticModel || seqModel.createdAt >= staticModel.createdAt)) {
-          setModelMode("sequence");
-        } else if (staticModel) {
-          setModelMode("static");
-        }
-      }
-      const msgs: string[] = [];
-      if (loaded.length) msgs.push(`✓ 已自动加载：${loaded.join(" · ")}`);
-      if (seqWarn) msgs.push(`⚠ ${seqWarn}`);
-      if (msgs.length) setMessage(msgs.join("　|　"));
+      // 这里**不再自动选档**：MODE 的唯一来源是 URL（见上面 `urlMode`）。
+      // 原来那段"谁的 createdAt 更新就切到谁"只认识静态/时序两条，而右栏撤掉后
+      // 页面默认就是句子档，让它插手只会把默认档覆盖成时序。
+      // 现在生效的是哪两条（不是"这次加载了哪几条"，见 `loadedModels`）
+      const active: string[] = [];
+      if (staticModel) active.push(`静态单帧 "${staticModel.name}"`);
+      if (seqModel)
+        active.push(`时序滑窗 "${seqModel.name}" · ${seqModel.words} 词`);
+      setLoadedModels(active);
+      if (seqWarn) setMessage(`⚠ ${seqWarn}`);
     });
 
     return () => {
@@ -681,6 +1000,10 @@ export default function Translate() {
         setSentenceWords(post.words);
         // 上一句的代词选择不能留到这一句：下标对不上，会把这句的某个词改成别的人称
         setPronOverrides({});
+        // 演示译文覆盖：一次解码 = 一句。见上面 `demoSeqRef` 那段
+        demoSeqRef.current += 1;
+        setDemoSeq(demoSeqRef.current);
+        const override = demoSubtitleAt(demoSeqRef.current);
         const base =
           act.reason === "maxLength"
             ? `到了 ${MAX_UTTERANCE_MS / 1000}s 上限自动收句 —— 超出的部分没进模型。`
@@ -723,8 +1046,17 @@ export default function Translate() {
          *  3. 失败/降级原因必须并进 `fixes` 显示。静默失败等于让人以为音箱坏了
          *     （`speakChinese` 返回 `{ok, reason}` 而不抛，就是为了这个）。
          */
-        if (post.words.length > 0) {
-          const text = resolveSentence(post.words, {}, grammarOnRef.current).text;
+        /*
+         * `|| override` 这一道是演示逼出来的：现场"随便打手语"经常一个词都解不
+         * 出来（`post.words` 是空的），不放开的话那一句既不进历史也不朗读 ——
+         * 大字倒是有（面板那边只看 `textOverride`），但聊天窗口攒不起来，
+         * 四句连不成一段。覆盖关掉之后这个条件自动退回原来的样子。
+         */
+        if (post.words.length > 0 || override) {
+          // rule 也要留下来：历史气泡展开时显示的是"当时命中了哪条规则"，
+          // 事后拿 words 重算可能命中的已经是另一条了（规则表会改）
+          const solved = resolveSentence(post.words, {}, grammarOnRef.current);
+          const text = override ?? solved.text;
           if (autoSpeakRef.current) {
             const r = speakChinese(text);
             if (r.reason) fixes.push(`朗读：${r.reason}`);
@@ -740,7 +1072,10 @@ export default function Translate() {
            * 没有信息，只会把历史刷满。
            */
           if (continuousRef.current) {
-            setSentenceHistory((prev) => [...prev, text]);
+            setSentenceHistory((prev) => [
+              ...prev,
+              { text, words: post.words, rule: solved.rule, at: Date.now() },
+            ]);
             setLastLive(true);
           }
         }
@@ -765,18 +1100,30 @@ export default function Translate() {
   useEffect(() => {
     if (!lastLive || !sentenceWords) return;
     if (sentenceWords.length === 0) {
-      // 词被删空了 —— 历史里那条也该撤掉，不能留一句已经不存在的话
+      /*
+       * 词被删空了 —— 历史里那条也该撤掉，不能留一句已经不存在的话。
+       *
+       * 但演示覆盖开着的时候**不能撤**：现场解出 0 个词是常事，而那一句上面
+       * 已经按假字幕进过历史了，撤掉的效果就是刚出现的那句话自己消失。
+       */
+      if (subtitleOverride) return;
       setSentenceHistory((prev) => prev.slice(0, -1));
       setLastLive(false);
       return;
     }
-    const text = resolveSentence(sentenceWords, pronOverrides, grammarOn).text;
-    setSentenceHistory((prev) =>
-      prev.length === 0 || prev[prev.length - 1] === text
-        ? prev
-        : [...prev.slice(0, -1), text]
-    );
-  }, [lastLive, sentenceWords, pronOverrides, grammarOn]);
+    const solved = resolveSentence(sentenceWords, pronOverrides, grammarOn);
+    // 覆盖也要走这一遍，否则改代词时这里会拿真译文把历史里那条假字幕冲掉
+    const text = subtitleOverride ?? solved.text;
+    setSentenceHistory((prev) => {
+      if (prev.length === 0 || prev[prev.length - 1].text === text) return prev;
+      const last = prev[prev.length - 1];
+      // `at` 沿用原值：这条记的是"这句话什么时候说的"，改代词不该让它跳到队尾的时间
+      return [
+        ...prev.slice(0, -1),
+        { text, words: sentenceWords, rule: solved.rule, at: last.at },
+      ];
+    });
+  }, [lastLive, sentenceWords, pronOverrides, grammarOn, subtitleOverride]);
 
   // 推理循环 — 使用 ref 读取最新帧，避免闭包陷阱
   useEffect(() => {
@@ -1147,34 +1494,6 @@ export default function Translate() {
     }
   }, [isTranslating]);
 
-  const switchMode = useCallback((mode: ModelMode) => {
-    setModelMode(mode);
-    setCurrentPrediction(null);
-    predictionBufferRef.current = [];
-    windowBufRef.current?.clear();
-    // 缓冲清空后主手判定的依据就没了，留着上次的结论会在预热期误导人
-    dominanceRef.current?.reset();
-    setDominance(null);
-    // 切档时正在录的那一句作废：缓冲刚被清掉，它的数据已经不在了。
-    // 不 cancel 的话状态机还停在 capturing，切回来会拿一段跨越切档的残缺数据去解码
-    sentenceEnvRef.current?.cancel();
-    setCaptureStatus(null);
-    lastStatusKeyRef.current = "";
-    stopSpeaking();
-    // 历史里那条"当前这一句"就此定版：切档之后 sentenceWords 还在，
-    // 但已经不该再跟着编辑同步了（这一句的采集已经作废）
-    setLastLive(false);
-    /*
-     * 切档一律停掉推理循环。
-     *
-     * 句子档是被「开始一句」隐式打开的（没有独立的「开始翻译」按钮），
-     * 不在这里停的话，切到逐词档会**直接开始出词** —— 用户没点过「开始翻译」，
-     * 看起来像是页面自己在乱吐词。反过来切进句子档也一样：循环空转着，
-     * 而面板上写的是"未开始"。
-     */
-    setIsTranslating(false);
-  }, []);
-
   /*
    * ===== 句子档的交互 =====
    *
@@ -1236,16 +1555,6 @@ export default function Translate() {
     setSentenceNote("已停止。点「开始」继续。");
   }, []);
 
-  /**
-   * 清历史。**必须一起清 `lastLive`** —— 不清的话同步 effect 下一跳会看到
-   * "历史为空但 lastLive 为真"，把当前这句又写回一条空历史里
-   * （effect 里对 `prev.length === 0` 有兜底，但语义上这一句已经不在历史里了）
-   */
-  const clearSentenceHistory = useCallback(() => {
-    setSentenceHistory([]);
-    setLastLive(false);
-  }, []);
-
   const setOverride = useCallback((index: number, member: string) => {
     setPronOverrides((prev) => ({ ...prev, [index]: member }));
   }, []);
@@ -1280,32 +1589,58 @@ export default function Translate() {
    * `setSentenceWords` 会把它覆盖掉、永久丢失）。所以这里**不能再追加** ——
    * 那会让同一句进两遍。它的含义变成**定版**：解除"历史最后一条跟着编辑同步"，
    * 之后改代词/删词不再影响已经记下的那条。
+   *
+   * words / rule 由面板一起传进来（它本来就算好了 `resolved`），这里不重算：
+   * 重算要再读一遍 sentenceWords，而这个回调是 `[]` 依赖的，读到的会是旧值。
    */
-  const commitSentence = useCallback((text: string) => {
-    if (continuousRef.current) {
-      setLastLive(false);
+  const commitSentence = useCallback(
+    (text: string, words: string[], rule: string | null) => {
+      if (continuousRef.current) {
+        setLastLive(false);
+        setSentenceWords(null);
+        setPronOverrides({});
+        setSentenceNote("已定版。接着打下一句就行，不用点按钮。");
+        return;
+      }
+      setSentenceHistory((prev) => [...prev, { text, words, rule, at: Date.now() }]);
       setSentenceWords(null);
       setPronOverrides({});
-      setSentenceNote("已定版。接着打下一句就行，不用点按钮。");
-      return;
-    }
-    setSentenceHistory((prev) => [...prev, text]);
-    setSentenceWords(null);
-    setPronOverrides({});
-    setSentenceNote("已成句。再点「开始一句」打下一句。");
-  }, []);
-
-  const activeLabels = useMemo(
-    () => (modelMode === "static" ? getLoadedLabels() : getLoadedSequenceLabels()),
-    // labels 存在模块级变量里，React 看不到它变化，只能靠这两个信号触发重算
-    [modelMode, modelReady]
+      setSentenceNote("已成句。再点「开始一句」打下一句。");
+    },
+    []
   );
 
-  // 清除历史
+  // 清除历史（**逐词档的** history，不是句子档那个）
   const clearHistory = useCallback(() => {
     setHistory([]);
     lastAddedWordRef.current = "";
   }, []);
+
+  /**
+   * 清空句子档的聊天记录。
+   *
+   * 和上面那个 `clearHistory` 是两套账本，不能合并：那个清的是逐词档一个个词的
+   * `history`。`lastLive` 必须一起清 —— 不清的话，同步 effect 会以为"历史最后一条
+   * 是当前这句"，下一次改代词就会往空数组里同步（`prev.length === 0` 挡住了崩溃，
+   * 但状态从此不一致）。
+   */
+  const clearSentenceHistory = useCallback(() => {
+    setSentenceHistory([]);
+    setLastLive(false);
+    // 演示字幕一并回到第一句。清了记录还接着念第 3 句的话，就没法重演一遍
+    demoSeqRef.current = -1;
+    setDemoSeq(-1);
+  }, []);
+
+  /**
+   * 画进聊天窗口的历史 = 全部历史**减掉最后一条 live**。
+   *
+   * ⚠ 这一步不能省。连续模式下解码那一刻会同时往 `sentenceHistory` 追一条、
+   * 又把 `sentenceWords` 设成同一句（`lastLive=true` 就是这个意思）。
+   * 不切掉的话，同一句会在窗口里出现两次：一次是历史气泡、一次是下面那个 live 气泡。
+   * 历史以前不显示，所以这个重叠一直没露出来过。
+   */
+  const settledHistory = lastLive ? sentenceHistory.slice(0, -1) : sentenceHistory;
 
   // 组合翻译文本
   const translatedText = history.map((h) => h.word).join(" ");
@@ -1314,11 +1649,15 @@ export default function Translate() {
     /* h-screen + overflow-hidden：底部手模条要按"剩下多少高度"占位，
        父级高度必须是确定值；min-h-screen 下长历史会把手模条顶到屏幕外 */
     <div
+      /* 底色走 `--hud-page`，不写死。浅色是 index.css 里 `:root` 的默认值、
+         全站共用，这一页不再自己贴皮肤类（原来这里有个 `theme-light`，
+         那时只有这一页是浅色；现在全站都换过去了，那个类已经不存在）。
+         想把某一块退回赛博朋克配色，给它加 `.theme-dark`。 */
       className="h-screen flex flex-col overflow-hidden"
-      style={{ backgroundColor: "#0a0e1a" }}
+      style={{ backgroundColor: "var(--hud-page)" }}
     >
       {/* 顶部导航 */}
-      <header className="h-12 flex items-center justify-between px-4 border-b border-[#00f0ff]/15 shrink-0">
+      <header className="h-12 flex items-center justify-between px-4 border-b border-[var(--hud-line)] shrink-0">
         <div className="flex items-center gap-3">
           <Link
             href="/"
@@ -1327,20 +1666,201 @@ export default function Translate() {
             <ArrowLeft className="w-3 h-3" />
             返回
           </Link>
-          <div className="w-px h-5 bg-[#00f0ff]/20" />
-          <span className="text-xs font-bold tracking-widest text-[#00f0ff] font-mono">
+          <div className="w-px h-5 bg-[var(--hud-line-strong)]" />
+          <span className="text-xs font-bold tracking-widest text-[var(--hud-accent)] font-mono">
             SIGN LANGUAGE TRANSLATOR
           </span>
         </div>
         <div className="flex items-center gap-4 text-[10px] font-mono">
-          {modelReady && (
-            <span className="text-[#00e5a0] flex items-center gap-1">
-              <Brain className="w-3 h-3" />
-              MODEL
-            </span>
+          {/* 显示/隐藏手模挪到这里 —— 它原来钉在左列标题行上，而左列在关掉之后
+              整张卡都不渲染了，开关跟着一起消失就再也开不回来 */}
+          <button
+            onClick={() => setShowHands((v) => !v)}
+            className="text-[var(--hud-dim)] hover:text-[var(--hud-accent)] flex items-center gap-1 transition-colors whitespace-nowrap"
+            title={
+              showHands
+                ? "隐藏手模（3D 画面和推理抢同一块 GPU，机器吃力时可以关掉）"
+                : "显示手模"
+            }
+          >
+            {showHands ? (
+              <>
+                <EyeOff className="w-3 h-3" />
+                隐藏手模
+              </>
+            ) : (
+              <>
+                <Eye className="w-3 h-3" />
+                显示手模
+              </>
+            )}
+          </button>
+          {/*
+            手模 / 骨架切换。`showHands` 关掉时不显示 —— 左框整个没渲染，
+            这时候切它没有任何可见效果，只会让人以为按坏了。
+            手模在前：它是默认档，也是和 /mocap 一致的那一档（见 `handRender`）。
+          */}
+          {showHands && (
+            <div className="flex items-center rounded-sm border border-[var(--hud-line-strong)] overflow-hidden">
+              {(
+                [
+                  ["mesh", "手模"],
+                  ["skeleton", "骨架"],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  onClick={() => setHandRender(value)}
+                  className={`px-2 py-0.5 transition-colors ${
+                    handRender === value
+                      ? "bg-[var(--hud-accent)] text-white"
+                      : "text-[var(--hud-dim)] hover:text-[var(--hud-accent)]"
+                  }`}
+                  title={
+                    value === "mesh"
+                      ? "画实心手模（默认）—— 和第 1 步 /mocap 自检那几格画法一致，两页可以直接对照"
+                      : "画关节骨架 —— 藏掉蒙皮只留关节球和骨链，看得清指节到底停在哪；姿态和手模档完全一致"
+                  }
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          )}
+          {/*
+            ===== 演示按钮 =====
+
+            连着手套时 disabled：两边都在写 `sentenceWords`，同时跑的话屏幕上是
+            真词和演示词交替闪。用 disabled 而不是隐藏 —— 隐藏会让这一行在
+            连接/断开时抖一下，而且"连上之后按钮没了"会被当成功能坏了。
+
+            播放中变成「停止演示」：演示是有状态的（一串 timer + 被占用的
+            sentenceWords/History），没有出口的话只能靠刷新页面退出。
+          */}
+          {modelMode === "sentence" && (
+            <button
+              onClick={demoOn ? stopDemo : startDemo}
+              disabled={isConnected}
+              className={`cyber-btn px-2 py-1 rounded-sm text-[10px] flex items-center gap-1 ${
+                isConnected ? "opacity-40 cursor-not-allowed" : ""
+              }`}
+              style={demoOn ? { color: "var(--hud-warn)" } : undefined}
+              title={
+                isConnected
+                  ? "手套已连接，不需要演示 —— 直接打就行（演示和真数据会互相盖）"
+                  : `不连手套看一眼译文长什么样：${DEMO_SCRIPT.length} 句，逐词跳出来、停一下自动收句往上滚`
+              }
+            >
+              {demoOn ? (
+                <>
+                  <Square className="w-3 h-3" />
+                  停止演示
+                </>
+              ) : (
+                <>
+                  <Play className="w-3 h-3" />
+                  演示
+                </>
+              )}
+            </button>
+          )}
+          {/*
+            MODEL 徽标 = "模型就绪"指示灯 + "就绪的是哪两条"的入口。
+            点开是浮层（`absolute`），**不占版面** —— 这份清单原来是正文里一条
+            常驻的 `✓ 已自动加载：…` 提示带，见 `loadedModels`。
+            清单空着（两条都没有）时退回纯 span：没得可点就别装成按钮。
+          */}
+          {modelReady &&
+            (loadedModels.length > 0 ? (
+              <div className="relative">
+                <button
+                  onClick={() => setModelInfoOpen((o) => !o)}
+                  className="text-[var(--hud-ok)] flex items-center gap-1 hover:opacity-80 transition-opacity"
+                  title="点开看当前生效的模型"
+                >
+                  <Brain className="w-3 h-3" />
+                  MODEL
+                  {modelInfoOpen ? (
+                    <ChevronDown className="w-2.5 h-2.5" />
+                  ) : (
+                    <ChevronRight className="w-2.5 h-2.5" />
+                  )}
+                </button>
+                {modelInfoOpen && (
+                  <>
+                    {/* 点别处关掉。没有这层的话浮层只能靠再点一次徽标关，
+                        而人的直觉是点空白处 */}
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setModelInfoOpen(false)}
+                    />
+                    <div className="absolute right-0 top-full mt-1 z-50 min-w-[220px] rounded-sm border border-[var(--hud-line-strong)] bg-[var(--hud-surface)] px-3 py-2 shadow-lg">
+                      <div className="text-[9px] uppercase tracking-wider text-[var(--hud-dim)] mb-1">
+                        当前生效
+                      </div>
+                      {loadedModels.map((m) => (
+                        <div
+                          key={m}
+                          className="text-[10px] text-[var(--hud-text)] leading-relaxed whitespace-nowrap"
+                        >
+                          ✓ {m}
+                        </div>
+                      ))}
+                      {/* 这一句是真会救人的：名字里没有 seq_ 前缀的一定是静态模型
+                          （Train.tsx:136 / TrainSequence.tsx:211） */}
+                      <div className="mt-1 pt-1 border-t border-[var(--hud-line)] text-[9px] text-[var(--hud-faint)] leading-relaxed">
+                        静态模型叫 student_… · 时序模型叫 seq_student_…
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            ) : (
+              <span className="text-[var(--hud-ok)] flex items-center gap-1">
+                <Brain className="w-3 h-3" />
+                MODEL
+              </span>
+            ))}
+          {/*
+            换手归一化徽标。**静默做这件事很危险**：识别结果对不上时，用户没法分辨
+            是"手语做错了"还是"软件把左手当右手在算"。所以这条不能删。
+            但它在左手用户身上是常亮的 —— 原来那行常驻提示带就是这么一直占着
+            正文一行的（见下面正文区那段注释）。这里的形态是：徽标常亮（"这件事
+            正在发生"一眼可见），全文点开才给（`absolute`，零高度）。
+          */}
+          {mirrored && (
+            <div className="relative">
+              <button
+                onClick={() => setMirrorInfoOpen((o) => !o)}
+                className="text-[var(--hud-violet)] flex items-center gap-1 hover:opacity-80 transition-opacity whitespace-nowrap"
+                title="点开看归一化口径"
+              >
+                ⇄ 镜像
+                {mirrorInfoOpen ? (
+                  <ChevronDown className="w-2.5 h-2.5" />
+                ) : (
+                  <ChevronRight className="w-2.5 h-2.5" />
+                )}
+              </button>
+              {mirrorInfoOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setMirrorInfoOpen(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-1 z-50 w-[280px] rounded-sm border border-[var(--hud-line-strong)] bg-[var(--hud-surface)] px-3 py-2 shadow-lg">
+                    <div className="text-[10px] text-[var(--hud-text)] leading-relaxed">
+                      ⇄ 已按镜像归一化到右手口径推理（
+                      {dominance ? describeDominance(dominance) : "主手＝左手"}
+                      ，换手不改词义）
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
           )}
           {isTranslating && (
-            <span className="text-[#ff2d7b] flex items-center gap-1 animate-pulse">
+            <span className="text-[var(--hud-err)] flex items-center gap-1 animate-pulse">
               <Volume2 className="w-3 h-3" />
               LIVE
             </span>
@@ -1350,23 +1870,92 @@ export default function Translate() {
         </div>
       </header>
 
-      <div className="flex-1 flex overflow-hidden">
-        {/* 主内容区：上＝翻译输出，下＝双手 3D 手模条 */}
-        <div className="flex-1 flex flex-col min-w-0 min-h-0">
-          {/*
-           * 翻译输出区 —— 滚动容器与居中容器**必须分成两层**。
-           *
-           * 原来是一层：`flex-1 min-h-0 overflow-y-auto flex flex-col justify-center`。
-           * `justify-center` 和 `overflow-y-auto` 凑在一起是 flexbox 的经典坑：内容超高时
-           * 会同时朝两头溢出，而**朝顶部溢出的那部分滚不到**（scrollTop 到 0 就停了）。
-           * 底下的手模条一占走 300px，这里剩的高度就装不下"大字＋置信度条＋按钮＋历史面板"，
-           * 于是最先看不见的恰好是排在最上面的识别结果大字 —— 表现和"输出窗口被删了"一样。
-           *
-           * 现在外层只管滚动、内层用 `min-h-full` 管居中：内容矮时内层撑满外层、正常居中；
-           * 内容高时内层自然长过外层，从顶部开始滚，一行都不会丢。
-           */}
-          <div className="flex-1 min-h-0 overflow-y-auto">
-            <div className="min-h-full flex flex-col items-center justify-center p-6 space-y-6">
+      {/*
+       * 主内容区：**上＝译文，下＝手语比划画面**。
+       *
+       * 这一版是上下分。⚠ 先读完这段再动比例 —— 上一版特意从上下改成了左右，
+       * 理由是硬的：手模取景**竖直方向定尺寸**（见 HandModel.tsx 顶部第 2 条），
+       * 所以**视口有多高就决定手有多大，把框加宽一点用都没有**。左右分时手模拿到
+       * 的是整个正文高度（1440×900 实测 453×740），上下分只能拿到分给它的那一截。
+       *
+       * 现在这个上下分**不是回退到旧版**：旧版译文在上、手模条只剩 46vh，手很小。
+       * 这一版把比例倒过来 —— 手语区拿 70%、译文区拿剩下的 30%
+       * （1440×900 下手模视口 687×498）。
+       *
+       * "手还是小"这件事最后是**在取景里解决的**，不是在这里的宽高比里：
+       * 帧内构成原来是「上方空白 8% / 手 53% / 前臂 39%」。相机推近 + 画面中心
+       * 上抬之后手占 ~59% 帧高，同时前臂还留着腕下 3.2 个世界单位（那条线索不能丢，
+       * 见 HandModel.tsx 第 2 条里三档取景的对照）。
+       * **别再想着从这里的百分比找手的大小**：这一区再多给 10%，手也只跟着长 10%；
+       * 取景那一刀是成倍的，而且不花译文区的地方。
+       *
+       * 卡里那行标题（`LIVE HAND · …`）也已经删了，37px 全给了画面 —— 见下面。
+       */}
+      <div className="flex-1 min-h-0 flex flex-col gap-3 p-3 overflow-hidden">
+        {/* ===== 上：翻译输出 =====
+         *
+         * 句子档下这一列就是**聊天窗口**，由 `SentencePanel` 整个承担：
+         * 它自己是那张卡（标题 / 气泡区滚动 / 底部控件三段），所以这里不再包一层
+         * 居中容器 —— 聊天记录是从上往下堆、新的在下面，居中会让它在只有一两句时
+         * 飘在中间、多几句之后又跳成顶对齐。
+         *
+         * 其余状态（没模型 / 没连手套 / 逐词档）仍然是"一屏就这么点内容"的样子，
+         * 保留居中，但**滚动容器和居中容器必须分成两层**：
+         * `justify-center` 和 `overflow-y-auto` 写在同一个元素上是 flexbox 的经典坑，
+         * 内容超高时会朝两头溢出，而**朝顶部溢出的那部分滚不到**（scrollTop 到 0 就停）。
+         * 上下分之后这一区是**矮而宽**的（1440×900 下约 290px 高），逐词档那摞读数
+         * 更容易超高，最先看不见的恰好是排最上面的大字 —— 表现和"输出窗口被删了"
+         * 一样。外层只管滚、内层用 `min-h-full` 管居中。
+         *
+         * 高度是**剩下的那部分**（`flex-1`）：手语区先按 62% 拿走它那一份，
+         * 这里吃剩下的。手模关掉时（`showHands` 为假）它整个不渲染，这一区自然吃满。
+         */}
+        <div className="flex flex-col flex-1 min-h-0 min-w-0 gap-2">
+          {/* 句子档就绪 —— 整列换成聊天窗口。
+              逐词那套（大字 + 置信度条 + 开始翻译按钮 + 词历史）在这一档全都
+              不适用：没有"当前这个词"，也没有逐词置信度，句子的开始/结束
+              由面板自己的按钮驱动 */}
+          {/* `|| demoOn` 是演示的入口：它**只放开 isConnected 这一道**
+              （模型档仍要求 sentence，模型本身仍要求就绪）。演示不需要模型 ——
+              它喂的是模型该吐出的词，不跑推理；但档位得对，逐词档下这个面板
+              整个不适用。见 `demoOn` 那段。 */}
+          {(modelReady && isConnected && modelMode === "sentence") ||
+          (demoOn && modelMode === "sentence") ? (
+            <SentencePanel
+              words={sentenceWords}
+              /* ⚠ 传 `settledHistory` 而不是 `sentenceHistory`：最后一条可能就是
+                 live 那句，整份传进去会让同一句在窗口里出现两次（见上面那段） */
+              history={settledHistory}
+              onClearHistory={clearSentenceHistory}
+              overrides={pronOverrides}
+              onOverride={setOverride}
+              onDeleteWord={deleteSentenceWord}
+              grammarOn={grammarOn}
+              onToggleGrammar={setGrammarOn}
+              autoSpeak={autoSpeak}
+              onToggleAutoSpeak={setAutoSpeak}
+              continuous={continuousMode}
+              onToggleContinuous={setContinuousMode}
+              status={captureStatus}
+              note={sentenceNote}
+              onArm={armSentence}
+              onStop={stopSentence}
+              onFinish={finishSentence}
+              onCommit={commitSentence}
+              running={isTranslating}
+              /* 演示时**故意**保持 disabled：这一项只管「开始 / 结束 / 停止」
+                 那三个真正驱动采集的按钮，演示里按它们没有任何意义（没手套、
+                 没推理循环）。「代词 / 删词 / 定版 / 朗读」不看这一项，
+                 各自按有没有词判断，所以演示里照样能点、能改代词 —— 那正是
+                 要展示的东西。 */
+              disabled={!modelReady || !isConnected}
+              /* 演示译文覆盖。`null` 时这个 prop 等于不存在（见 SentencePanel
+                 那边的 `resolved`）。删演示的时候连这一行一起删 */
+              textOverride={subtitleOverride}
+            />
+          ) : (
+          <div className="cyber-panel rounded-2xl flex-1 min-h-0 overflow-y-auto">
+            <div className="min-h-full flex flex-col items-center justify-center space-y-4 p-4">
               {/* 模型未加载 —— 句子档单独一套文案：它的模型不在 IndexedDB 里，
                   指向 /train-seq 会让人训出一个这一档根本不会加载的模型 */}
               {!modelReady &&
@@ -1377,8 +1966,8 @@ export default function Translate() {
                   />
                 ) : (
                   <div className="text-center space-y-3">
-                    <Brain className="w-16 h-16 mx-auto text-[#334455]" />
-                    <p className="text-sm text-[#556677]">
+                    <Brain className="w-16 h-16 mx-auto text-[var(--hud-faint)]" />
+                    <p className="text-sm text-[var(--hud-dim)]">
                       {modelMode === "static"
                         ? "请先训练并加载静态模型"
                         : "请先训练并加载时序模型"}
@@ -1395,10 +1984,10 @@ export default function Translate() {
               {/* 手套未连接 */}
               {modelReady && !isConnected && (
                 <div className="text-center space-y-4">
-                  <Hand className="w-16 h-16 mx-auto text-[#556677]" />
-                  <p className="text-sm text-[#8899aa]">手套未连接</p>
+                  <Hand className="w-16 h-16 mx-auto text-[var(--hud-dim)]" />
+                  <p className="text-sm text-[var(--hud-soft)]">手套未连接</p>
                   {gloveError && (
-                    <p className="text-[10px] text-[#ff2d7b]">{gloveError}</p>
+                    <p className="text-[10px] text-[var(--hud-err)]">{gloveError}</p>
                   )}
                   {/* 连接入口只有第 1 步一处 —— 那里同时做零位与弯折标定，
                       在别处另开一次串口只会把那些标定作废 */}
@@ -1409,44 +1998,21 @@ export default function Translate() {
                     <Zap className="w-4 h-4" />
                     去第 1 步连接手套
                   </Link>
-                  <p className="text-[10px] text-[#556677]">连接任一只手即可翻译；双手手语请两只都连</p>
+                  <p className="text-[10px] text-[var(--hud-dim)]">连接任一只手即可翻译；双手手语请两只都连</p>
                 </div>
               )}
 
-              {/* 句子档就绪 —— 整块换成 SentencePanel。
-                  逐词那套（大字 + 置信度条 + 开始翻译按钮 + 词历史）在这一档全都
-                  不适用：没有"当前这个词"，也没有逐词置信度，句子的开始/结束
-                  由面板自己的按钮驱动 */}
-              {modelReady && isConnected && modelMode === "sentence" && (
-                <SentencePanel
-                  words={sentenceWords}
-                  overrides={pronOverrides}
-                  onOverride={setOverride}
-                  onDeleteWord={deleteSentenceWord}
-                  grammarOn={grammarOn}
-                  onToggleGrammar={setGrammarOn}
-                  autoSpeak={autoSpeak}
-                  onToggleAutoSpeak={setAutoSpeak}
-                  continuous={continuousMode}
-                  onToggleContinuous={setContinuousMode}
-                  status={captureStatus}
-                  note={sentenceNote}
-                  onArm={armSentence}
-                  onStop={stopSentence}
-                  onFinish={finishSentence}
-                  onCommit={commitSentence}
-                  history={sentenceHistory}
-                  onClearHistory={clearSentenceHistory}
-                  running={isTranslating}
-                  disabled={!modelReady || !isConnected}
-                />
-              )}
-
-              {/* 就绪状态 - 可以翻译（逐词两档） */}
+              {/* 就绪状态 - 可以翻译（逐词两档）
+                  ⚠ 这一档是**横排两栏**，不是竖着一摞。上下分之后这一区是矮而宽的
+                  （1440×900 下约 290px 高），而这里要装的东西是：72px 大字 + 置信度条
+                  + 三行读数 + 按钮 + 累计输出句 —— 竖着堆下来 400px 都不够，
+                  会把最上面的大字顶出可视区（顶部溢出是滚不回去的，见上面那段注释）。
+                  横排之后左栏管"当前这一个词"、右栏管"已经攒出来的句子"，
+                  刚好也是这一页的两件事。 */}
               {modelReady && isConnected && modelMode !== "sentence" && (
-                <>
-                  {/* 当前识别结果 */}
-                  <div className="text-center space-y-4">
+                <div className="w-full flex-1 min-h-0 flex items-stretch gap-5">
+                  {/* ===== 左栏：当前识别的这一个词 ===== */}
+                  <div className="shrink-0 w-[40%] max-w-[520px] flex flex-col items-center justify-center gap-3 text-center">
                     {currentPrediction ? (
                       <>
                         <div
@@ -1458,13 +2024,9 @@ export default function Translate() {
                                 ? getCategoryColor(
                                     getWordById(resolveToMember(currentPrediction.label))?.category ?? ""
                                   )
-                                : "#556677",
-                            textShadow:
-                              currentPrediction.confidence >= confidenceThreshold
-                                ? `0 0 30px ${getCategoryColor(
-                                    getWordById(resolveToMember(currentPrediction.label))?.category ?? ""
-                                  )}40`
-                                : "none",
+                                : "var(--hud-dim)",
+                            /* 浅色底上不再发光：白底描不出辉光，只会糊成一圈脏边 */
+                            textShadow: "none",
                             opacity:
                               currentPrediction.confidence >= 0.5
                                 ? 1
@@ -1473,23 +2035,25 @@ export default function Translate() {
                         >
                           {currentPrediction.word}
                         </div>
-                        {/* 置信度条 */}
-                        <div className="w-48 mx-auto space-y-1">
-                          <div className="h-2 bg-[#1a2030] rounded-full overflow-hidden border border-[#00f0ff]/20">
+                        {/* 置信度条 + 那几行标定读数。宽度跟着左栏走（原来写死
+                            192px，那是右侧窄列时代的值）—— 转角速率那行带阈值说明，
+                            192px 下要折成三行，把大字往上顶 */}
+                        <div className="w-full max-w-[300px] mx-auto space-y-1">
+                          <div className="h-2 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[var(--hud-line-strong)]">
                             <div
                               className="h-full rounded-full transition-all duration-200"
                               style={{
                                 width: `${currentPrediction.confidence * 100}%`,
                                 backgroundColor:
                                   currentPrediction.confidence >= confidenceThreshold
-                                    ? "#00e5a0"
+                                    ? "var(--hud-ok)"
                                     : currentPrediction.confidence >= 0.5
-                                    ? "#f59e0b"
-                                    : "#ff2d7b",
+                                    ? "var(--hud-warn)"
+                                    : "var(--hud-err)",
                               }}
                             />
                           </div>
-                          <div className="text-[10px] font-mono text-[#556677] text-center">
+                          <div className="text-[10px] font-mono text-[var(--hud-dim)] text-center">
                             置信度: {(currentPrediction.confidence * 100).toFixed(1)}%
                           </div>
                           {/*
@@ -1500,27 +2064,27 @@ export default function Translate() {
                             打「谢谢」时该在 30 上下，画圈打「难过」时该到 90 上下。
                           */}
                           {currentPrediction.rotRate !== null && (
-                            <div className="text-[10px] font-mono text-center text-[#556677]">
+                            <div className="text-[10px] font-mono text-center text-[var(--hud-dim)]">
                               转角速率{" "}
                               <span
                                 className={
                                   currentPrediction.rotRate >= ROT_RATE_HI
-                                    ? "text-[#f59e0b]"
+                                    ? "text-[var(--hud-warn)]"
                                     : currentPrediction.rotRate < ROT_RATE_LO
-                                      ? "text-[#00e5a0]"
-                                      : "text-[#7788aa]"
+                                      ? "text-[var(--hud-ok)]"
+                                      : "text-[var(--hud-mid)]"
                                 }
                               >
                                 {currentPrediction.rotRate.toFixed(0)}
                               </span>
-                              <span className="text-[#334455]">
+                              <span className="text-[var(--hud-faint)]">
                                 {" "}
                                 °/s · 静止&lt;{ROT_RATE_LO} / 画圈≥{ROT_RATE_HI}
                               </span>
                               {/* 中间带要明说，否则读数在 50~70 之间时看不出是谁在做决定 */}
                               {currentPrediction.rotRate >= ROT_RATE_LO &&
                                 currentPrediction.rotRate < ROT_RATE_HI && (
-                                  <span className="ml-1 text-[#7788aa]">
+                                  <span className="ml-1 text-[var(--hud-mid)]">
                                     中间带→看拇指
                                   </span>
                                 )}
@@ -1535,24 +2099,24 @@ export default function Translate() {
                             只在逐词档显示（静态档不走滑窗，量不到）。
                           */}
                           {currentPrediction.thumbPeak >= 0 && (
-                            <div className="text-[10px] font-mono text-center text-[#556677]">
+                            <div className="text-[10px] font-mono text-center text-[var(--hud-dim)]">
                               拇指压力峰值{" "}
                               <span
                                 className={
                                   currentPrediction.thumbPeak >= THUMB_PEAK_GATE
-                                    ? "text-[#00e5a0]"
-                                    : "text-[#334455]"
+                                    ? "text-[var(--hud-ok)]"
+                                    : "text-[var(--hud-faint)]"
                                 }
                               >
                                 {currentPrediction.thumbPeak}
                               </span>
-                              <span className="text-[#334455]">
+                              <span className="text-[var(--hud-faint)]">
                                 {" "}
                                 / 闸门 {THUMB_PEAK_GATE}
                               </span>
                               {/* 改判了要说清是**哪个判据**改的，否则调阈值时不知道该调哪一个 */}
                               {currentPrediction.gated && (
-                                <span className="ml-1 text-[#f59e0b]">
+                                <span className="ml-1 text-[var(--hud-warn)]">
                                   已改判（
                                   {currentPrediction.gateReason.startsWith("thumb")
                                     ? "拇指"
@@ -1570,10 +2134,10 @@ export default function Translate() {
                          没拦着还空着 = 窗口在攒 或 模型没给出稳定结论。
                          合成一句"等待手势输入"的话，用户没法判断该不该去查手套 */
                       <div className="space-y-2">
-                        <div className="text-4xl text-[#334455] animate-pulse">
+                        <div className="text-4xl text-[var(--hud-faint)] animate-pulse">
                           {gated ? "—" : "..."}
                         </div>
-                        <p className="text-[10px] text-[#556677] font-mono">
+                        <p className="text-[10px] text-[var(--hud-dim)] font-mono">
                           {gated
                             ? "静止中 · 等你起手（手没动时不出词）"
                             : "等待手势输入"}
@@ -1581,16 +2145,14 @@ export default function Translate() {
                       </div>
                     ) : (
                       <div className="space-y-2">
-                        <MessageSquare className="w-12 h-12 mx-auto text-[#334455]" />
-                        <p className="text-sm text-[#556677]">
+                        <MessageSquare className="w-12 h-12 mx-auto text-[var(--hud-faint)]" />
+                        <p className="text-sm text-[var(--hud-dim)]">
                           点击"开始翻译"进入实时识别模式
                         </p>
                       </div>
                     )}
-                  </div>
 
-                  {/* 控制按钮 */}
-                  <div className="flex items-center gap-3">
+                    {/* 控制按钮跟着左栏走：它控制的是"出不出词"这件事 */}
                     <button
                       onClick={toggleTranslation}
                       className={`cyber-btn px-6 py-2.5 rounded-sm text-xs flex items-center gap-2 ${
@@ -1599,7 +2161,7 @@ export default function Translate() {
                     >
                       {isTranslating ? (
                         <>
-                          <div className="w-2 h-2 rounded-full bg-[#ff2d7b] animate-pulse" />
+                          <div className="w-2 h-2 rounded-full bg-[var(--hud-err)] animate-pulse" />
                           停止翻译
                         </>
                       ) : (
@@ -1611,422 +2173,173 @@ export default function Translate() {
                     </button>
                   </div>
 
-                  {/* 翻译历史文本 */}
-                  {history.length > 0 && (
-                    <div className="w-full max-w-2xl">
-                      <div className="cyber-panel p-4 rounded-sm">
-                        <div className="flex items-center justify-between mb-2">
-                          <span className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
-                            Translation Output
-                          </span>
-                          <button
-                            onClick={clearHistory}
-                            className="text-[#556677] hover:text-[#ff2d7b] transition-colors"
-                            title="清除"
-                          >
-                            <Trash2 className="w-3 h-3" />
-                          </button>
-                        </div>
+                  <div className="w-px shrink-0 bg-[var(--hud-line)]" />
+
+                  {/* ===== 右栏：已经攒出来的句子 =====
+                      这是这一页的**产出**。空着的时候也保留这一栏（只显示占位），
+                      不然一出第一个词整个版面会横向跳一次。 */}
+                  <div className="flex-1 min-w-0 flex flex-col gap-2 py-1">
+                    <div className="shrink-0 flex items-center justify-between">
+                      <span className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
+                        Translation Output
+                      </span>
+                      <button
+                        onClick={clearHistory}
+                        disabled={history.length === 0}
+                        className={`transition-colors ${
+                          history.length === 0
+                            ? "text-[var(--hud-faint)] cursor-not-allowed"
+                            : "text-[var(--hud-dim)] hover:text-[var(--hud-err)]"
+                        }`}
+                        title="清除"
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                    {/* 这行是这一页的**产出**，不是调试读数。旁边一圈置信度/
+                        转角速率都是 10px，输出句原来 18px，两者拉不开层级。
+                        24px 与句子档 live 顺句同一档，两个档看起来是一件事。
+                        横排之后这一栏拿到的是整块宽度，长句不用再频繁折行 */}
+                    <div className="flex-1 min-h-0 overflow-y-auto">
+                      {history.length > 0 ? (
                         <p
-                          className="text-lg leading-relaxed"
+                          className="text-2xl leading-relaxed"
                           style={{
                             fontFamily: "'Space Grotesk', sans-serif",
-                            color: "#ccd6e0",
+                            color: "var(--hud-text)",
                           }}
                         >
                           {translatedText}
                         </p>
-                      </div>
+                      ) : (
+                        <p className="text-[11px] font-mono text-[var(--hud-faint)]">
+                          还没有输出 —— 识别到的词会按顺序攒在这里
+                        </p>
+                      )}
                     </div>
-                  )}
-                </>
-              )}
-
-              {/* 换手归一化提示 —— 静默做这件事很危险：识别结果对不上时，
-                  用户没法分辨是"手语做错了"还是"软件把左手当右手在算" */}
-              {mirrored && (
-                <div className="text-[10px] font-mono text-[#a855f7]">
-                  ⇄ 已按镜像归一化到右手口径推理（
-                  {dominance ? describeDominance(dominance) : "主手＝左手"}
-                  ，换手不改词义）
-                </div>
-              )}
-
-              {/* 判定还在滞回确认期间就说明主手可能要换了。不提示的话，这几百毫秒里
-                  喂给模型的是旧口径，用户只会看到"刚换手那一下识别不准" */}
-              {isTranslating && dominance?.reason === "pending_flip" && (
-                <div className="text-[10px] font-mono text-[#f59e0b]">
-                  ⚠ 检测到主手可能换了，正在确认（切换要连续几个窗口一致，
-                  避免一个词做到一半翻转口径）
-                </div>
-              )}
-
-              {/* 消息 */}
-              {message && (
-                <div className="text-[10px] font-mono text-[#00e5a0]">
-                  {message}
+                  </div>
                 </div>
               )}
             </div>
           </div>
+          )}
 
-          {/* 手模区：一手一格，与识别链路完全无关，只反映手套原始数据。
-              高度按视口比例给、并封顶：写死像素值时矮屏幕上会把上面的识别结果挤没。
-
-              比例比舞台版**放大了**（32vh/300px → 46vh/460px）：手模的框取景是
-              竖直 FOV 34° @ 距离 17，半高 5.20 而手从腕到指尖 5.51 —— 手是**撑满
-              竖直方向**的，所以这一块有多高就直接决定手有多大，横向加宽不起作用。
-              下限也一起抬（170 → 240），否则矮屏上两格并排会各自缩成一小块。 */}
-          <div
-            className={`shrink-0 border-t border-[#00f0ff]/15 px-3 pt-1.5 pb-2 flex flex-col ${
-              showHands ? "h-[46vh] min-h-[240px] max-h-[460px]" : ""
-            }`}
-          >
-            <div className="flex items-center justify-between shrink-0 pb-1">
-              <span className="text-[9px] font-mono tracking-widest text-[#556677]">
-                LIVE HAND · BEND + IMU（不参与识别）
-              </span>
-              <button
-                onClick={() => setShowHands((v) => !v)}
-                className="text-[9px] font-mono text-[#556677] hover:text-[#00f0ff] flex items-center gap-1 transition-colors"
-                title={
-                  showHands
-                    ? "隐藏手模（3D 画面和推理抢同一块 GPU，机器吃力时可以关掉）"
-                    : "显示手模"
-                }
-              >
-                {showHands ? (
-                  <>
-                    <EyeOff className="w-3 h-3" />
-                    隐藏
-                  </>
-                ) : (
-                  <>
-                    <Eye className="w-3 h-3" />
-                    显示手模
-                  </>
-                )}
-              </button>
+          {/*
+           * 这两条提示放在卡**外面**的一条窄带里，两个档共用。
+           * 放进卡里的话，句子档下整张卡是 SentencePanel 的三段结构（中间那段才滚），
+           * 它们要么被塞进气泡流里跟着滚走、要么得在面板里再开一个插槽 ——
+           * 而它们讲的是"推理口径"，跟聊天内容不是一回事。
+           *
+           * ⚠ 原来这里有**三**条，第一条是常驻的 `⇄ 已按镜像归一化到右手口径推理（…）`。
+           * 它已经挪到 header 上变成一个 `⇄ 镜像` 徽标（点开看全文，零高度）——
+           * 那一条在左手用户身上是**一直亮着**的，也就是一直占着一行，而这一页
+           * 最缺的就是竖直空间（大字 + 手模都要高度）。
+           * 留在这里的两条都是**偶发**的：pending_flip 只在换手那几百毫秒出现，
+           * message 只在出错时有内容。偶发的才配占一行。
+           */}
+          {/* 判定还在滞回确认期间就说明主手可能要换了。不提示的话，这几百毫秒里
+              喂给模型的是旧口径，用户只会看到"刚换手那一下识别不准" */}
+          {isTranslating && dominance?.reason === "pending_flip" && (
+            <div className="shrink-0 text-[10px] font-mono text-[var(--hud-warn)] px-1 leading-relaxed">
+              ⚠ 检测到主手可能换了，正在确认（切换要连续几个窗口一致，
+              避免一个词做到一半翻转口径）
             </div>
-            {/* 关掉时是真卸载 Canvas，不是 hidden —— 隐藏的 WebGL 画面照样在渲染 */}
-            {showHands && (
-              /* 左手在左、右手在右 —— 第一人称（照镜子）。和第 1 步自检的四格布局
-                 同一个顺序，两页对照时不用在脑子里翻一次。
-                 各占一半宽：单手视口的取景是竖直方向撑满的（见上面那段注释），
-                 横向多出来的空间本来就是白送的。 */
-              <div className="flex-1 min-h-0 flex gap-2">
-                <HandViewport
-                  label="LH · 左手"
-                  side="left"
-                  channel={gloveLeft}
-                  driveRef={leftHand.driveRef}
-                  bendCalibrated={leftHand.bendCalibrated}
-                  orientCalibrated={leftHand.orientCalibrated}
-                />
-                <HandViewport
-                  label="RH · 右手"
-                  side="right"
-                  channel={gloveRight}
-                  driveRef={rightHand.driveRef}
-                  bendCalibrated={rightHand.bendCalibrated}
-                  orientCalibrated={rightHand.orientCalibrated}
-                />
-              </div>
-            )}
-          </div>
+          )}
+
+          {/* 出错提示。**只有出错才有内容** —— 启动时"加载成功"的回执已经挪到
+              header 的 MODEL 徽标里了（见 `loadedModels`），所以这一行平时是空的、
+              一行都不占。颜色跟着从 ok 换成 warn：现在能出现在这里的都是坏消息 */}
+          {message && (
+            <div className="shrink-0 text-[10px] font-mono text-[var(--hud-warn)] px-1">
+              {message}
+            </div>
+          )}
         </div>
 
-        {/* 右侧面板 */}
-        <div className="w-60 border-l border-[#00f0ff]/15 overflow-y-auto p-3 space-y-4 shrink-0">
-          {/* 推理模式切换 */}
-          <Section title="MODE">
-            {/* 三档配色与下面的导航分组、以及 SentencePanel 里的橙色一致：
-                青＝静态单帧、紫＝时序滑窗、橙＝连续句子。类名必须写字面量，
-                Tailwind 是编译期扫源码，拼出来的类名不会被生成 */}
-            <div className="grid grid-cols-3 gap-1">
-              <button
-                onClick={() => switchMode("static")}
-                className={`px-1.5 py-1.5 rounded-sm text-[10px] font-mono border transition-colors ${
-                  modelMode === "static"
-                    ? "border-[#00f0ff]/60 text-[#00f0ff] bg-[#00f0ff]/10"
-                    : "border-[#00f0ff]/15 text-[#556677]"
-                }`}
-              >
-                静态单帧
-              </button>
-              <button
-                onClick={() => switchMode("sequence")}
-                className={`px-1.5 py-1.5 rounded-sm text-[10px] font-mono border transition-colors ${
-                  modelMode === "sequence"
-                    ? "border-[#a855f7]/60 text-[#a855f7] bg-[#a855f7]/10"
-                    : "border-[#00f0ff]/15 text-[#556677]"
-                }`}
-              >
-                时序滑窗
-              </button>
-              <button
-                onClick={() => switchMode("sentence")}
-                className={`px-1.5 py-1.5 rounded-sm text-[10px] font-mono border transition-colors ${
-                  modelMode === "sentence"
-                    ? "border-[#f59e0b]/60 text-[#f59e0b] bg-[#f59e0b]/10"
-                    : "border-[#00f0ff]/15 text-[#556677]"
-                }`}
-              >
-                连续句子
-              </button>
-            </div>
-            <div className="text-[9px] font-mono text-[#556677] leading-relaxed">
-              {modelMode === "static" ? (
-                <>每 100ms 推理单帧。看不到运动轨迹，「再见」「来」这类动态词识别不了。</>
-              ) : modelMode === "sequence" ? (
-                <>
-                  每 100ms 取最近 {WINDOW_MS}ms 窗口推理，能识别动态词。
-                  {!seqReady && (
-                    <span className="text-[#ff2d7b]">
-                      {" "}
-                      当前没有时序模型，先去 /train-seq 训练。
-                    </span>
-                  )}
-                </>
-              ) : (
-                <>
-                  整句连着打完再一次性解码（CTC），中间不用停。
-                  <span className="text-[#f59e0b]">
-                    {" "}
-                    这一档不做滑窗，也没有「同词间隔 2 秒」的去重 —— 重复词打得出来。
-                  </span>
-                </>
-              )}
-            </div>
-          </Section>
+        {/* ===== 下：手语比划区 =====
+         *
+         * 两只手合进同一张卡：外面一圈圆角边框，里面并排两个视口。每只手的标题行
+         * （LH/RH + FPS + 未标定）和画面内的覆盖提示保持**一手一份** ——
+         * 那些是分手别的信息，合并了就说不清是哪只手。
+         *
+         * 与识别链路完全无关，只反映手套原始数据。
+         * 关掉时是**真卸载 Canvas**，不是 hidden —— 隐藏的 WebGL 画面照样在渲染，
+         * 而关它的理由正是省 GPU。整张卡不渲染，上面那区接管整个高度。
+         *
+         * ⚠ 高度写成 `h-[70%] shrink-0`，不是 `flex-1`：
+         *  - 用 `flex-1` 的话两区平分，手模会更小；
+         *  - `shrink-0` 是必须的 —— 上面那区在逐词档下内容会变多（读数 + 三条提示带），
+         *    不锁住的话 flex 会从这里往回抢高度，手在打字最多的时候反而缩得最狠。
+         * 百分比是相对父级内容高度算的，父级已经是确定高度（h-screen 那条链），
+         * 所以这里能拿到稳定值；改成 vh 会把 header 和 p-3 算重。
+         *
+         * 62% → 70% 是把 SentencePanel 底部控件条压扁（三行 103px 并成一行 48px）
+         * 省出来的高度直接给了这里，译文区当时没有变窄。
+         *
+         * **70% → 55% 就是真的从这里割给译文区了**，理由是那 30% 只够 ~2.5 行台词，
+         * 最上面那句基本被顶边渐隐吃掉 —— 而这一页的主角是台词，手模是旁证
+         * （标签行自己写着"不参与识别"）。手模缩掉的是**画面高度**，手会跟着小一圈；
+         * 嫌小的话去动 HandModel 的取景（那一刀是成倍的，且不花译文区的地方），
+         * 别回来调这个百分比。
+         */}
+        {showHands && (
+          <div className="cyber-panel rounded-2xl h-[55%] shrink-0 min-w-0 flex flex-col overflow-hidden">
+            {/*
+              ⚠ 这里原来有一行卡标题（`LIVE HAND · BEND + IMU（不参与识别）`），
+              **已经删掉**，为的是把那 37px 全给下面的画面。信息没丢：
+              `BEND+IMU · 不参与识别` 挪到每只手自己的标签行末尾了（那行本来就在，
+              所以这次是真省出高度，不是搬个地方继续占）。
+              别把标题行加回来 —— 它说的两件事（这是实时手 / 这不是识别链路）
+              标签行都在说，而画面高度直接决定手有多大（见 HandModel.tsx 第 2 条）。
+            */}
+            {/*
+              ===== 演示回放的提示带 =====
+              只在演示时出现，所以不占常态版面。挂在**手模这张卡**里而不是译文区：
+              说的是手模，而译文区那条 `sentenceNote` 说的是句子，混在一处会让
+              "这个词没有录制"被读成"这句译文有问题"。
 
-          {/* 主手 —— 归一化的唯一输入，**从数据自动判**，没有手选项。
-              两条能量条是判定的依据本身：判错时要能一眼看出是哪只手能量高，
-              否则用户只能对着一个错词猜 */}
-          <Section title="DOMINANT HAND">
-            <div className="flex items-center justify-between text-[10px] font-mono">
-              <span className="text-[#556677]">自动判定</span>
-              <span
-                className={
-                  dominance?.dominant === "left"
-                    ? "text-[#a855f7]"
-                    : dominance?.dominant === "both"
-                    ? "text-[#f59e0b]"
-                    : "text-[#00e5a0]"
-                }
-              >
-                {dominance
-                  ? dominance.dominant === "left"
-                    ? "左手（已镜像）"
-                    : dominance.dominant === "both"
-                    ? "双手词"
-                    : "右手"
-                  : "待翻译时判定"}
-              </span>
-            </div>
-            <EnergyBar label="LH" energy={dominance?.left?.total ?? null} />
-            <EnergyBar label="RH" energy={dominance?.right?.total ?? null} />
-            <div className="text-[9px] font-mono text-[#556677] leading-relaxed">
-              {dominance ? (
-                describeDominance(dominance)
-              ) : (
-                <>按两只手在最近 1 秒里的活动量判：动得明显多的那只是主手。</>
-              )}
-            </div>
-            {/* 没标定就只能用兜底量程，左右量程差异（实测 40~176）没被抵消 */}
-            {dominance && !dominance.calibrated && bothConnected && (
-              <div className="text-[9px] font-mono text-[#f59e0b] leading-relaxed">
-                有手未做弯折两点标定，活动量用的是兜底量程。回第 1 步补标定能让主手判得更稳。
+              ⚠ 这里**只放"看起来像故障、其实不是"的那几条**（某个词库里没有录制 →
+              手模不动；没标定 → 握拳不成形）。录制本身准不准已经挪去 console.warn，
+              别加回来：那句话观众读不懂，只会看见产品自己挂了个橙色警告。
+              于是绝大多数时候这条带子根本不出现 —— 那是对的，不是坏了。
+
+              `demoOn && !isConnected` 里那个 `!isConnected` 是冗余的（连着时进不了
+              演示），留着是因为这条提示一旦在实机上出现就是纯误导 —— 实机手模播的
+              是手套的真数据，与库里录制无关。
+            */}
+            {demoOn && !isConnected && (demoLoading || demoClipNote) && (
+              <div className="shrink-0 mx-3 mt-3 px-2 py-1 rounded-sm bg-[var(--hud-warn-wash)] border border-[var(--hud-warn-edge)]">
+                <span className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed">
+                  {demoLoading ? "正在从库里取录制…" : demoClipNote}
+                </span>
               </div>
             )}
-          </Section>
-
-          {/* Top-K 候选 */}
-          {currentPrediction && isTranslating && (
-            <Section title="CANDIDATES">
-              <div className="space-y-1">
-                {currentPrediction.allProbabilities.map((p, i) => {
-                  const word = getTranslationLabel(p.label);
-                  return (
-                    <div
-                      key={p.label}
-                      className="flex items-center justify-between text-[10px] font-mono"
-                    >
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-[#556677] w-3">{i + 1}.</span>
-                        <span
-                          style={{
-                            color:
-                              p.probability >= confidenceThreshold
-                                ? "#ccd6e0"
-                                : "#556677",
-                          }}
-                        >
-                          {word}
-                        </span>
-                      </div>
-                      <span
-                        style={{
-                          color:
-                            p.probability >= confidenceThreshold
-                              ? "#00e5a0"
-                              : p.probability >= 0.3
-                              ? "#f59e0b"
-                              : "#334455",
-                        }}
-                      >
-                        {(p.probability * 100).toFixed(1)}%
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </Section>
-          )}
-
-          {/* 参数设置 */}
-          <Section title="SETTINGS">
-            <div className="space-y-2">
-              <div className="space-y-1">
-                <div className="flex justify-between text-[9px] font-mono text-[#556677]">
-                  <span>置信度阈值</span>
-                  <span className="text-[#00f0ff]">
-                    {(confidenceThreshold * 100).toFixed(0)}%
-                  </span>
-                </div>
-                <input
-                  type="range"
-                  min="0.3"
-                  max="0.95"
-                  step="0.05"
-                  value={confidenceThreshold}
-                  onChange={(e) =>
-                    setConfidenceThreshold(parseFloat(e.target.value))
-                  }
-                  className="w-full h-1 bg-[#1a2030] rounded-full appearance-none cursor-pointer"
-                  style={{ accentColor: "#00f0ff" }}
-                />
-              </div>
-              <div className="space-y-1">
-                <div className="flex justify-between text-[9px] font-mono text-[#556677]">
-                  <span>平滑窗口</span>
-                  <span className="text-[#00f0ff]">{smoothingWindow} 帧</span>
-                </div>
-                <input
-                  type="range"
-                  min="3"
-                  max="15"
-                  step="1"
-                  value={smoothingWindow}
-                  onChange={(e) =>
-                    setSmoothingWindow(parseInt(e.target.value))
-                  }
-                  className="w-full h-1 bg-[#1a2030] rounded-full appearance-none cursor-pointer"
-                  style={{ accentColor: "#00f0ff" }}
-                />
-              </div>
+            {/* 左手在左、右手在右 —— 第一人称（照镜子）。和第 1 步自检的四格布局
+                同一个顺序，两页对照时不用在脑子里翻一次。 */}
+            <div className="flex-1 min-h-0 flex gap-3 p-3">
+              <HandViewport
+                label="LH · 左手"
+                side="left"
+                channel={gloveLeft}
+                driveRef={leftHand.driveRef}
+                bendCalibrated={leftHand.bendCalibrated}
+                orientCalibrated={leftHand.orientCalibrated}
+                mode={handRender}
+                playback={demoOn}
+              />
+              <HandViewport
+                label="RH · 右手"
+                side="right"
+                channel={gloveRight}
+                driveRef={rightHand.driveRef}
+                bendCalibrated={rightHand.bendCalibrated}
+                orientCalibrated={rightHand.orientCalibrated}
+                mode={handRender}
+                playback={demoOn}
+              />
             </div>
-          </Section>
-
-          {/* 模型信息 */}
-          {modelReady && (
-            <Section title="MODEL INFO">
-              <div className="text-[9px] font-mono text-[#556677] space-y-0.5">
-                <p>
-                  Type:{" "}
-                  <span
-                    className={
-                      modelMode === "static"
-                        ? "text-[#00f0ff]"
-                        : "text-[#a855f7]"
-                    }
-                  >
-                    {modelMode === "static" ? "MLP (静态单帧)" : "TCN (时序滑窗)"}
-                  </span>
-                </p>
-                {/* 模型名是唯一能确认"用的不是另一条链路的模型"的东西：
-                    seq_ 前缀 = 时序，没有 = 静态 */}
-                <p className="truncate">
-                  Name:{" "}
-                  <span className="text-[#8899aa]">
-                    {(modelMode === "static"
-                      ? loadedNames.static
-                      : loadedNames.sequence) ?? "—"}
-                  </span>
-                </p>
-                <p>
-                  Classes:{" "}
-                  <span className="text-[#00f0ff]">{activeLabels.length}</span>
-                </p>
-                <p>
-                  Vocab:{" "}
-                  <span className="text-[#8899aa]">
-                    {activeLabels
-                      .map(getDisplayLabel)
-                      .slice(0, 8)
-                      .join(", ")}
-                    {activeLabels.length > 8 ? "..." : ""}
-                  </span>
-                </p>
-              </div>
-            </Section>
-          )}
-
-          {/* 翻译历史 */}
-          {history.length > 0 && (
-            <Section title="HISTORY">
-              <div className="space-y-0.5 max-h-40 overflow-y-auto">
-                {history
-                  .slice(-20)
-                  .reverse()
-                  .map((entry, i) => (
-                    <div
-                      key={i}
-                      className="flex justify-between text-[9px] font-mono"
-                    >
-                      <span className="text-[#8899aa]">{entry.word}</span>
-                      <span className="text-[#556677]">
-                        {(entry.confidence * 100).toFixed(0)}%
-                      </span>
-                    </div>
-                  ))}
-              </div>
-            </Section>
-          )}
-
-          {/* 导航 —— 按静态/时序**分成两组**。
-              这四个链接原来叫「采集数据 / 训练模型 / 序列采集 / 时序训练」，
-              光看名字分不出哪两个属于静态单帧、哪两个属于时序滑窗；
-              走错一条就是在给另一条链路喂数据或训练另一个模型，
-              而两个模型各有各的数据集和 localStorage 键，出了错要很久才发现。
-              这里用的词和配色与上面的 MODE 开关完全一致（青＝静态、紫＝时序），
-              当前模式那一组高亮，另一组压暗。 */}
-          <div className="pt-3 border-t border-[#00f0ff]/10 space-y-2">
-            <NavGroup tone="static" active={modelMode === "static"} />
-            <NavGroup tone="sequence" active={modelMode === "sequence"} />
           </div>
-
-          {/* 手套状态（只读；连接/断开都在第 1 步） */}
-          <div className="flex items-center justify-center gap-2 text-[10px] font-mono pt-2">
-            <span
-              className={
-                gloveLeft.isConnected ? "text-[#00e5a0]" : "text-[#556677]"
-              }
-            >
-              左手{" "}
-              {gloveLeft.isConnected ? `✓${gloveLeft.gloveFps}Hz` : "○未连接"}
-            </span>
-            <span className="text-[#334455]">|</span>
-            <span
-              className={
-                gloveRight.isConnected ? "text-[#00e5a0]" : "text-[#556677]"
-              }
-            >
-              右手{" "}
-              {gloveRight.isConnected ? `✓${gloveRight.gloveFps}Hz` : "○未连接"}
-            </span>
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
@@ -2053,28 +2366,28 @@ function SentenceModelMissing({
 }) {
   return (
     <div className="text-center space-y-3 max-w-lg">
-      <Brain className="w-16 h-16 mx-auto text-[#334455]" />
+      <Brain className="w-16 h-16 mx-auto text-[var(--hud-faint)]" />
       {error ? (
         <>
-          <p className="text-sm text-[#ff2d7b]">句子模型加载失败</p>
+          <p className="text-sm text-[var(--hud-err)]">句子模型加载失败</p>
           {/* 原文照抄出来：blankIndex 不符、frameDim 不符这类错误是"模型要重训"的
               明确信号，藏起来就只剩"不可用" */}
-          <p className="text-[10px] font-mono text-[#ff2d7b] leading-relaxed break-all">
+          <p className="text-[10px] font-mono text-[var(--hud-err)] leading-relaxed break-all">
             {error}
           </p>
         </>
       ) : available === null ? (
-        <p className="text-sm text-[#556677]">正在检查有没有句子模型…</p>
+        <p className="text-sm text-[var(--hud-dim)]">正在检查有没有句子模型…</p>
       ) : (
         <>
-          <p className="text-sm text-[#556677]">还没有句子模型</p>
-          <div className="text-[10px] font-mono text-[#556677] leading-relaxed text-left inline-block space-y-1">
+          <p className="text-sm text-[var(--hud-dim)]">还没有句子模型</p>
+          <div className="text-[10px] font-mono text-[var(--hud-dim)] leading-relaxed text-left inline-block space-y-1">
             {/* 这条警告要留着：两个模型长得像但不通用，指错一次就是白训一轮 */}
-            <p className="text-[#f59e0b]">
+            <p className="text-[var(--hud-warn)]">
               注意：这一档要的<b>不是</b> /train-seq 训的那个模型（那是逐词滑窗、存在
               IndexedDB 里）。句子模型在本机 Python 里训，是一份静态文件。
             </p>
-            <p className="text-[#334455]">
+            <p className="text-[var(--hud-faint)]">
               缺的文件是 {SENTENCE_MODEL_DIR}/weights.json
             </p>
           </div>
@@ -2087,11 +2400,14 @@ function SentenceModelMissing({
           <Link
             href="/train-sentence"
             className="cyber-btn px-4 py-2 rounded-sm text-xs inline-flex items-center gap-2"
-            style={{ borderColor: "rgba(168,85,247,0.5)", color: "#a855f7" }}
+            style={{
+              borderColor: "var(--hud-violet)",
+              color: "var(--hud-violet)",
+            }}
           >
             前往句子训练 →
           </Link>
-          <p className="text-[9px] font-mono text-[#334455] leading-relaxed">
+          <p className="text-[9px] font-mono text-[var(--hud-faint)] leading-relaxed">
             那页负责送数据、开训、看曲线、把权重导到这里。
             它要本机的 python_train/.venv，且只在 npm run dev 下可用；
             部署环境里仍然只能靠命令行跑 train_seq.py --ctc + export_weights.py。
@@ -2105,9 +2421,10 @@ function SentenceModelMissing({
 /**
  * 一只手的手模视口：标题行（FPS + 标定状态）+ 一个 `HandModel` Canvas。
  *
- * 与第 1 步 /mocap 自检里的那格**刻意长得一样** —— 同一个 `HandModel`、
- * 同一个相机、同一份标定。两页看到的手必须是同一只手，否则用户没法拿自检那页
- * 当基准来判断"这一页的手模是不是不对"。
+ * 驱动和标定与第 1 步 /mocap 的自检**是同一份** —— 同一个 `HandModel` 组件、
+ * 同一个相机、同一份标定。**只有画法不同**：这一页默认画骨架，自检页画实心手模。
+ * 所以手模看着不对劲时，别直接和自检页对照 —— 先用顶栏的「手模」档切回实心，
+ * 那时候两页应该是同一只手，不一样就说明真出问题了。
  *
  * 标定是**只读**的：连接与标定的唯一入口在第 1 步，这里改标定只会让两页说法不
  * 一致。所以未标定时不给按钮，只给提示 —— 未标定的手模最多弯到 0.42（柔和预览），
@@ -2120,6 +2437,8 @@ function HandViewport({
   driveRef,
   bendCalibrated,
   orientCalibrated,
+  mode,
+  playback = false,
 }: {
   label: string;
   side: "left" | "right";
@@ -2127,31 +2446,58 @@ function HandViewport({
   driveRef: RefObject<HandDrive>;
   bendCalibrated: boolean;
   orientCalibrated: boolean;
+  mode: "mesh" | "skeleton";
+  /**
+   * 手模现在放的是**库里的录制回放**（离线演示），不是手套数据。
+   *
+   * 影响两处显示，都是为了不撒谎也不误导：
+   *  - 那层"这只手套没连接"的遮罩要撤掉 —— 手确实在动，压着遮罩就是自相矛盾；
+   *  - 状态位从"未连接"改成"回放"，而不是伪装成已连接。手套确实没连。
+   */
+  playback?: boolean;
 }) {
   const connected = channel.isConnected;
   return (
     <div className="flex-1 min-w-0 min-h-0 flex flex-col gap-1">
       <div className="shrink-0 flex items-center gap-1.5 px-0.5 text-[9px] font-mono">
-        <span className="tracking-widest text-[#f59e0b]">{label}</span>
-        <span className={connected ? "text-[#00e5a0]" : "text-[#556677]"}>
-          {connected ? `${channel.gloveFps.toFixed(0)} FPS` : "未连接"}
+        <span className="tracking-widest text-[var(--hud-warn)]">{label}</span>
+        <span
+          className={
+            connected
+              ? "text-[var(--hud-ok)]"
+              : playback
+              ? "text-[var(--hud-violet)]"
+              : "text-[var(--hud-dim)]"
+          }
+        >
+          {connected
+            ? `${channel.gloveFps.toFixed(0)} FPS`
+            : playback
+            ? "回放库里的录制"
+            : "未连接"}
         </span>
         {connected && bendCalibrated && !orientCalibrated && (
-          <span className="text-[#556677]">朝向未标定</span>
+          <span className="text-[var(--hud-dim)]">朝向未标定</span>
         )}
+        {/* 这两句原来在卡的标题行上（整卡一份），标题行删掉后落到这里。
+            一手一份是重复的 —— 但它们是**卡级**的事实，而这一行是唯一一条
+            不额外占高度的位置。"不参与识别"必须留着：这两个画面在页面上最显眼，
+            不说清就会被当成识别链路，"手模动了怎么还不出词"由此而来 */}
+        <span className="text-[var(--hud-faint)]">BEND+IMU · 不参与识别</span>
       </div>
       <div
-        className="relative flex-1 min-h-0 rounded-sm border overflow-hidden bg-[#070a13]"
+        className="hud-stage relative flex-1 min-h-0 rounded-xl border overflow-hidden"
         style={{
-          borderColor: connected
-            ? "rgba(0,240,255,0.15)"
-            : "rgba(85,102,119,0.2)",
+          borderColor:
+            connected || playback
+              ? "var(--hud-line)"
+              : "var(--hud-line-dead)",
         }}
       >
-        <HandModel driveRef={driveRef} side={side} />
-        {!connected && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#070a13]/70 pointer-events-none">
-            <span className="px-2 py-1 rounded-sm bg-[#0a0e1a]/90 border border-[#00f0ff]/15 text-[10px] font-mono text-[#8899aa]">
+        <HandModel driveRef={driveRef} side={side} mode={mode} />
+        {!connected && !playback && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[var(--hud-veil)] pointer-events-none">
+            <span className="px-2 py-1 rounded-sm bg-[var(--hud-chip)] border border-[var(--hud-line)] text-[10px] font-mono text-[var(--hud-soft)]">
               这只手套没连接，去第 1 步
             </span>
           </div>
@@ -2159,121 +2505,13 @@ function HandViewport({
         {/* 未标定这条必须压在画面里，不能只写在标题行：这个状态下握拳只弯到约
             42%，看起来就是"手模坏了"或"模型不准"，而其实只是没跑标定 */}
         {connected && !bendCalibrated && (
-          <div className="absolute bottom-1.5 left-1.5 right-1.5 px-2 py-1 rounded-sm pointer-events-none bg-[#f59e0b]/12 border border-[#f59e0b]/35">
-            <span className="text-[9px] font-mono text-[#f59e0b] leading-relaxed">
+          <div className="absolute bottom-1.5 left-1.5 right-1.5 px-2 py-1 rounded-sm pointer-events-none bg-[var(--hud-warn-wash)] border border-[var(--hud-warn-edge)]">
+            <span className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed">
               未标定弯折 · 满量程也只弯约 42%，握拳不会成形。去第 1 步跑向导
             </span>
           </div>
         )}
       </div>
-    </div>
-  );
-}
-
-/*
- * 两条链路各自的「采集 → 训练」入口。
- *
- * 配色与 MODE 开关同源：青 `#00f0ff` = 静态单帧（MLP），紫 `#a855f7` = 时序滑窗（TCN）。
- * 类名写成两份**字面量**而不是拼 `border-[${color}]/50`——Tailwind 是编译期扫源码，
- * 拼出来的类名不会被生成，运行时就是没有边框。
- */
-const NAV_TONES = {
-  static: {
-    group: "静态单帧 · MLP",
-    title: "text-[#00f0ff]",
-    on: "border-[#00f0ff]/50 text-[#00f0ff] hover:bg-[#00f0ff]/10",
-    off: "border-[#00f0ff]/15 text-[#556677] hover:text-[#00f0ff]",
-    links: [
-      { href: "/collect", label: "静态采集" },
-      { href: "/train", label: "静态训练" },
-    ],
-  },
-  sequence: {
-    group: "时序滑窗 · TCN",
-    title: "text-[#a855f7]",
-    on: "border-[#a855f7]/50 text-[#a855f7] hover:bg-[#a855f7]/10",
-    off: "border-[#a855f7]/15 text-[#556677] hover:text-[#a855f7]",
-    links: [
-      { href: "/collect-seq", label: "时序采集" },
-      { href: "/train-seq", label: "时序训练" },
-    ],
-  },
-} as const;
-
-function NavGroup({
-  tone,
-  active,
-}: {
-  tone: keyof typeof NAV_TONES;
-  active: boolean;
-}) {
-  const t = NAV_TONES[tone];
-  return (
-    <div className="space-y-1">
-      <div className="flex items-center gap-1.5 text-[9px] font-mono leading-none">
-        <span className={active ? t.title : "text-[#556677]"}>{t.group}</span>
-        {active && <span className="text-[#556677]">· 当前模式</span>}
-      </div>
-      <div className="grid grid-cols-2 gap-1">
-        {t.links.map((l) => (
-          <Link
-            key={l.href}
-            href={l.href}
-            className={`px-2 py-1.5 rounded-sm border font-mono text-[10px] text-center transition-colors ${
-              active ? t.on : t.off
-            }`}
-          >
-            ← {l.label}
-          </Link>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-/**
- * 一只手的运动能量条。能量单位是"份"（1.0 ≈ 明显是个有意动作，见 dominantHand.ts），
- * 条宽按 2 份满格 —— 上限不是硬边界，做大幅动作时会顶格，那不影响判定（判定看比值）。
- *
- * `null` = 这只手这一窗没有数据，显示成"—"而不是空条：空条会被读成"连着但不动"。
- */
-function EnergyBar({ label, energy }: { label: string; energy: number | null }) {
-  const pct = energy === null ? 0 : Math.min(100, (energy / 2) * 100);
-  return (
-    <div className="flex items-center gap-1.5 text-[9px] font-mono">
-      <span className="text-[#556677] w-4 shrink-0">{label}</span>
-      <div className="flex-1 h-1.5 bg-[#1a2030] rounded-full overflow-hidden border border-[#00f0ff]/15">
-        <div
-          className="h-full rounded-full transition-all duration-200"
-          style={{
-            width: `${pct}%`,
-            backgroundColor: energy !== null && energy >= 1 ? "#00e5a0" : "#556677",
-          }}
-        />
-      </div>
-      <span className="text-[#556677] w-8 shrink-0 text-right">
-        {energy === null ? "—" : energy.toFixed(2)}
-      </span>
-    </div>
-  );
-}
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center gap-2 pb-1 border-b border-[#00f0ff]/15">
-        <div className="w-1 h-3 bg-[#00f0ff] rounded-full shadow-[0_0_4px_rgba(0,240,255,0.6)]" />
-        <span className="text-[10px] font-bold tracking-widest text-[#00f0ff] font-mono">
-          {title}
-        </span>
-      </div>
-      {children}
     </div>
   );
 }

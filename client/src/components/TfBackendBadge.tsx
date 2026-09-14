@@ -29,7 +29,7 @@ export default function TfBackendBadge() {
   return (
     <span
       className="font-mono text-[9px] whitespace-nowrap"
-      style={{ color: gpu ? "#00e5a0" : "#f59e0b" }}
+      style={{ color: gpu ? "var(--hud-ok)" : "var(--hud-warn)" }}
       title={
         gpu
           ? `tfjs 后端 ${backend}：训练与推理跑在显卡上`

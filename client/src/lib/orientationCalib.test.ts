@@ -259,6 +259,162 @@ describe("axisQualityWarning", () => {
   });
 });
 
+/*
+ * ===== 重力核对：拦住"③ 翻反方向" =====
+ *
+ * 这一组锁的是实际报上来的故障：**左手摆拇指朝上，手模显示拇指朝下**。
+ * 根因不是手模镜像（`HandModel.tsx` 的 ±0.78 与 glb 手性核对过，是对的），
+ * 也不是 `MODEL_MOTION_AXES`（三个目标值按 glb 零位反推过，是对的），
+ * 而是 ③ 那步往外翻代替了往内翻 —— 解出来的矩阵合法、三个质量数全绿。
+ *
+ * 下面先用一条端到端的测试**复现**这个症状，再验证重力核对能纠正它。
+ */
+describe("③ 翻反方向：症状复现与重力核对", () => {
+  /**
+   * 造一份合成的左手标定输入。传感器机体系刻意取一个**歪的装配朝向** `mount`，
+   * 这样测的就不是"恰好对齐时碰巧能过"。
+   *
+   * 模型系的三个动作（已按 glb 实测核对，见 orientationCalib.ts 文件头）：
+   *   零位  指尖 +Y、掌心 +Z、拇指 −X（左手）
+   *   平铺  绕 −X 转 90°
+   *   相对  左手绕 +Y 转 90°（**往内** = 掌心转向使用者右边）
+   */
+  const mount = quatAbout([0.37, -0.62, 0.19], 47); // 机体系→模型系的装配旋转
+  /** 把模型系的转动搬到机体系：机体系里看到的就是 mount⁻¹ ⊗ R ⊗ mount */
+  const inBody = (axis: Vec3, deg: number): Quat =>
+    multiplyQuat(
+      multiplyQuat([mount[0], -mount[1], -mount[2], -mount[3]], quatAbout(axis, deg)),
+      mount
+    );
+
+  const zero = IDENTITY;
+  const flat = inBody([-1, 0, 0], 90);
+  const palmsInward = inBody(Y, 90); // ③ 做对：左手绕 +Y
+  const palmsOutward = inBody(Y, -90); // ③ 做反：往外翻
+
+  /** 用四元数 [w,x,y,z] 旋转一个向量 */
+  const rotByQuat = (q: Quat, v: Vec3): Vec3 => {
+    const [w, x, y, z] = q;
+    const tx = 2 * (y * v[2] - z * v[1]);
+    const ty = 2 * (z * v[0] - x * v[2]);
+    const tz = 2 * (x * v[1] - y * v[0]);
+    return [
+      v[0] + w * tx + (y * tz - z * ty),
+      v[1] + w * ty + (z * tx - x * tz),
+      v[2] + w * tz + (x * ty - y * tx),
+    ];
+  };
+  const conj = (q: Quat): Quat => [q[0], -q[1], -q[2], -q[3]];
+  /** 模型系的方向搬到机体系（零位那一刻） */
+  const toBody = (v: Vec3, scale = 9.81): Vec3 =>
+    rotByQuat(conj(mount), v).map((c) => c * scale) as Vec3;
+
+  /**
+   * 零位那一刻加速度计在机体系里测到的"上"。
+   * 静止时 acc 指上（`imuHealth.ts:213` 拿它与 `gravityInHandFrame` 比夹角，同向），
+   * 而零位的模型系上就是 +Y。乘 9.81 顺带证明这一关只看方向、不在乎量纲。
+   */
+  const accUp = toBody([0, 1, 0]);
+
+  /** 摆"拇指朝上"：左手零位拇指在 −X，要转到 +Y，就是绕 Z 转 −90° */
+  const thumbUpBody = inBody(Z, -90);
+
+  /** 标定后手模的拇指指向（模型系）。左手零位拇指 = −X */
+  const thumbDir = (calib: { reference: Quat; axisMap?: number[][] }): Vec3 =>
+    rotByQuat(applyOrientationCalib(thumbUpBody, calib), [-1, 0, 0]);
+
+  it("③ 做对时，拇指朝上就显示朝上（基线）", () => {
+    const calib = assembleOrientationCalib("LH", zero, flat, palmsInward, accUp)!;
+    expect(calib.axisMap).toBeDefined();
+    expect(thumbDir(calib)[1]).toBeCloseTo(1, 4); // +Y = 朝上
+  });
+
+  it("③ 翻反方向：三个质量数全部正常，但拇指朝上显示成朝下 —— 这就是报上来的症状", () => {
+    // 不传 acc = 老行为（没有重力核对这一关）
+    const bad = assembleOrientationCalib("LH", zero, flat, palmsOutward)!;
+    expect(bad.axisMap).toBeDefined();
+    // 三个数看起来完美，所以界面只会显示一个 ✓
+    expect(bad.axisQuality!.pitchDeg).toBeCloseTo(90, 3);
+    expect(bad.axisQuality!.swingDeg).toBeCloseTo(90, 3);
+    expect(bad.axisQuality!.separationDeg).toBeCloseTo(90, 3);
+    expect(axisMapFailReason(bad)).toBeNull();
+    expect(axisQualityWarning(bad)).toBeNull();
+    // 而拇指是**反的**
+    expect(thumbDir(bad)[1]).toBeCloseTo(-1, 4); // −Y = 朝下
+  });
+
+  it("同一份错误输入，给了加速度就被自动纠正回朝上", () => {
+    const fixed = assembleOrientationCalib(
+      "LH",
+      zero,
+      flat,
+      palmsOutward,
+      accUp
+    )!;
+    expect(fixed.gravityCheck!.corrected).toBe(true);
+    expect(fixed.gravityCheck!.upY).toBeLessThan(-0.5);
+    expect(thumbDir(fixed)[1]).toBeCloseTo(1, 4); // 已经朝上
+  });
+
+  it("③ 做对的那份不会被反向纠正坏掉（这一关必须是幂等的）", () => {
+    const good = assembleOrientationCalib("LH", zero, flat, palmsInward, accUp)!;
+    expect(good.gravityCheck!.corrected).toBe(false);
+    expect(good.gravityCheck!.upY).toBeCloseTo(1, 3);
+    const noAcc = assembleOrientationCalib("LH", zero, flat, palmsInward)!;
+    // 本来就对的，加不加这一关矩阵都一样
+    expect(good.axisMap).toEqual(noAcc.axisMap);
+  });
+
+  it("右手同样成立（偏摆轴期望相反，纠正轴也跟着走）", () => {
+    const rhOutward = inBody(Y, 90); // 右手往内是绕 −Y，这里给成 +Y = 反的
+    const bad = assembleOrientationCalib("RH", zero, flat, rhOutward)!;
+    const fixed = assembleOrientationCalib("RH", zero, flat, rhOutward, accUp)!;
+    expect(bad.gravityCheck).toBeUndefined();
+    expect(fixed.gravityCheck!.corrected).toBe(true);
+    expect(fixed.axisMap).not.toEqual(bad.axisMap);
+  });
+
+  it("旧款手套没有加速度：不核对、也不谎报通过", () => {
+    const calib = assembleOrientationCalib("LH", zero, flat, palmsInward, null)!;
+    expect(calib.axisMap).toBeDefined();
+    expect(calib.gravityCheck).toBeUndefined(); // 缺席 ≠ 通过
+  });
+
+  it("acc 全零（那一路没数据）当作没核对，不会被当成朝下去乱纠正", () => {
+    const calib = assembleOrientationCalib("LH", zero, flat, palmsInward, [0, 0, 0])!;
+    expect(calib.gravityCheck).toBeUndefined();
+    expect(calib.axisMap).toEqual(
+      assembleOrientationCalib("LH", zero, flat, palmsInward)!.axisMap
+    );
+  });
+
+  it("零位那步前臂没竖直 → 没定论：不纠正，并且报出来", () => {
+    // "上"偏离模型系 +Y 整整 70°，落在 ±60° 的判决带之外。
+    // 注意要在**模型系**里先把 +Y 真转过去（绕 X 转 70° → (0, cos70, sin70)），
+    // 再整体搬回机体系；直接对机体系向量按分量缩放不是旋转，偏角会对不上。
+    const tilted = toBody([0, Math.cos(70 * DEG), Math.sin(70 * DEG)]);
+    const calib = assembleOrientationCalib("LH", zero, flat, palmsInward, tilted)!;
+    expect(calib.gravityCheck!.corrected).toBe(false);
+    expect(Math.abs(calib.gravityCheck!.upY)).toBeLessThan(0.5);
+    // 这种情况必须说出来：这一关等于没设防
+    expect(axisQualityWarning(calib)).toMatch(/重力核对没定论|竖直/);
+  });
+
+  it("重力核对只看方向，不受加速度量纲影响", () => {
+    const scaled = accUp.map((v) => v * 137) as Vec3;
+    const a = assembleOrientationCalib("LH", zero, flat, palmsOutward, accUp)!;
+    const b = assembleOrientationCalib("LH", zero, flat, palmsOutward, scaled)!;
+    expect(b.axisMap).toEqual(a.axisMap);
+    expect(b.gravityCheck!.upY).toBeCloseTo(a.gravityCheck!.upY, 6);
+  });
+
+  it("轴向矩阵没写入时不做核对（没有矩阵可核）", () => {
+    const noMap = assembleOrientationCalib("LH", zero, flat, inBody(Y, 8), accUp)!;
+    expect(noMap.axisMap).toBeUndefined();
+    expect(noMap.gravityCheck).toBeUndefined();
+  });
+});
+
 describe("持久化", () => {
   it("没有 localStorage 的环境（node 测试环境）当作未标定，不抛异常", () => {
     expect(() => loadOrientationCalib("LH")).not.toThrow();

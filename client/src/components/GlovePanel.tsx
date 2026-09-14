@@ -95,18 +95,18 @@ export default function GlovePanel({
               ? "CONNECTING..."
               : "DISCONNECTED"
           }
-          color={isConnected ? "#00e5a0" : isConnecting ? "#f59e0b" : "#556677"}
+          color={isConnected ? "var(--hud-ok)" : isConnecting ? "var(--hud-warn)" : "var(--hud-dim)"}
         />
         {isConnected && latestFrame && (
           <>
-            <DataRow label="HAND" value={latestFrame.handLabel} color="#da77f2" />
-            <DataRow label="FPS" value={String(gloveFps)} color="#00f0ff" />
+            <DataRow label="HAND" value={latestFrame.handLabel} color="var(--hud-wrist)" />
+            <DataRow label="FPS" value={String(gloveFps)} color="var(--hud-accent)" />
             <DataRow
               label="FRAMES"
               value={gloveFrameCount.toLocaleString()}
-              color="#00f0ff"
+              color="var(--hud-accent)"
             />
-            <DataRow label="VALID PTS" value="137/256" color="#556677" />
+            <DataRow label="VALID PTS" value="137/256" color="var(--hud-dim)" />
           </>
         )}
       </div>
@@ -121,7 +121,7 @@ export default function GlovePanel({
           >
             <div
               className="w-1.5 h-1.5 rounded-full"
-              style={{ backgroundColor: isConnecting ? "#f59e0b" : "#00e5a0" }}
+              style={{ backgroundColor: isConnecting ? "var(--hud-warn)" : "var(--hud-ok)" }}
             />
             {isConnecting ? "连接中..." : connectLabel}
           </button>
@@ -130,7 +130,7 @@ export default function GlovePanel({
             onClick={onDisconnect}
             className="w-full cyber-btn cyber-btn-accent px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5"
           >
-            <div className="w-1.5 h-1.5 rounded-full bg-[#ff2d7b]" />
+            <div className="w-1.5 h-1.5 rounded-full bg-[var(--hud-err)]" />
             断开手套
           </button>
         )}
@@ -138,46 +138,46 @@ export default function GlovePanel({
 
       {/* 错误信息 */}
       {error && (
-        <div className="text-[9px] text-[#ff2d7b] font-mono px-1 py-1 border border-[#ff2d7b]/20 rounded-sm bg-[#ff2d7b]/5">
+        <div className="text-[9px] text-[var(--hud-err)] font-mono px-1 py-1 border border-[#e11d48]/20 rounded-sm bg-[#e11d48]/5">
           {error}
         </div>
       )}
 
       {/* 手指压力 */}
       {isConnected && fingerPressures && (
-        <div className="space-y-1.5 pt-1 border-t border-[#00f0ff]/10">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+        <div className="space-y-1.5 pt-1 border-t border-[#1677ff]/10">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
             Finger Pressure
           </div>
-          <FingerBar label="拇指" value={fingerPressures.thumb} color="#4dabf7" />
-          <FingerBar label="食指" value={fingerPressures.index} color="#69db7c" />
-          <FingerBar label="中指" value={fingerPressures.middle} color="#ffd43b" />
-          <FingerBar label="无名" value={fingerPressures.ring} color="#ffa94d" />
-          <FingerBar label="小指" value={fingerPressures.pinky} color="#ff6b6b" />
+          <FingerBar label="拇指" value={fingerPressures.thumb} color="var(--hud-f1)" />
+          <FingerBar label="食指" value={fingerPressures.index} color="var(--hud-f2)" />
+          <FingerBar label="中指" value={fingerPressures.middle} color="var(--hud-f3)" />
+          <FingerBar label="无名" value={fingerPressures.ring} color="var(--hud-f4)" />
+          <FingerBar label="小指" value={fingerPressures.pinky} color="var(--hud-f5)" />
         </div>
       )}
 
       {/* 弯折传感器 */}
       {isConnected && bendValues && (
-        <div className="space-y-1.5 pt-1 border-t border-[#00f0ff]/10">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+        <div className="space-y-1.5 pt-1 border-t border-[#1677ff]/10">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
             Bend Sensors
           </div>
           {latestFrame?.hand === 0x01 ? (
             <>
-              <FingerBar label="小指弯" value={bendValues[0]} color="#ff6b6b" />
-              <FingerBar label="无名弯" value={bendValues[1]} color="#ffa94d" />
-              <FingerBar label="中指弯" value={bendValues[2]} color="#ffd43b" />
-              <FingerBar label="食指弯" value={bendValues[3]} color="#69db7c" />
-              <FingerBar label="拇指弯" value={bendValues[4]} color="#4dabf7" />
+              <FingerBar label="小指弯" value={bendValues[0]} color="var(--hud-f5)" />
+              <FingerBar label="无名弯" value={bendValues[1]} color="var(--hud-f4)" />
+              <FingerBar label="中指弯" value={bendValues[2]} color="var(--hud-f3)" />
+              <FingerBar label="食指弯" value={bendValues[3]} color="var(--hud-f2)" />
+              <FingerBar label="拇指弯" value={bendValues[4]} color="var(--hud-f1)" />
             </>
           ) : (
             <>
-              <FingerBar label="拇指弯" value={bendValues[0]} color="#4dabf7" />
-              <FingerBar label="食指弯" value={bendValues[1]} color="#69db7c" />
-              <FingerBar label="中指弯" value={bendValues[2]} color="#ffd43b" />
-              <FingerBar label="无名弯" value={bendValues[3]} color="#ffa94d" />
-              <FingerBar label="小指弯" value={bendValues[4]} color="#ff6b6b" />
+              <FingerBar label="拇指弯" value={bendValues[0]} color="var(--hud-f1)" />
+              <FingerBar label="食指弯" value={bendValues[1]} color="var(--hud-f2)" />
+              <FingerBar label="中指弯" value={bendValues[2]} color="var(--hud-f3)" />
+              <FingerBar label="无名弯" value={bendValues[3]} color="var(--hud-f4)" />
+              <FingerBar label="小指弯" value={bendValues[4]} color="var(--hud-f5)" />
             </>
           )}
         </div>
@@ -185,29 +185,29 @@ export default function GlovePanel({
 
       {/* 传感器摘要 */}
       {isConnected && sensorSummary && (
-        <div className="space-y-1.5 pt-1 border-t border-[#00f0ff]/10">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+        <div className="space-y-1.5 pt-1 border-t border-[#1677ff]/10">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
             Sensor Summary (137pts)
           </div>
-          <DataRow label="AVG" value={sensorSummary.avg} color="#00f0ff" />
-          <DataRow label="MAX" value={String(sensorSummary.max)} color="#ff2d7b" />
+          <DataRow label="AVG" value={sensorSummary.avg} color="var(--hud-accent)" />
+          <DataRow label="MAX" value={String(sensorSummary.max)} color="var(--hud-err)" />
           <DataRow
             label="ACTIVE"
             value={`${sensorSummary.active}/137`}
-            color="#00e5a0"
+            color="var(--hud-ok)"
           />
         </div>
       )}
 
       {/* 四元数 */}
       {isConnected && quatStr && (
-        <div className="space-y-1 pt-1 border-t border-[#00f0ff]/10">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+        <div className="space-y-1 pt-1 border-t border-[#1677ff]/10">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
             IMU Quaternion
           </div>
           <div
             className="text-[9px] font-mono break-all"
-            style={{ color: "#8899aa" }}
+            style={{ color: "var(--hud-soft)" }}
           >
             {quatStr}
           </div>
@@ -216,19 +216,19 @@ export default function GlovePanel({
 
       {/* 加速度 / 姿态角（仅带加速度手套 296B 帧） */}
       {isConnected && latestFrame?.acceleration && (
-        <div className="space-y-1 pt-1 border-t border-[#00f0ff]/10">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+        <div className="space-y-1 pt-1 border-t border-[#1677ff]/10">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
             Acceleration
           </div>
-          <div className="text-[9px] font-mono break-all" style={{ color: "#8899aa" }}>
+          <div className="text-[9px] font-mono break-all" style={{ color: "var(--hud-soft)" }}>
             {`x=${latestFrame.acceleration[0].toFixed(3)} y=${latestFrame.acceleration[1].toFixed(3)} z=${latestFrame.acceleration[2].toFixed(3)}`}
           </div>
           {latestFrame.attitude && (
             <>
-              <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider">
+              <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider">
                 Attitude (deg)
               </div>
-              <div className="text-[9px] font-mono break-all" style={{ color: "#8899aa" }}>
+              <div className="text-[9px] font-mono break-all" style={{ color: "var(--hud-soft)" }}>
                 {`yaw=${latestFrame.attitude[0].toFixed(1)} roll=${latestFrame.attitude[1].toFixed(1)} pitch=${latestFrame.attitude[2].toFixed(1)}`}
               </div>
             </>
@@ -238,8 +238,8 @@ export default function GlovePanel({
 
       {/* 区域热力图 */}
       {isConnected && mappedData && (
-        <div className="pt-1 border-t border-[#00f0ff]/10">
-          <div className="text-[9px] font-mono text-[#556677] uppercase tracking-wider mb-1">
+        <div className="pt-1 border-t border-[#1677ff]/10">
+          <div className="text-[9px] font-mono text-[var(--hud-dim)] uppercase tracking-wider mb-1">
             Region Heatmap
           </div>
           <RegionHeatmap data={mappedData} regions={regions} />
@@ -274,18 +274,17 @@ function RegionHeatmap({
             >
               {region.name}
             </span>
-            <div className="flex-1 h-2 bg-[#0a0e1a] rounded-sm overflow-hidden relative">
+            <div className="flex-1 h-2 bg-[var(--hud-page)] rounded-sm overflow-hidden relative">
               <div
                 className="h-full rounded-sm transition-all duration-100"
                 style={{
                   width: `${intensity * 100}%`,
                   backgroundColor: region.color,
                   opacity: 0.7 + intensity * 0.3,
-                  boxShadow: `0 0 4px ${region.color}60`,
                 }}
               />
             </div>
-            <span className="text-[8px] font-mono w-6 text-right" style={{ color: "#556677" }}>
+            <span className="text-[8px] font-mono w-6 text-right" style={{ color: "var(--hud-dim)" }}>
               {max}
             </span>
           </div>
@@ -314,18 +313,17 @@ function FingerBar({
       >
         {label}
       </span>
-      <div className="flex-1 h-1.5 bg-[#0a0e1a] rounded-sm overflow-hidden">
+      <div className="flex-1 h-1.5 bg-[var(--hud-page)] rounded-sm overflow-hidden">
         <div
           className="h-full rounded-sm transition-all duration-100"
           style={{
             width: `${intensity * 100}%`,
             backgroundColor: color,
             opacity: 0.7 + intensity * 0.3,
-            boxShadow: `0 0 3px ${color}50`,
           }}
         />
       </div>
-      <span className="text-[8px] font-mono w-5 text-right" style={{ color: "#556677" }}>
+      <span className="text-[8px] font-mono w-5 text-right" style={{ color: "var(--hud-dim)" }}>
         {Math.round(value)}
       </span>
     </div>
@@ -334,13 +332,13 @@ function FingerBar({
 
 function PanelHeader({ title }: { title: string }) {
   return (
-    <div className="flex items-center gap-2 pb-1 border-b border-[#00f0ff]/15">
-      <div className="w-1 h-3 bg-[#00e5a0] rounded-full shadow-[0_0_4px_rgba(0,229,160,0.6)]" />
+    <div className="flex items-center gap-2 pb-1 border-b border-[#1677ff]/15">
+      <div className="w-1 h-3 bg-[var(--hud-ok)] rounded-full shadow-[0_0_4px_rgba(0,229,160,0.6)]" />
       <span
         className="text-[10px] font-bold tracking-widest"
         style={{
           fontFamily: "'JetBrains Mono', monospace",
-          color: "#00e5a0",
+          color: "var(--hud-ok)",
         }}
       >
         {title}
@@ -352,7 +350,7 @@ function PanelHeader({ title }: { title: string }) {
 function DataRow({
   label,
   value,
-  color = "#00f0ff",
+  color = "var(--hud-accent)",
 }: {
   label: string;
   value: string;
@@ -360,8 +358,9 @@ function DataRow({
 }) {
   return (
     <div className="flex items-center justify-between text-[10px] font-mono">
-      <span style={{ color: "#556677" }}>{label}</span>
-      <span style={{ color, textShadow: `0 0 6px ${color}40` }}>{value}</span>
+      <span style={{ color: "var(--hud-dim)" }}>{label}</span>
+      {/* 浅色底不做辉光：白底描不出光晕，只会糊出一圈脏边 */}
+      <span style={{ color }}>{value}</span>
     </div>
   );
 }
