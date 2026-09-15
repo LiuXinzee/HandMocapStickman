@@ -1545,7 +1545,10 @@ function DemoViewport({
             : "rgba(85,102,119,0.2)",
         }}
       >
-        <HandModel driveRef={driveRef} side={side} />
+        {/* armStyle="stub"：示意姿态里有手臂正对镜头的档（① 平铺），完整前臂会把
+            这个小视口整个填满，只剩画面角上几个指尖。示意手模不承担朝向线索，
+            腕下留一截收圆的臂桩就够了 */}
+        <HandModel driveRef={driveRef} side={side} armStyle="stub" />
       </div>
     </div>
   );

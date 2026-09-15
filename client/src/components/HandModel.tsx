@@ -130,25 +130,30 @@ const MODEL_URL = "/assets/hand1.glb";
  * 还要过它们各自的局部旋转 —— 改绑定姿态的顶点则一步到位，骨骼驱动完全不动。
  *
  * 拉伸区间从 z=-4.5（Forearm_01 在 -4.09，再往下才开始拉）线性渐变到原切面
- * z=-9.19 处满量 8 个网格单位，切面被推到距腕 17.1 网格 = 13.4 世界单位 ——
+ * z=-9.19 处满量 10 个网格单位，切面被推到距腕 19.1 网格 = 15.0 世界单位 ——
  * 超过取景框对角的最远可达距离（宽视口下 ~12.1），又仍在默认相机距离（15.4）
  * 之内，手臂正对镜头时末端不会穿到相机背后被近平面剖开。腕以上的手掌手指
  * 一个顶点都不动，所以手的大小、取景三档的账全都不变。
  *
  * 光拉长挡不住所有姿态（斜对角、正对镜头时理论上多长都可能露端），所以末端
- * 最后 15%（t ∈ [0.85, 1]，世界 11.9 → 13.4）再做**径向收锥**：顶点朝手臂轴线
+ * 最后 7%（t ∈ [0.93, 1]，世界 14.2 → 15.0）再做**径向收锥**：顶点朝手臂轴线
  * 收拢，开口的切面环几乎闭成一点。就算极端姿态下末端真进了画，看到的也是
  * 自然收细的臂端，不再是一个平的横截面圆盘。收锥只改径向偏移、不动法线 ——
  * 尖端荫影略糙，但它只在取景框最角上才可能露脸，不值得为它重算整手法线。
+ *
+ * ⚠ 收锥起点（世界 14.2）刻意压在取景对角最远距离（12.1）之外：手臂**横放**时
+ * 画面里看到的必须是一根等宽的臂一直伸出边缘，锥头不能露进默认取景框 ——
+ * 把收锥提前到框内的话，横放时框边上会浮着一截锥体，比切面还显眼。
+ * 代价是把 OrbitControls 拉远超过 ~1.2× 后极角上可能瞥到锥头，认了。
  *
  * ⚠ 几何被所有克隆实例**共享**（SkeletonUtils.clone 不克隆 geometry），
  * 所以拉伸做一次就够，用 geometry.userData 防止重复叠加。
  */
 const FOREARM_STRETCH_START_Z = -4.5;
 const FOREARM_STRETCH_END_Z = -9.19;
-const FOREARM_STRETCH_EXTRA = 8;
+const FOREARM_STRETCH_EXTRA = 10;
 /** 收锥起点（占拉伸渐变量 t 的比例）与末端保留的径向比例 */
-const FOREARM_TAPER_START_T = 0.85;
+const FOREARM_TAPER_START_T = 0.93;
 const FOREARM_TAPER_MIN_SCALE = 0.03;
 /** 腕(0.18,0.31,0) → 切面形心(0.668,-0.092,-9.101) 的单位向量，网格空间 */
 const FOREARM_STRETCH_DIR = { x: 0.0535, y: -0.0441, z: -0.9976 } as const;
@@ -185,6 +190,65 @@ function stretchForearmGeometry(geometry: BufferGeometry) {
   // 包围体不更新的话，拉长的那截会在斜视角下被视锥剔除、整只手闪没
   geometry.computeBoundingBox();
   geometry.computeBoundingSphere();
+}
+
+/*
+ * ===== 短臂桩：校准向导示意手模专用 =====
+ *
+ * 向导第 ① 步（平铺）的示意姿态是手臂正对镜头 —— 15 个世界单位长的前臂
+ * 直插到相机跟前，小视口里手指只剩画面角上几个尖，其余全是臂。
+ * 示意手模的职责只是"给用户照着摆个姿势"，前臂在这里不承担任何朝向线索
+ * （四步的姿态是写死的，不跟 IMU），所以截短到 10 网格 = 7.8 世界单位。
+ *
+ * 长度和向导相机（见 DEMO_CAMERA）是一对参数，一起调的：向导相机抬高俯视后，
+ * 平铺姿态下这截臂朝着"镜头下方"去，在到达末端**之前**就穿出画面底边 ——
+ * 画面里看到的是一根等宽的臂伸出画外，锥形的末端本身留在取景框外。
+ * 竖立/握拳姿态下臂垂直朝下，同样在框底之外才到头。末端仍收锥封口，
+ * 只是兜底（万一用户拖 OrbitControls 把角度转到能看见末端）。
+ *
+ * 输入是**已经拉长过的**几何（stretchForearmGeometry 先跑，见调用处），
+ * 所以压缩区间按拉长后的 z 算。位移始终沿手臂轴线，轴线上的点仍在轴线上，
+ * 于是 FOREARM_AXIS 那条按 z 参数化的轴对拉长后的几何依然成立。
+ *
+ * 返回**克隆**的几何而不是原地改：主视口和向导视口共享 glb 缓存里的同一份
+ * geometry，原地改会把主视口的手臂也剁掉。克隆的代价只在向导挂载时付一次。
+ */
+const STUB_START_Z = -2.0;
+const STUB_SOURCE_END_Z = FOREARM_STRETCH_END_Z - FOREARM_STRETCH_EXTRA;
+const STUB_LENGTH = 10.0;
+const STUB_TAPER_START_T = 0.8;
+
+function stubForearmGeometry(geometry: BufferGeometry): BufferGeometry {
+  const cloned = geometry.clone();
+  cloned.userData = { ...geometry.userData };
+  const pos = cloned.attributes.position;
+  const span = STUB_START_Z - STUB_SOURCE_END_Z;
+  for (let i = 0; i < pos.count; i++) {
+    const z = pos.getZ(i);
+    if (z >= STUB_START_Z) continue;
+    const t = Math.min(1, (STUB_START_Z - z) / span);
+    const zNew = STUB_START_Z - STUB_LENGTH * t;
+    const axisX = FOREARM_AXIS.x0 + FOREARM_AXIS.dxdz * z;
+    const axisY = FOREARM_AXIS.y0 + FOREARM_AXIS.dydz * z;
+    const axisXNew = FOREARM_AXIS.x0 + FOREARM_AXIS.dxdz * zNew;
+    const axisYNew = FOREARM_AXIS.y0 + FOREARM_AXIS.dydz * zNew;
+    let radial = 1;
+    if (t > STUB_TAPER_START_T) {
+      const s = (t - STUB_TAPER_START_T) / (1 - STUB_TAPER_START_T);
+      const smooth = s * s * (3 - 2 * s);
+      radial = 1 - smooth * (1 - FOREARM_TAPER_MIN_SCALE);
+    }
+    pos.setXYZ(
+      i,
+      axisXNew + (pos.getX(i) - axisX) * radial,
+      axisYNew + (pos.getY(i) - axisY) * radial,
+      zNew
+    );
+  }
+  pos.needsUpdate = true;
+  cloned.computeBoundingBox();
+  cloned.computeBoundingSphere();
+  return cloned;
 }
 
 /**
@@ -723,6 +787,7 @@ export function AnimatedHand({
   side,
   dimmed = false,
   mode = "mesh",
+  armStyle = "full",
 }: {
   driveRef: RefObject<HandDrive>;
   side: "left" | "right";
@@ -734,17 +799,26 @@ export function AnimatedHand({
    * 只有 `/translate` 会传 `"skeleton"`。
    */
   mode?: "mesh" | "skeleton";
+  /**
+   * 前臂样式。**默认 full**（拉长的完整前臂）。校准向导的示意手模传 `"stub"`：
+   * 腕下只留一小截收圆的臂桩 —— 示意姿态里有手臂正对镜头的档，完整前臂
+   * 会把小视口整个填满（见 stubForearmGeometry 上那段）。
+   */
+  armStyle?: "full" | "stub";
 }) {
   const gltf = useGLTF(MODEL_URL);
   // 必须 clone：直接用 gltf.scene 会让所有实例共享同一套骨骼状态
   const model = useMemo(() => {
     const cloned = cloneSkeleton(gltf.scene);
-    // 前臂拉长（幂等，见 stretchForearmGeometry 上那段）
     cloned.traverse((node: Object3D) => {
-      if (node instanceof Mesh) stretchForearmGeometry(node.geometry);
+      if (!(node instanceof Mesh)) return;
+      // 前臂拉长（幂等、原地改共享几何，见 stretchForearmGeometry 上那段）
+      stretchForearmGeometry(node.geometry);
+      // 臂桩在拉长的基础上再截短，且必须克隆（几何是实例间共享的）
+      if (armStyle === "stub") node.geometry = stubForearmGeometry(node.geometry);
     });
     return cloned;
-  }, [gltf.scene]);
+  }, [gltf.scene, armStyle]);
   const handRef = useRef<Group>(null);
   const restQuaternions = useRef(new Map<string, Quaternion>());
   const wrist = useRef<Object3D | null>(null);
@@ -880,22 +954,38 @@ export interface HandModelProps {
    * 实心手模还是骨架。**默认 mesh**，不传就是原样 —— 见 `AnimatedHand` 上那段。
    */
   mode?: "mesh" | "skeleton";
+  /** 前臂样式，向导示意手模传 "stub" —— 见 `AnimatedHand` 上那段 */
+  armStyle?: "full" | "stub";
 }
 
 /**
  * memo：父页面为了刷新比例条会以约 12Hz 重渲染，而本组件的 props 全是稳定引用
  * （ref + 字符串），没必要跟着重建 r3f 场景树。
  */
-export default memo(function HandModel({ driveRef, side, mode = "mesh" }: HandModelProps) {
+/**
+ * 向导示意视口的相机：抬高俯视 ~25°。和 STUB_LENGTH 是一对参数（见
+ * stubForearmGeometry 上那段）—— 俯视之下，平铺姿态里朝镜头来的那截臂
+ * 走向"镜头下方"、在画面底边就出画了，末端留在取景框外。
+ * 相机是 Canvas 挂载时定死的，armStyle 不会中途切换，所以按 props 选一次即可。
+ */
+const DEMO_CAMERA = { position: [0, 6.5, 13] as [number, number, number], fov: 34 };
+const DEFAULT_CAMERA = { position: [0, 0.34, 15.4] as [number, number, number], fov: 34 };
+
+export default memo(function HandModel({
+  driveRef,
+  side,
+  mode = "mesh",
+  armStyle = "full",
+}: HandModelProps) {
   return (
     <Canvas
-      camera={{ position: [0, 0.34, 15.4], fov: 34 }}
+      camera={armStyle === "stub" ? DEMO_CAMERA : DEFAULT_CAMERA}
       dpr={[1, 1.6]}
       gl={{ antialias: true, alpha: true }}
     >
       <HandSceneLights />
       <Suspense fallback={null}>
-        <AnimatedHand driveRef={driveRef} side={side} mode={mode} />
+        <AnimatedHand driveRef={driveRef} side={side} mode={mode} armStyle={armStyle} />
       </Suspense>
       {/* 骨架档不投接触阴影：没有实心网格，投下来的是一地碎斑。
           地面高度要跟着取景走（见文件头第 2 条）：相机是平视的，这个水平面在默认
