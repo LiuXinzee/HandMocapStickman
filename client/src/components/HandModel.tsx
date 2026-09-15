@@ -32,6 +32,7 @@ import { Canvas, useFrame } from "@react-three/fiber";
 import { memo, Suspense, useEffect, useMemo, useRef, type RefObject } from "react";
 import {
   Bone,
+  type BufferGeometry,
   Color,
   DoubleSide,
   Group,
@@ -114,6 +115,77 @@ const MODEL_URL = "/assets/hand1.glb";
  *     **别照着数字继续调**，改了就上屏看手模档、手指伸直朝上那个姿势
  *     （那是最高的姿势，转起来只会变矮）。
  */
+
+/*
+ * ===== 前臂拉长：把末端切面推出取景框 =====
+ *
+ * 切面进画的几何账（数字全来自上面那段实测）：切面距腕 9.12 网格单位 =
+ * 7.17 世界单位，而默认取景半高 4.71、宽视口下半宽 ~9.4，腕又钉在画面中央附近 ——
+ * 前臂横扫时切面必然进画。轴心挪到切面那条路已经试过并回退（见 return 那段），
+ * 剩下的办法就是把切面推远：**直接在几何顶点上沿手臂轴线做渐进拉伸**。
+ *
+ * 为什么改顶点而不是改骨头：切面附近的顶点全权重在 Forearm_00（肘端）上，
+ * 而 Forearm_00 是整条骨链的**根**（Forearm_00 → Forearm_01 → Wrist → 手指），
+ * 挪它会连腕带手一起挪走；要"只挪肘端"得同时给 Forearm_01 做反向补偿，
+ * 还要过它们各自的局部旋转 —— 改绑定姿态的顶点则一步到位，骨骼驱动完全不动。
+ *
+ * 拉伸区间从 z=-4.5（Forearm_01 在 -4.09，再往下才开始拉）线性渐变到原切面
+ * z=-9.19 处满量 8 个网格单位，切面被推到距腕 17.1 网格 = 13.4 世界单位 ——
+ * 超过取景框对角的最远可达距离（宽视口下 ~12.1），又仍在默认相机距离（15.4）
+ * 之内，手臂正对镜头时末端不会穿到相机背后被近平面剖开。腕以上的手掌手指
+ * 一个顶点都不动，所以手的大小、取景三档的账全都不变。
+ *
+ * 光拉长挡不住所有姿态（斜对角、正对镜头时理论上多长都可能露端），所以末端
+ * 最后 15%（t ∈ [0.85, 1]，世界 11.9 → 13.4）再做**径向收锥**：顶点朝手臂轴线
+ * 收拢，开口的切面环几乎闭成一点。就算极端姿态下末端真进了画，看到的也是
+ * 自然收细的臂端，不再是一个平的横截面圆盘。收锥只改径向偏移、不动法线 ——
+ * 尖端荫影略糙，但它只在取景框最角上才可能露脸，不值得为它重算整手法线。
+ *
+ * ⚠ 几何被所有克隆实例**共享**（SkeletonUtils.clone 不克隆 geometry），
+ * 所以拉伸做一次就够，用 geometry.userData 防止重复叠加。
+ */
+const FOREARM_STRETCH_START_Z = -4.5;
+const FOREARM_STRETCH_END_Z = -9.19;
+const FOREARM_STRETCH_EXTRA = 8;
+/** 收锥起点（占拉伸渐变量 t 的比例）与末端保留的径向比例 */
+const FOREARM_TAPER_START_T = 0.85;
+const FOREARM_TAPER_MIN_SCALE = 0.03;
+/** 腕(0.18,0.31,0) → 切面形心(0.668,-0.092,-9.101) 的单位向量，网格空间 */
+const FOREARM_STRETCH_DIR = { x: 0.0535, y: -0.0441, z: -0.9976 } as const;
+/** 手臂轴线按 z 参数化：axis(z) = 腕 + 该斜率 × z（由上面的方向向量折算） */
+const FOREARM_AXIS = { x0: 0.18, dxdz: -0.0536, y0: 0.31, dydz: 0.0442 } as const;
+
+function stretchForearmGeometry(geometry: BufferGeometry) {
+  if (geometry.userData.forearmStretched) return;
+  geometry.userData.forearmStretched = true;
+  const pos = geometry.attributes.position;
+  const span = FOREARM_STRETCH_START_Z - FOREARM_STRETCH_END_Z;
+  for (let i = 0; i < pos.count; i++) {
+    const z = pos.getZ(i);
+    if (z >= FOREARM_STRETCH_START_Z) continue;
+    const t = Math.min(1, (FOREARM_STRETCH_START_Z - z) / span);
+    // 径向收锥：先把顶点对手臂轴线的偏移量缩掉，再做轴向位移
+    const axisX = FOREARM_AXIS.x0 + FOREARM_AXIS.dxdz * z;
+    const axisY = FOREARM_AXIS.y0 + FOREARM_AXIS.dydz * z;
+    let radial = 1;
+    if (t > FOREARM_TAPER_START_T) {
+      const s = (t - FOREARM_TAPER_START_T) / (1 - FOREARM_TAPER_START_T);
+      const smooth = s * s * (3 - 2 * s);
+      radial = 1 - smooth * (1 - FOREARM_TAPER_MIN_SCALE);
+    }
+    const d = FOREARM_STRETCH_EXTRA * t;
+    pos.setXYZ(
+      i,
+      axisX + (pos.getX(i) - axisX) * radial + FOREARM_STRETCH_DIR.x * d,
+      axisY + (pos.getY(i) - axisY) * radial + FOREARM_STRETCH_DIR.y * d,
+      z + FOREARM_STRETCH_DIR.z * d
+    );
+  }
+  pos.needsUpdate = true;
+  // 包围体不更新的话，拉长的那截会在斜视角下被视锥剔除、整只手闪没
+  geometry.computeBoundingBox();
+  geometry.computeBoundingSphere();
+}
 
 /**
  * 实物手套是**白色**的（规格书 p12 写"黑色面料"与实物不符），
@@ -665,7 +737,14 @@ export function AnimatedHand({
 }) {
   const gltf = useGLTF(MODEL_URL);
   // 必须 clone：直接用 gltf.scene 会让所有实例共享同一套骨骼状态
-  const model = useMemo(() => cloneSkeleton(gltf.scene), [gltf.scene]);
+  const model = useMemo(() => {
+    const cloned = cloneSkeleton(gltf.scene);
+    // 前臂拉长（幂等，见 stretchForearmGeometry 上那段）
+    cloned.traverse((node: Object3D) => {
+      if (node instanceof Mesh) stretchForearmGeometry(node.geometry);
+    });
+    return cloned;
+  }, [gltf.scene]);
   const handRef = useRef<Group>(null);
   const restQuaternions = useRef(new Map<string, Quaternion>());
   const wrist = useRef<Object3D | null>(null);
