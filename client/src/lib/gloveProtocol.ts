@@ -58,6 +58,8 @@ export interface GloveFrame {
   mapped_data: number[];
   /** IMU 四元数 [w, x, y, z] */
   quaternion: [number, number, number, number];
+  /** False means the packet quaternion was rejected; identity fallback is not a measurement. */
+  quaternionValid?: boolean;
   /** 加速度 [x, y, z]；旧手套(272B)为 null */
   acceleration: [number, number, number] | null;
   /** 姿态角 [yaw, roll, pitch]（度）；旧手套(272B)为 null */
@@ -236,14 +238,15 @@ export class GloveParser {
     let quaternion: [number, number, number, number] = [1, 0, 0, 0];
     const [qw, qx, qy, qz] = readFloats(combined, 256, 4);
     const qmag = Math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz);
-    if (
+    const quaternionValid = (
       qmag > 0.5 &&
       qmag < 2.0 &&
       isFinite(qw) &&
       isFinite(qx) &&
       isFinite(qy) &&
       isFinite(qz)
-    ) {
+    );
+    if (quaternionValid) {
       quaternion = [qw, qx, qy, qz];
     }
 
@@ -273,6 +276,7 @@ export class GloveParser {
       sensor_data: sensorData,
       mapped_data: remapSensorData(sensorData, handType),
       quaternion,
+      quaternionValid,
       acceleration,
       attitude,
       frame_id: this.frameCount,

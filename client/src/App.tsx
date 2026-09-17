@@ -11,6 +11,7 @@ import Train from "./pages/Train";
 import Translate from "./pages/Translate";
 import TrainSkeleton from "./pages/TrainSkeleton";
 import VirtualMocap from "./pages/VirtualMocap";
+import CalibrationHistory from "./pages/CalibrationHistory";
 import SequenceCollect from "./pages/SequenceCollect";
 import CollectSentence from "./pages/CollectSentence";
 import TrainSequence from "./pages/TrainSequence";
@@ -29,6 +30,7 @@ function Router() {
       <Route path={"/train-skeleton"} component={TrainSkeleton} />
       <Route path={"/translate"} component={Translate} />
       <Route path={"/mocap"} component={VirtualMocap} />
+      <Route path={"/calibration-history"} component={CalibrationHistory} />
       <Route path={"/404"} component={NotFound} />
       <Route component={NotFound} />
     </Switch>

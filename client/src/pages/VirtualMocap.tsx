@@ -31,9 +31,8 @@
  *   - 朝向零位 + 轴向映射（见 orientationCalib.ts）→ 手模朝向跟不跟得上戴着的手。
  * 两份互不依赖，缺一份另一份照样生效；朝向那份只影响本页显示、不进数据集。
  *
- * **陀螺漂移自检折叠在向导里**，没有单独的"静置自检"按钮：向导每一步本来就要求
- * 静止握 3 秒，那就是四段合格的静置采样，再让用户额外站着不动两个 5 秒纯属重复。
- * 汇算时逐步各算一份报告、取最差的那份（见 assemble 里的注释：**不能把四步拼成一段**）。
+ * 四步采样的累计姿态变化只作筛查，不能直接称为陀螺零偏。独立诊断提供
+ * 稳定后 10 秒静置记录、三轴对照、多姿态轴向拟合，以及复用轴向的日常归零。
  *
  * **本页是第 1 步"准备"**，也是全流程里唯一的手套连接入口 —— 串口连接住在
  * App 层的 GloveProvider 里（一个 COM 口同一时刻只能被一个持有者打开），
@@ -50,7 +49,17 @@ import {
 } from "@/lib/skeletonModel";
 import { getLatestSkeletonModel } from "@/lib/datasetStore";
 import { FINGER_CONNECTION_GROUPS } from "@/hooks/useHandTracking";
-import HandModel, { makeHandDrive, type HandDrive } from "@/components/HandModel";
+import HandModel, {
+  makeHandDrive,
+  type HandDrive,
+} from "@/components/HandModel";
+import MotionDiagnostics from "@/components/MotionDiagnostics";
+import { MANUAL_IMPORT_READY, pendingManualImport } from "@/lib/calibrationHistory";
+import {
+  checkPoseHold,
+  validPose,
+  type PoseSample,
+} from "@/lib/motionCalibration";
 import {
   averageBends,
   bendRatios,
@@ -74,6 +83,9 @@ import {
   axisQualityWarning,
   clearOrientationCalib,
   loadOrientationCalib,
+  normalizeQuat,
+  MIN_MOTION_DEG,
+  relativeAxisAngle,
   saveOrientationCalib,
   TARGET_MOTION_DEG,
   type OrientationCalib,
@@ -85,7 +97,14 @@ import {
   worstReport,
   type ImuHealthReport,
 } from "@/lib/imuHealth";
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type RefObject,
+} from "react";
 import { Link } from "wouter";
 import {
   ArrowLeft,
@@ -248,7 +267,7 @@ const WIZARD_STEPS: WizardStep[] = [
  * 真要剔野值该用 `imuHealth.ts` 那套按模长筛的做法，不该在这里再写一份。
  */
 function averageAcc(samples: CalibSample[]): Vec3 | null {
-  const valid = samples.filter((s) => s.acc);
+  const valid = samples.filter(s => s.acc);
   if (!valid.length) return null;
   const sum: Vec3 = [0, 0, 0];
   for (const s of valid) for (let i = 0; i < 3; i++) sum[i] += s.acc![i];
@@ -260,7 +279,31 @@ const WIZARD_SAMPLE_MS = 3000;
 /** 一只手这一步至少要收到这么多帧才算有效（30Hz 下 3 秒约 90 帧，5 是很松的下限） */
 const WIZARD_MIN_FRAMES = 5;
 
-type WizardPhase = "countdown" | "sampling" | "done";
+/*
+ * ===== 实时角度引导（②③ 两步） =====
+ *
+ * 轴向矩阵靠 ①→② 与 ②→③ 两个 90° 动作反解，可实测里出现过 9°、15° 这种
+ * 根本没做到位的采样 —— 用户在采样结束前**没有任何读数**知道自己转没转够，
+ * 门限（MIN_MOTION_DEG = 40°）不过就只写零位，"朝向对不上"的抱怨多半源于此。
+ *
+ * 引导用的参照就是上一步刚采完的平均四元数（② 对 ①、③ 对 ②），和汇算里
+ * `relativeAxisAngle` 用的是同一份数学，所以引导读数和最终质量数必然一致。
+ * ① 是链条的锚点本身、④ 只看弯折，都没有角度可引导。
+ *
+ * 参与向导的手必须持续稳定，②③ 实测角度在 70–110° 才采样。
+ * 等待超时进入重试，不采入明显偏离目标的数据；采样结束再核对稳定性。
+ */
+const GATE_MIN_DEG = 70;
+const GATE_MAX_DEG = 110;
+const GATE_TIMEOUT_MS = 30000;
+
+/** ②③ 两步的角度参照取自哪一步；其余步骤无角度引导 */
+const STEP_ANCHOR: Partial<Record<StepKey, StepKey>> = {
+  zero: "open",
+  palms: "zero",
+};
+
+type WizardPhase = "countdown" | "sampling" | "blocked" | "done";
 
 /**
  * 单只手的体检状态：弯折两点标定 + 朝向标定 + IMU 漂移自检 + 3D 手模驱动。
@@ -303,8 +346,8 @@ function useHandCheck(
         return;
       }
       const next: BendRange = {
-        open: pose === "open" ? avg : bendRange?.open ?? [],
-        fist: pose === "fist" ? avg : bendRange?.fist ?? [],
+        open: pose === "open" ? avg : (bendRange?.open ?? []),
+        fist: pose === "fist" ? avg : (bendRange?.fist ?? []),
       };
       setBendRange(next);
       bendRangeRef.current = next;
@@ -313,7 +356,7 @@ function useHandCheck(
         const w = weakChannels(next);
         setCalibMsg(
           w.length
-            ? `标定完成，但 ${w.map((i) => FINGER_NAMES[i]).join("/")} 跨度不足 ${MIN_USEFUL_SPAN}，请检查这几路弯折传感器`
+            ? `标定完成，但 ${w.map(i => FINGER_NAMES[i]).join("/")} 跨度不足 ${MIN_USEFUL_SPAN}，请检查这几路弯折传感器`
             : "两点标定完成，已保存"
         );
       } else {
@@ -353,6 +396,15 @@ function useHandCheck(
     orientRef.current = null;
   }, [handKey]);
 
+  const applyOrientation = useCallback(
+    (calib: OrientationCalib) => {
+      setOrientCalib(calib);
+      orientRef.current = calib;
+      saveOrientationCalib(handKey, calib);
+    },
+    [handKey]
+  );
+
   // ===== IMU 漂移自检 =====
   // 没有独立的自检按钮：结论由四步向导汇算时给出（向导每步都是静止 3 秒）。
   // 只存内存、不落盘 —— 陀螺零偏是掉电即变的硬件状态，存下来隔天就是假消息。
@@ -372,7 +424,7 @@ function useHandCheck(
         const w = weakChannels(range);
         setCalibMsg(
           w.length
-            ? `向导已写入，但 ${w.map((i) => FINGER_NAMES[i]).join("/")} 跨度不足 ${MIN_USEFUL_SPAN}`
+            ? `向导已写入，但 ${w.map(i => FINGER_NAMES[i]).join("/")} 跨度不足 ${MIN_USEFUL_SPAN}`
             : "向导已写入弯折两点标定"
         );
       }
@@ -392,7 +444,11 @@ function useHandCheck(
    */
   const tick = useCallback(() => {
     const frame = frameRef.current;
-    if (!frame) {
+    if (
+      !channel.isConnected ||
+      !frame ||
+      performance.now() - frame.timestamp > 250
+    ) {
       driveRef.current.hasData = false;
       return;
     }
@@ -403,10 +459,12 @@ function useHandCheck(
       bendRangeRef.current
     );
     // 朝向标定：ref⁻¹⊗q（+ 轴向重映射）。没标定时 applyOrientationCalib 原样返回。
-    driveRef.current.quaternion = applyOrientationCalib(
-      frame.quaternion,
-      orientRef.current
-    );
+    if (frame.quaternionValid !== false && validPose(frame.quaternion)) {
+      driveRef.current.quaternion = applyOrientationCalib(
+        normalizeQuat(frame.quaternion),
+        orientRef.current
+      );
+    }
     driveRef.current.curl = ratios;
     driveRef.current.hasData = true;
 
@@ -424,9 +482,10 @@ function useHandCheck(
       lastSinkFrameRef.current = frame;
       sink(handKey, {
         bend: raw,
-        quat: frame.quaternion,
+        quat:
+          frame.quaternionValid === false ? [NaN, 0, 0, 0] : frame.quaternion,
         acc: frame.acceleration,
-        t: performance.now(),
+        t: frame.timestamp,
       });
     }
 
@@ -437,7 +496,7 @@ function useHandCheck(
       setBendUi(ratios);
       setRawUi(raw);
     }
-  }, [frameRef, handKey, sinkRef]);
+  }, [frameRef, handKey, sinkRef, channel.isConnected]);
 
   return {
     handKey,
@@ -453,6 +512,7 @@ function useHandCheck(
     calibrated,
     orientCalib,
     resetOrientCalib,
+    applyOrientation,
     applyWizardResult,
     imuReport,
     tick,
@@ -475,7 +535,9 @@ function useCalibWizard(
     range: BendRange | null,
     orient: OrientationCalib | null,
     imu: ImuHealthReport | null
-  ) => void
+  ) => void,
+  /** 双手的实时帧（原始四元数），②③ 两步的实时角度引导与角度门都从这里读 */
+  frameRefs: Record<HandKey, RefObject<GloveFrame | null>>
 ) {
   const [open, setOpen] = useState(false);
   const [stepIndex, setStepIndex] = useState(0);
@@ -488,13 +550,16 @@ function useCalibWizard(
   });
   const [errorMsg, setErrorMsg] = useState("");
   const [summary, setSummary] = useState<string[]>([]);
+  const participants = useRef<HandKey[]>([]);
+  const recent = useRef<Record<HandKey, PoseSample[]>>({ LH: [], RH: [] });
+  const [attempt, setAttempt] = useState(0);
 
   /** 本步的采样缓冲 */
   const bufRef = useRef<Record<HandKey, CalibSample[]>>({ LH: [], RH: [] });
   /** 已完成各步的采样 */
-  const stepsRef = useRef<Partial<Record<StepKey, Record<HandKey, CalibSample[]>>>>(
-    {}
-  );
+  const stepsRef = useRef<
+    Partial<Record<StepKey, Record<HandKey, CalibSample[]>>>
+  >({});
   // onApply 每次渲染都是新函数，走 ref 才能让下面的回调保持稳定
   const applyRef = useRef(onApply);
   applyRef.current = onApply;
@@ -520,16 +585,78 @@ function useCalibWizard(
     bufRef.current[hand].push(sample);
   }, []);
 
+  /** 倒数已到 0、在等角度门放行（界面据此把倒数文案换成"转到位"提示） */
+  const [gateWaiting, setGateWaiting] = useState(false);
+
+  /**
+   * 某步采完的平均四元数，作实时角度的参照。每次现算：一步约 90 帧的
+   * 符号对齐求和，10Hz 的引导轮询下开销可忽略，比维护一份缓存省心。
+   */
+  const anchorQuat = useCallback((key: StepKey, hand: HandKey): Quat | null => {
+    const seg = stepsRef.current[key]?.[hand];
+    if (!seg || seg.length < WIZARD_MIN_FRAMES) return null;
+    return averageQuaternions(seg.map(s => s.quat));
+  }, []);
+
+  /**
+   * 这只手此刻相对本步参照转了多少度；null = 本步无引导 / 锚点缺失 / 没有帧。
+   * 与汇算共用 `relativeAxisAngle`，读数和最终质量数出自同一份数学。
+   */
+  const liveAngleDeg = useCallback(
+    (hand: HandKey): number | null => {
+      const anchorKey = STEP_ANCHOR[WIZARD_STEPS[stepIndex]?.key];
+      if (!anchorKey) return null;
+      const anchor = anchorQuat(anchorKey, hand);
+      const frame = frameRefs[hand].current;
+      if (
+        !anchor ||
+        !frame ||
+        performance.now() - frame.timestamp > 250 ||
+        frame.quaternionValid === false ||
+        !validPose(frame.quaternion)
+      )
+        return null;
+      // 两姿态几乎重合时转轴无定义，对引导来说就是"还没开始转"
+      return relativeAxisAngle(anchor, frame.quaternion)?.angleDeg ?? 0;
+    },
+    [anchorQuat, frameRefs, stepIndex]
+  );
+
   const startWizard = useCallback(() => {
+    participants.current = HAND_KEYS.filter(hand => {
+      const frame = frameRefs[hand].current;
+      return frame && performance.now() - frame.timestamp < 250;
+    });
+    recent.current = { LH: [], RH: [] };
     stepsRef.current = {};
     bufRef.current = { LH: [], RH: [] };
     setSummary([]);
     setErrorMsg("");
     setCounts({ LH: 0, RH: 0 });
     setStepIndex(0);
-    setPhase("countdown");
+    setPhase(participants.current.length ? "countdown" : "blocked");
+    if (!participants.current.length)
+      setErrorMsg("没有收到新鲜数据。请确认连接后重开向导。");
     setOpen(true);
-  }, []);
+    setAttempt(n => n + 1);
+  }, [frameRefs]);
+
+  const retryStep = useCallback(
+    (previous = false) => {
+      sinkRef.current = null;
+      const index = previous ? Math.max(0, stepIndex - 1) : stepIndex;
+      WIZARD_STEPS.slice(index).forEach(s => {
+        delete stepsRef.current[s.key];
+      });
+      recent.current = { LH: [], RH: [] };
+      bufRef.current = { LH: [], RH: [] };
+      setErrorMsg("");
+      setStepIndex(index);
+      setPhase("countdown");
+      setAttempt(n => n + 1);
+    },
+    [sinkRef, stepIndex]
+  );
 
   const closeWizard = useCallback(() => {
     sinkRef.current = null;
@@ -540,7 +667,7 @@ function useCalibWizard(
   const assemble = useCallback(() => {
     const steps = stepsRef.current;
     const lines: string[] = [];
-    for (const hand of HAND_KEYS) {
+    for (const hand of participants.current) {
       const of = (k: StepKey) => steps[k]?.[hand] ?? [];
       const openS = of("open");
       const zeroS = of("zero");
@@ -558,35 +685,46 @@ function useCalibWizard(
         continue;
       }
       const range: BendRange = {
-        open: averageBends(openS.map((s) => s.bend)) ?? [],
-        fist: averageBends(fistS.map((s) => s.bend)) ?? [],
+        open: averageBends(openS.map(s => s.bend)) ?? [],
+        fist: averageBends(fistS.map(s => s.bend)) ?? [],
       };
       const ok = isCalibrated(range);
-      const orient = assembleOrientationCalib(
+      let orient = assembleOrientationCalib(
         hand,
-        averageQuaternions(zeroS.map((s) => s.quat)),
-        averageQuaternions(openS.map((s) => s.quat)),
+        averageQuaternions(zeroS.map(s => s.quat)),
+        averageQuaternions(openS.map(s => s.quat)),
         palmsS.length >= WIZARD_MIN_FRAMES
-          ? averageQuaternions(palmsS.map((s) => s.quat))
+          ? averageQuaternions(palmsS.map(s => s.quat))
           : null,
         // 零位那步的平均加速度：用来核对轴向矩阵有没有整体翻转
         averageAcc(zeroS)
       );
+      const quality = orient?.axisQuality;
+      if (
+        !orient?.axisMap ||
+        !quality ||
+        quality.separationDeg < 70 ||
+        quality.pitchDeg < GATE_MIN_DEG ||
+        quality.pitchDeg > GATE_MAX_DEG ||
+        quality.swingDeg < GATE_MIN_DEG ||
+        quality.swingDeg > GATE_MAX_DEG
+      ) {
+        lines.push(
+          `${name}：朝向参考不一致，本轮未覆盖已有朝向。请用三轴验证检查原始角度。`
+        );
+        orient = null;
+      } else {
+        orient.updatedAt = Date.now();
+        orient.method = "four-step";
+      }
 
-      /*
-       * 陀螺漂移：**逐步**各算一份，再取最差的那份。
-       *
-       * 绝不能把四步的采样拼成一段再分析 —— 步与步之间手在大幅转动，
-       * stillRotationDegPerMin（旧手套没有加速度时唯一的兜底判据）会被
-       * 那几段转动喂成天文数字，直接把好手套判成漂移。
-       * 每一步单独看才是货真价实的"静止 3 秒"，两条判据都成立。
-       */
+      // 分步计算，防止把步骤间的主动转动混入；累计角度仍不能视为零偏。
       const imu = worstReport(
-        WIZARD_STEPS.map((s) => {
+        WIZARD_STEPS.map(s => {
           const seg = of(s.key);
           if (seg.length < WIZARD_MIN_FRAMES) return null;
           return analyzeImuHealth(
-            seg.map((x) => ({ q: x.quat, acc: x.acc, t: x.t }))
+            seg.map(x => ({ q: x.quat, acc: x.acc, t: x.t }))
           );
         })
       );
@@ -594,12 +732,12 @@ function useCalibWizard(
       applyRef.current(hand, ok ? range : null, orient, imu);
 
       if (ok) {
-        const spans = channelSpans(range).map((s) => Math.round(s));
+        const spans = channelSpans(range).map(s => Math.round(s));
         const weak = weakChannels(range);
         lines.push(
           `${name} 弯折跨度：${spans.join(" / ")}${
             weak.length
-              ? ` —— ${weak.map((i) => FINGER_NAMES[i]).join("、")} 不足 ${MIN_USEFUL_SPAN}，这几路传感器要查`
+              ? ` —— ${weak.map(i => FINGER_NAMES[i]).join("、")} 不足 ${MIN_USEFUL_SPAN}，这几路传感器要查`
               : "（拇指→小指，都够用）"
           }`
         );
@@ -607,7 +745,7 @@ function useCalibWizard(
         lines.push(`${name} 弯折：取值异常，未写入`);
       }
       if (!orient) {
-        lines.push(`${name} 朝向：没取到零位，未写入`);
+        lines.push(`${name} 朝向：本轮未通过检查，原有标定保持不变`);
       } else if (orient.axisMap) {
         const q = orient.axisQuality!;
         // 三个数后面都跟上目标值：只报实测值时 40° 和 160° 看起来一样正常
@@ -647,14 +785,10 @@ function useCalibWizard(
           `${name} 朝向：只写入零位 —— ${axisMapFailReason(orient)}。整体朝向已经对齐，但翻腕方向可能仍会串轴`
         );
       }
-      // 陀螺结论取四步里最差的一步；reason 里已经带了该怎么办
-      if (imu) {
+      if (imu)
         lines.push(
-          imu.verdict === "ok"
-            ? `${name} 陀螺：${imu.reason}`
-            : `${name} 陀螺 ${imu.verdict.toUpperCase()}：${imu.reason}`
+          `${name} 采样姿态变化：${imu.stillRotationDegPerMin?.toFixed(0) ?? "—"}°/分钟（累计值，包含抖动，不等于零偏）。有疑问请做独立静置检测。`
         );
-      }
     }
     setSummary(lines);
     setPhase("done");
@@ -663,13 +797,28 @@ function useCalibWizard(
   const finishSampling = useCallback(() => {
     const step = WIZARD_STEPS[stepIndex];
     const buf = bufRef.current;
+    for (const hand of participants.current) {
+      const hold = checkPoseHold(
+        buf[hand].map(s => ({ q: s.quat, t: s.t })),
+        2700,
+        performance.now()
+      );
+      if (!hold.ok) {
+        sinkRef.current = null;
+        setErrorMsg(
+          `${handName(hand)}：${hold.reason}，本步未保存。摆稳后重试。`
+        );
+        setPhase("blocked");
+        return;
+      }
+    }
     if (
       buf.LH.length < WIZARD_MIN_FRAMES &&
       buf.RH.length < WIZARD_MIN_FRAMES
     ) {
       // 两只手都没数据 = 手套断流，重做这一步而不是往下走（否则最后汇算全空）
-      setErrorMsg(`「${step.short}」一帧都没收到，自动重做这一步 —— 确认手套还在出数据`);
-      setPhase("countdown");
+      setErrorMsg(`「${step.short}」没有足够数据，请确认连接后重试。`);
+      setPhase("blocked");
       return;
     }
     stepsRef.current[step.key] = { LH: [...buf.LH], RH: [...buf.RH] };
@@ -679,30 +828,84 @@ function useCalibWizard(
       setStepIndex(stepIndex + 1);
       setPhase("countdown");
     }
-  }, [stepIndex, assemble]);
+  }, [stepIndex, assemble, sinkRef]);
 
   const startSampling = useCallback(() => {
     bufRef.current = { LH: [], RH: [] };
     setCounts({ LH: 0, RH: 0 });
     setProgress(0);
+    setGateWaiting(false);
     sinkRef.current = push; // 从这一刻起 tick 开始往缓冲里推帧
     setPhase("sampling");
   }, [push, sinkRef]);
 
-  // 每步开场倒数，数到 0 自动开始采样，全程无需点击
+  // 每步开场倒数，数到 0 自动开始采样，全程无需点击。
+  // ②③ 两步多一道角度门：倒数完还没转够 GATE_MIN_DEG 就先不采，
+  // 稳定且角度在范围内才放行，超时提供重试，不强行采样。
   useEffect(() => {
     if (!open || phase !== "countdown") return;
     setCountdown(WIZARD_COUNTDOWN_S);
+    setGateWaiting(false);
+    const anchorKey = STEP_ANCHOR[WIZARD_STEPS[stepIndex]?.key];
+    recent.current = { LH: [], RH: [] };
     const t0 = Date.now();
     const timer = window.setInterval(() => {
-      const left = WIZARD_COUNTDOWN_S - Math.floor((Date.now() - t0) / 1000);
-      if (left <= 0) {
-        window.clearInterval(timer);
-        startSampling();
-      } else setCountdown(left);
+      const elapsed = Date.now() - t0;
+      const now = performance.now();
+      for (const hand of participants.current) {
+        const frame = frameRefs[hand].current;
+        const list = recent.current[hand];
+        if (frame && frame.timestamp !== list.at(-1)?.t) {
+          list.push({
+            q:
+              frame.quaternionValid === false
+                ? [NaN, 0, 0, 0]
+                : frame.quaternion,
+            t: frame.timestamp,
+          });
+        }
+        recent.current[hand] = list.filter(s => now - s.t <= 1400);
+      }
+      const left = WIZARD_COUNTDOWN_S - Math.floor(elapsed / 1000);
+      if (left > 0) {
+        setCountdown(left);
+        return;
+      }
+      setCountdown(0);
+      const pending =
+        !participants.current.length ||
+        participants.current.some(hand => {
+          if (!checkPoseHold(recent.current[hand], 900, now).ok) return true;
+          if (!anchorKey) return false;
+          if (!anchorQuat(anchorKey, hand)) return true;
+          const deg = liveAngleDeg(hand);
+          return deg === null || deg < GATE_MIN_DEG || deg > GATE_MAX_DEG;
+        });
+      if (pending) {
+        setGateWaiting(true);
+        if (elapsed >= WIZARD_COUNTDOWN_S * 1000 + GATE_TIMEOUT_MS) {
+          window.clearInterval(timer);
+          setErrorMsg(
+            "未取得稳定且接近目标的姿态，本步未采样。请重试或返回上一步检查参考；持续偏差大时使用朝向诊断。"
+          );
+          setPhase("blocked");
+        }
+        return;
+      }
+      window.clearInterval(timer);
+      startSampling();
     }, 100);
     return () => window.clearInterval(timer);
-  }, [open, phase, stepIndex, startSampling]);
+  }, [
+    open,
+    phase,
+    stepIndex,
+    startSampling,
+    anchorQuat,
+    liveAngleDeg,
+    frameRefs,
+    attempt,
+  ]);
 
   // 采样计时；cleanup 里摘掉 sink，所以中途关窗/卸载都不会继续往缓冲里灌帧
   useEffect(() => {
@@ -737,6 +940,9 @@ function useCalibWizard(
     summary,
     demoLRef,
     demoRRef,
+    gateWaiting,
+    liveAngleDeg,
+    retryStep,
     startWizard,
     closeWizard,
     restart: startWizard,
@@ -759,16 +965,34 @@ export default function VirtualMocap() {
   // 向导采样槽：向导开始采样时挂上，采完摘掉。两只手的 tick 都往这一个槽里推。
   const sinkRef = useRef<CalibSink | null>(null);
 
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState<"zero" | "fit" | null>(
+    null
+  );
+  useEffect(() => {
+    const imported = () => { if (pendingManualImport()) setDiagnosticsOpen("fit"); };
+    imported();
+    window.addEventListener(MANUAL_IMPORT_READY, imported);
+    return () => window.removeEventListener(MANUAL_IMPORT_READY, imported);
+  }, []);
   const L = useHandCheck(left, "LH", sinkRef);
   const R = useHandCheck(right, "RH", sinkRef);
   // rAF 循环通过 ref 读这两个对象，避免把每次渲染新建的 L/R 放进 effect 依赖
   const checksRef = useRef<HandCheck[]>([]);
   checksRef.current = [L, R];
 
-  const wizard = useCalibWizard(sinkRef, (hand, range, orient, imu) => {
-    const hc = checksRef.current.find((c) => c.handKey === hand);
-    hc?.applyWizardResult(range, orient, imu);
-  });
+  // 必须 memo：向导拿它进了 effect 依赖链，每次渲染新建对象会让倒数计时器不停重置
+  const wizardFrameRefs = useMemo(
+    () => ({ LH: left.latestFrameRef, RH: right.latestFrameRef }),
+    [left.latestFrameRef, right.latestFrameRef]
+  );
+  const wizard = useCalibWizard(
+    sinkRef,
+    (hand, range, orient, imu) => {
+      const hc = checksRef.current.find(c => c.handKey === hand);
+      hc?.applyWizardResult(range, orient, imu);
+    },
+    wizardFrameRefs
+  );
 
   /**
    * 骨架回归只画一副：模型是用 pickPrimaryHand 训练的、对左右手不敏感。
@@ -880,10 +1104,7 @@ export default function VirtualMocap() {
       let predicted = false;
 
       if (frame && modelReady && isSkeletonModelLoaded()) {
-        const landmarks = predictSkeleton(
-          frame.mapped_data,
-          frame.quaternion
-        );
+        const landmarks = predictSkeleton(frame.mapped_data, frame.quaternion);
 
         if (landmarks && landmarks.length === 21) {
           const smoothed = smoothLandmarks(landmarks);
@@ -1027,7 +1248,7 @@ export default function VirtualMocap() {
             可选项，别因为"标定不进数据集"就把它从 checklist 里摘掉。
           */}
           <Section title="CHECKLIST">
-            {[L, R].map((hc) => {
+            {[L, R].map(hc => {
               const issues = handIssues(hc);
               const ok = issues.length === 0;
               return (
@@ -1051,30 +1272,37 @@ export default function VirtualMocap() {
             })}
           </Section>
 
-          {/*
-            四步校准向导（平铺 → 竖立 → 手心相对 → 握拳，自动连播）：一趟同时定下
-            **弯折两点**（张开/握拳）和**朝向零位 + 轴向映射**。只连一只手也能跑。
-
-            零位修的是"整体差一个固定旋转"；轴向映射修的是"我抬手、手模却在左右倾"。
-            后者需要 ①③ 两步真的各转到 90° 且方向分开，没做到时只写零位。
-
-            陀螺漂移也在这四步里顺带测掉（每步静止 3 秒 = 四段静置采样，取最差的一份），
-            所以没有单独的静置自检。判据是四元数推出的重力方向与加速度计实测方向的夹角。
-            ⚠ yaw 不检查：六轴没有磁力计，绝对 yaw 本就没有零点，特征层也不吃它 ——
-            别"补上 yaw 检查"。
-            ⚠ 结论不是 OK 时的处置是**硬件动作**：把手套放平、短按主控按键做陀螺校准、
-            再跑一遍向导。软件这边只能告诉你该按哪一只，没有任何软件修法。
-          */}
+          {/* 首次完整校准；日常归零复用安装方向，诊断按需运行。 */}
           <Section title="CALIBRATION WIZARD">
             <button
               onClick={wizard.startWizard}
-              disabled={!anyConnected}
+              disabled={!anyConnected || Boolean(diagnosticsOpen)}
               className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] flex items-center justify-center gap-1.5 disabled:opacity-40"
               style={{ borderColor: "rgba(168,85,247,0.4)" }}
             >
               <Wand2 className="w-3 h-3" />
-              开始四步校准（约 25 秒）
+              首次 / 重做四步校准
             </button>
+            <button
+              onClick={() => setDiagnosticsOpen("fit")}
+              disabled={wizard.open}
+              className="w-full cyber-btn px-3 py-2 rounded-sm text-xs border-violet-500 disabled:opacity-40"
+            >
+              手动角度校准（无需摄像头）
+            </button>
+            <button
+              onClick={() => setDiagnosticsOpen("zero")}
+              disabled={wizard.open}
+              className="w-full cyber-btn px-3 py-1.5 rounded-sm text-[10px] disabled:opacity-40"
+            >
+              朝向检查 / 日常归零
+            </button>
+            <a href="/calibration-history" target="_blank" rel="noopener noreferrer" className="w-full cyber-btn block text-center px-3 py-2 rounded-sm text-xs">
+              历史数据 / 同姿势对比 ↗
+            </a>
+            <p className="text-[9px] text-[var(--hud-soft)] leading-relaxed">
+              标定自动保留。每次上电先快速归零；方向偏差用手动角度校准，检测与验证按需使用。
+            </p>
             <OrientBlock hc={L} />
             <OrientBlock hc={R} />
             <div className="pt-1.5 border-t border-[#7c3aed]/10 space-y-1">
@@ -1106,17 +1334,15 @@ export default function VirtualMocap() {
             <div className="flex items-center justify-between text-[10px] font-mono">
               <span className="text-[var(--hud-dim)]">SOURCE</span>
               <span className="text-[var(--hud-soft)]">
-                {skeletonSide
-                  ? skeletonSide === "LH"
-                    ? "左手"
-                    : "右手"
-                  : "—"}
+                {skeletonSide ? (skeletonSide === "LH" ? "左手" : "右手") : "—"}
               </span>
             </div>
             <div className="flex items-center justify-between text-[10px] font-mono">
               <span className="text-[var(--hud-dim)]">MODEL</span>
               <span
-                className={modelReady ? "text-[var(--hud-ok)]" : "text-[var(--hud-err)]"}
+                className={
+                  modelReady ? "text-[var(--hud-ok)]" : "text-[var(--hud-err)]"
+                }
               >
                 {modelReady ? "READY" : "NOT LOADED"}
               </span>
@@ -1127,7 +1353,9 @@ export default function VirtualMocap() {
             </div>
             <div className="flex items-center justify-between text-[10px] font-mono">
               <span className="text-[var(--hud-dim)]">CONFIDENCE</span>
-              <span className="text-[var(--hud-wrist)]">{confidence.toFixed(0)}%</span>
+              <span className="text-[var(--hud-wrist)]">
+                {confidence.toFixed(0)}%
+              </span>
             </div>
             {/* 置信度条 */}
             <div className="h-1.5 bg-[var(--hud-track)] rounded-full overflow-hidden border border-[#d97706]/10">
@@ -1139,14 +1367,14 @@ export default function VirtualMocap() {
                     confidence > 70
                       ? "var(--hud-ok)"
                       : confidence > 40
-                      ? "var(--hud-warn)"
-                      : "var(--hud-err)",
+                        ? "var(--hud-warn)"
+                        : "var(--hud-err)",
                   boxShadow: `0 0 6px ${
                     confidence > 70
                       ? "rgba(0,229,160,0.5)"
                       : confidence > 40
-                      ? "rgba(245,158,11,0.5)"
-                      : "rgba(255,45,123,0.5)"
+                        ? "rgba(245,158,11,0.5)"
+                        : "rgba(255,45,123,0.5)"
                   }`,
                 }}
               />
@@ -1198,6 +1426,20 @@ export default function VirtualMocap() {
         </div>
       </div>
 
+      {diagnosticsOpen && (
+        <MotionDiagnostics
+          initialMode={diagnosticsOpen}
+          channels={{ LH: left, RH: right }}
+          calibrations={{ LH: L.orientCalib, RH: R.orientCalib }}
+          drives={{ LH: L.driveRef, RH: R.driveRef }}
+          onApply={(hand, calib) =>
+            checksRef.current
+              .find(hc => hc.handKey === hand)
+              ?.applyOrientation(calib)
+          }
+          onClose={() => setDiagnosticsOpen(null)}
+        />
+      )}
       {wizard.open && (
         <CalibWizardModal
           wz={wizard}
@@ -1238,17 +1480,12 @@ function handIssues(hc: HandCheck): string[] {
   if (!hc.channel.isConnected) out.push("未连接");
   if (!hc.calibrated) out.push("弯折未标定");
   else if (hc.weak.length)
-    out.push(`${hc.weak.map((i) => FINGER_NAMES[i]).join("/")} 通道跨度不足`);
+    out.push(`${hc.weak.map(i => FINGER_NAMES[i]).join("/")} 通道跨度不足`);
   // 只查"有没有零位"。轴向映射缺失不算不合格 —— 它取决于两个动作做得够不够开，
   // 而且朝向标定纯粹是显示层的事、不进数据集，缺了它的原因在向导那一栏写着。
   if (!hc.orientCalib) out.push("朝向未标定");
-  // 陀螺结论只来自四步向导（内存态，不落盘）—— 刷新一次页面就回到"未测"，
-  // 这是有意的：陀螺零偏是掉电即变的硬件状态，存下来隔天就是假消息。
-  if (!hc.imuReport) out.push("陀螺未测（跑一遍向导）");
-  else if (hc.imuReport.verdict !== "ok")
-    out.push(
-      `陀螺 ${hc.imuReport.verdict.toUpperCase()} —— 把手套放平，短按主控按键做陀螺校准，再跑一遍向导`
-    );
+  if (hc.imuReport && ["warn", "bad"].includes(hc.imuReport.verdict))
+    out.push("采样姿态变化偏大，可用独立静置检测复核（不等于零偏）");
   return out;
 }
 
@@ -1260,7 +1497,11 @@ function ConnRow({ hc }: { hc: HandCheck }) {
     <div className="space-y-1">
       <div className="flex items-center justify-between text-[10px] font-mono">
         <span className="text-[var(--hud-dim)]">{name}</span>
-        <span className={ch.isConnected ? "text-[var(--hud-ok)]" : "text-[var(--hud-err)]"}>
+        <span
+          className={
+            ch.isConnected ? "text-[var(--hud-ok)]" : "text-[var(--hud-err)]"
+          }
+        >
           {ch.isConnected
             ? `${ch.gloveFps} FPS · ${ch.gloveFrameCount}`
             : ch.isConnecting
@@ -1268,7 +1509,9 @@ function ConnRow({ hc }: { hc: HandCheck }) {
               : "DISCONNECTED"}
         </span>
       </div>
-      {ch.error && <p className="text-[8px] text-[var(--hud-err)]">{ch.error}</p>}
+      {ch.error && (
+        <p className="text-[8px] text-[var(--hud-err)]">{ch.error}</p>
+      )}
       <button
         onClick={ch.isConnected ? ch.disconnect : ch.connect}
         disabled={ch.isConnecting}
@@ -1302,28 +1545,51 @@ function OrientBlock({ hc }: { hc: HandCheck }) {
   return (
     <div className="space-y-0.5">
       <div className="flex items-center justify-between text-[10px] font-mono">
-        <span className="text-[var(--hud-soft)]">{handName(hc.handKey)} 朝向</span>
+        <span className="text-[var(--hud-soft)]">
+          {handName(hc.handKey)} 朝向
+        </span>
         <span
           style={{
-            color: !calib ? "var(--hud-warn)" : calib.axisMap ? "var(--hud-ok)" : "var(--hud-accent)",
+            color: !calib
+              ? "var(--hud-warn)"
+              : calib.axisMap
+                ? "var(--hud-ok)"
+                : "var(--hud-accent)",
           }}
         >
           {!calib ? "未标定" : calib.axisMap ? "零位 + 轴向" : "仅零位"}
         </span>
       </div>
+      {calib?.method === "multi-pose" && (
+        <p className="text-[8px] text-[var(--hud-dim)]">
+          多姿态拟合 · 轴误差 {calib.fitErrorDeg?.toFixed(1) ?? "—"}°
+        </p>
+      )}
+      {calib?.updatedAt && (
+        <p className="text-[8px] text-[var(--hud-faint)]">
+          最近更新 {new Date(calib.updatedAt).toLocaleString()}
+        </p>
+      )}
       {calib?.axisQuality && (
         <div className="text-[8px] font-mono text-[var(--hud-dim)]">
           俯仰 {calib.axisQuality.pitchDeg.toFixed(0)}° · 偏摆{" "}
           {calib.axisQuality.swingDeg.toFixed(0)}° · 分离{" "}
           {calib.axisQuality.separationDeg.toFixed(0)}°
-          <span className="text-[var(--hud-faint)]"> / 目标 {TARGET_MOTION_DEG}°</span>
+          <span className="text-[var(--hud-faint)]">
+            {" "}
+            / 目标 {TARGET_MOTION_DEG}°
+          </span>
         </div>
       )}
       {calib && fail && (
-        <p className="text-[8px] text-[var(--hud-accent)] leading-relaxed">{fail}</p>
+        <p className="text-[8px] text-[var(--hud-accent)] leading-relaxed">
+          {fail}
+        </p>
       )}
       {calib && warn && (
-        <p className="text-[8px] text-[var(--hud-warn)] leading-relaxed">{warn}</p>
+        <p className="text-[8px] text-[var(--hud-warn)] leading-relaxed">
+          {warn}
+        </p>
       )}
       {calib && (
         <button
@@ -1347,6 +1613,22 @@ function CalibWizardModal({
 }) {
   const step = WIZARD_STEPS[wz.stepIndex];
   const done = wz.phase === "done";
+  // ②③ 两步的实时角度引导：~8Hz 轮询够了，读数只是给人看的
+  const hasAngleGuide = !done && Boolean(step && STEP_ANCHOR[step.key]);
+  const [liveDeg, setLiveDeg] = useState<Record<HandKey, number | null>>({
+    LH: null,
+    RH: null,
+  });
+  useEffect(() => {
+    if (!hasAngleGuide) return;
+    const timer = window.setInterval(() => {
+      setLiveDeg({
+        LH: wz.liveAngleDeg("LH"),
+        RH: wz.liveAngleDeg("RH"),
+      });
+    }, 120);
+    return () => window.clearInterval(timer);
+  }, [hasAngleGuide, wz.liveAngleDeg]);
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--hud-scrim)] p-4">
       <div
@@ -1407,7 +1689,7 @@ function CalibWizardModal({
         {done ? (
           <div className="space-y-2">
             <p className="text-[11px] font-mono text-[var(--hud-ok)]">
-              校准完成，已写入 localStorage（按手别分开存）。
+              本轮检查结束；各项是否保存，请看下方结果。左右手分别保存在当前浏览器。
             </p>
             <div className="space-y-1">
               {wz.summary.map((line, i) => (
@@ -1420,8 +1702,9 @@ function CalibWizardModal({
               ))}
             </div>
             <p className="text-[8px] text-[var(--hud-faint)] leading-relaxed">
-              回到主界面握一下拳看手模：满量程按解剖学行程分配（掌指 85° / 近端 100° /
-              远端 70°，指尖骨不转），指尖应该落在掌面上。若仍显得不够弯，
+              回到主界面握一下拳看手模：满量程按解剖学行程分配（掌指 85° / 近端
+              100° / 远端
+              70°，指尖骨不转），指尖应该落在掌面上。若仍显得不够弯，
               说明④那步握得不够紧或该路弯折跨度太小 —— 看上面的跨度数。
             </p>
             <div className="flex gap-2">
@@ -1444,7 +1727,9 @@ function CalibWizardModal({
         ) : (
           <div className="space-y-3">
             <div>
-              <p className="text-[11px] font-mono text-[var(--hud-warn)]">{step.title}</p>
+              <p className="text-[11px] font-mono text-[var(--hud-warn)]">
+                {step.title}
+              </p>
               <p className="text-[9px] font-mono text-[var(--hud-soft)] leading-relaxed mt-1">
                 {step.instruction}
               </p>
@@ -1470,13 +1755,79 @@ function CalibWizardModal({
               />
             </div>
 
-            {wz.phase === "countdown" ? (
+            {/* ②③ 两步的实时角度读数：转没转够在采样前就能看见，
+                别等汇算才发现只转了 15°（那时门限不过、矩阵不写入） */}
+            {hasAngleGuide && (
+              <div className="flex gap-2">
+                {HAND_KEYS.map(hand => {
+                  const deg = liveDeg[hand];
+                  const color =
+                    deg === null
+                      ? "var(--hud-dim)"
+                      : deg >= GATE_MIN_DEG && deg <= GATE_MAX_DEG
+                        ? "var(--hud-ok)"
+                        : deg >= MIN_MOTION_DEG
+                          ? "var(--hud-warn)"
+                          : "var(--hud-err)";
+                  return (
+                    <div
+                      key={hand}
+                      className="flex-1 px-2 py-1.5 rounded-sm border text-[10px] font-mono flex items-baseline justify-between"
+                      style={{ borderColor: "rgba(85,102,119,0.25)" }}
+                    >
+                      <span className="text-[var(--hud-soft)]">
+                        {handName(hand)} 已转
+                      </span>
+                      <span style={{ color }}>
+                        {deg === null ? "—" : `${deg.toFixed(0)}°`}
+                        <span className="text-[var(--hud-faint)]">
+                          {" "}
+                          / 目标 {TARGET_MOTION_DEG}°
+                        </span>
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+
+            {wz.phase === "blocked" ? (
+              <div className="flex flex-wrap gap-2">
+                <button
+                  className="cyber-btn px-3 py-2 text-xs"
+                  onClick={() => wz.retryStep()}
+                >
+                  重试当前步骤
+                </button>
+                {wz.stepIndex > 0 && (
+                  <button
+                    className="cyber-btn px-3 py-2 text-xs"
+                    onClick={() => wz.retryStep(true)}
+                  >
+                    返回上一步重采
+                  </button>
+                )}
+              </div>
+            ) : wz.phase === "countdown" ? (
               <div className="flex items-center gap-3">
                 <span className="text-2xl font-mono font-bold text-[var(--hud-violet)] w-8 text-center">
                   {wz.countdown}
                 </span>
-                <span className="text-[9px] font-mono text-[var(--hud-dim)]">
-                  摆好姿势并保持静止，倒数结束后自动采样 3 秒
+                <span
+                  className="text-[9px] font-mono"
+                  style={{
+                    color: wz.gateWaiting
+                      ? "var(--hud-warn)"
+                      : "var(--hud-dim)",
+                  }}
+                >
+                  {wz.gateWaiting
+                    ? hasAngleGuide
+                      ? `等待稳定约 1 秒，角度需在 ${GATE_MIN_DEG}–${GATE_MAX_DEG}°（目标 ${TARGET_MOTION_DEG}°）`
+                      : "等待连续稳定数据，保持不动约 1 秒"
+                    : hasAngleGuide
+                      ? `照示意转到目标附近，稳定后自动采样 3 秒（接受 ${GATE_MIN_DEG}–${GATE_MAX_DEG}°）`
+                      : "摆好姿势并保持静止，倒数结束后自动采样 3 秒"}
                 </span>
               </div>
             ) : (
@@ -1492,7 +1843,8 @@ function CalibWizardModal({
                   />
                 </div>
                 <div className="text-[9px] font-mono text-[var(--hud-violet)]">
-                  采样中… 保持静止（左 {wz.counts.LH} 帧 / 右 {wz.counts.RH} 帧）
+                  采样中… 保持静止（左 {wz.counts.LH} 帧 / 右 {wz.counts.RH}{" "}
+                  帧）
                 </div>
               </div>
             )}
@@ -1528,7 +1880,9 @@ function DemoViewport({
   return (
     <div className="basis-[240px] grow shrink min-w-0 space-y-1">
       <div className="flex items-baseline justify-between px-1">
-        <span className="text-[9px] font-mono text-[var(--hud-violet)]">{label}</span>
+        <span className="text-[9px] font-mono text-[var(--hud-violet)]">
+          {label}
+        </span>
         <span
           className="text-[8px] font-mono"
           style={{ color: connected ? "var(--hud-ok)" : "var(--hud-dim)" }}
@@ -1580,7 +1934,7 @@ function SensorPanel({ checks }: { checks: HandCheck[] }) {
           borderColor: "rgba(0,240,255,0.2)",
         }}
       >
-        {checks.map((hc) => {
+        {checks.map(hc => {
           const frame = hc.channel.latestFrame;
           return (
             <div key={hc.handKey} className="flex-1 min-w-0 space-y-1">
@@ -1637,7 +1991,8 @@ function HandViewport({ hc }: { hc: HandCheck }) {
       {hc.channel.isConnected && !hc.calibrated && (
         <div className="absolute bottom-2 left-2 right-2 px-2 py-1 rounded-sm pointer-events-none bg-[#d97706]/12 border border-[#d97706]/35">
           <span className="text-[9px] font-mono text-[var(--hud-warn)] leading-relaxed">
-            未标定 · 只有柔和预览：满量程也只弯约一半，握拳不会成形。跑一次四步校准。
+            未标定 ·
+            只有柔和预览：满量程也只弯约一半，握拳不会成形。跑一次四步校准。
           </span>
         </div>
       )}
@@ -1653,7 +2008,11 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
     <div className="space-y-1.5 pb-2 border-b border-[#d97706]/10 last:border-b-0">
       <div className="flex items-center justify-between text-[10px] font-mono">
         <span className="text-[var(--hud-soft)]">{handName(handKey)}</span>
-        <span className={calibrated ? "text-[var(--hud-ok)]" : "text-[var(--hud-warn)]"}>
+        <span
+          className={
+            calibrated ? "text-[var(--hud-ok)]" : "text-[var(--hud-warn)]"
+          }
+        >
           {calibrated ? "CALIBRATED" : "UNCALIBRATED"}
         </span>
       </div>
@@ -1692,7 +2051,9 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
                   百分比是算出来的，只有这两个数能区分"传感器没反应"和"标定不对"。 */}
               <span
                 className="text-[8px] font-mono w-14 text-right shrink-0"
-                style={{ color: isWeak ? "var(--hud-err)" : "var(--hud-faint)" }}
+                style={{
+                  color: isWeak ? "var(--hud-err)" : "var(--hud-faint)",
+                }}
                 title="当前原始 ADC / 标定跨度"
               >
                 {Math.round(rawUi[i] ?? 0)}
@@ -1731,67 +2092,44 @@ function BendCalibBlock({ hc }: { hc: HandCheck }) {
         <p className="text-[8px] text-[var(--hud-err)] leading-relaxed flex gap-1">
           <AlertTriangle className="w-3 h-3 shrink-0 mt-px" />
           <span>
-            {handName(handKey)}的 {weak.map((i) => FINGER_NAMES[i]).join("、")}{" "}
-            标定跨度不足 {MIN_USEFUL_SPAN} ADC，这几路弯折传感器可能没贴好或已损坏
-            —— 别急着录数据。
+            {handName(handKey)}的 {weak.map(i => FINGER_NAMES[i]).join("、")}{" "}
+            标定跨度不足 {MIN_USEFUL_SPAN}{" "}
+            ADC，这几路弯折传感器可能没贴好或已损坏 —— 别急着录数据。
           </span>
         </p>
       )}
       {calibMsg && (
-        <p className="text-[8px] text-[var(--hud-warn)] leading-relaxed">{calibMsg}</p>
+        <p className="text-[8px] text-[var(--hud-warn)] leading-relaxed">
+          {calibMsg}
+        </p>
       )}
     </div>
   );
 }
 
-/**
- * 一只手的陀螺漂移结论。**只读** —— 数据来自四步向导（每步静止 3 秒 = 四段合格的
- * 静置采样，取最差的一份），这里不再有单独的"静置自检"按钮，那和向导完全重复。
- * 没跑过向导时显示"未测"，而不是伪装成 OK。
- */
+/** 四步采样的参考指标，不把累计姿态变化解释为零偏。 */
 function ImuVerdictBlock({ hc }: { hc: HandCheck }) {
-  const { imuReport } = hc;
+  const report = hc.imuReport;
   return (
-    <div className="space-y-0.5">
-      <div className="flex items-center justify-between text-[10px] font-mono">
-        <span className="text-[var(--hud-soft)]">{handName(hc.handKey)} 陀螺</span>
-        <span
-          className="flex items-center gap-1"
-          style={{ color: imuReport ? verdictColor(imuReport.verdict) : "var(--hud-warn)" }}
-        >
-          {!imuReport ? (
-            <>
-              <Compass className="w-3 h-3" />
-              未测（跑一遍向导）
-            </>
-          ) : (
-            <>
-              {imuReport.verdict === "ok" ? (
-                <CheckCircle2 className="w-3 h-3" />
-              ) : (
-                <AlertTriangle className="w-3 h-3" />
-              )}
-              {imuReport.verdict.toUpperCase()}
-            </>
-          )}
-        </span>
-      </div>
-      {imuReport && (
+    <div className="space-y-1 text-[9px] text-[var(--hud-soft)]">
+      <p>
+        {handName(hc.handKey)} 采样检查：
+        {report ? "已有本轮数据" : "本次未测（按需检测）"}
+      </p>
+      {report && (
         <>
-          <div className="text-[8px] font-mono text-[var(--hud-dim)]">
-            倾角偏差 {imuReport.tiltInconsistencyDeg.toFixed(1)}° · p95{" "}
-            {imuReport.p95TiltDeg.toFixed(1)}° · 可用帧 {imuReport.usableFrames}
-            {imuReport.stillRotationDegPerMin != null &&
-              ` · 静置旋转 ${imuReport.stillRotationDegPerMin.toFixed(0)}°/min`}
-          </div>
-          {imuReport.verdict !== "ok" && (
-            <p
-              className="text-[8px] leading-relaxed"
-              style={{ color: verdictColor(imuReport.verdict) }}
-            >
-              {imuReport.reason}
-            </p>
-          )}
+          <p>
+            姿态累计变化 {report.stillRotationDegPerMin?.toFixed(0) ?? "—"}
+            °/分钟（非零偏）
+          </p>
+          <p>
+            {report.usableFrames > 0
+              ? `倾角一致性偏差 ${report.tiltInconsistencyDeg.toFixed(1)}° · P95 ${report.p95TiltDeg.toFixed(1)}° · ${report.usableFrames} 帧`
+              : "未取得可用加速度，无法核对重力方向。"}
+          </p>
+          <p className="text-[var(--hud-faint)]">
+            累计值包含抖动；请用“静置检测”区分首尾偏转、波动和突跳。
+          </p>
         </>
       )}
     </div>
@@ -1827,24 +2165,35 @@ function Viewport({
   return (
     <div className="flex flex-col gap-1.5 min-h-0 min-w-0">
       <div className="flex items-baseline gap-2 px-1 shrink-0">
-        <span className="text-[10px] font-bold tracking-widest font-mono" style={{ color: accent }}>
+        <span
+          className="text-[10px] font-bold tracking-widest font-mono"
+          style={{ color: accent }}
+        >
           {label}
         </span>
-        {hint && <span className="text-[8px] font-mono text-[var(--hud-faint)]">{hint}</span>}
+        {hint && (
+          <span className="text-[8px] font-mono text-[var(--hud-faint)]">
+            {hint}
+          </span>
+        )}
       </div>
       <div
         className={`relative border rounded-sm overflow-hidden ${boxClass}`}
         style={{
           backgroundColor: "var(--hud-page)",
           borderColor: `${accent}33`,
-          boxShadow: "0 0 30px rgba(245,158,11,0.08), inset 0 0 30px rgba(10,14,26,0.5)",
+          boxShadow:
+            "0 0 30px rgba(245,158,11,0.08), inset 0 0 30px rgba(10,14,26,0.5)",
         }}
       >
         {children}
         {badge && (
           <div
             className="absolute top-2 left-2 px-2 py-0.5 rounded-sm pointer-events-none"
-            style={{ backgroundColor: `${accent}26`, border: `1px solid ${accent}4d` }}
+            style={{
+              backgroundColor: `${accent}26`,
+              border: `1px solid ${accent}4d`,
+            }}
           >
             <span className="text-[9px] font-mono" style={{ color: accent }}>
               {badge}
@@ -1906,9 +2255,14 @@ function MiniHeatmap({ data }: { data: number[] }) {
 
 // ===== Canvas 绘制函数 =====
 
-function computeSpread(landmarks: { x: number; y: number; z: number }[]): number {
+function computeSpread(
+  landmarks: { x: number; y: number; z: number }[]
+): number {
   // 基于关键点分布范围估算置信度
-  let minX = 1, maxX = 0, minY = 1, maxY = 0;
+  let minX = 1,
+    maxX = 0,
+    minY = 1,
+    maxY = 0;
   for (const lm of landmarks) {
     if (lm.x < minX) minX = lm.x;
     if (lm.x > maxX) maxX = lm.x;

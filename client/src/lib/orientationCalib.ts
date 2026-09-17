@@ -59,6 +59,11 @@ export interface GravityCheck {
 }
 
 export interface OrientationCalib {
+  /** Saved alignment is reusable; this date is not a certificate of current sensor health. */
+  updatedAt?: number;
+  method?: "four-step" | "multi-pose" | "manual-angle";
+  sampleCount?: number;
+  fitErrorDeg?: number;
   /** 竖立、**手心朝自己** 的姿态四元数 = 零位（约定见文件头，改不得） */
   reference: Quat;
   /** 平铺（手心朝上）参考，仅用于反解俯仰轴与事后核对 */
@@ -168,10 +173,11 @@ const normalize3 = (a: Vec3): Vec3 | null => {
  *   俯仰 = 竖立→前倾翻掌至手心朝上平铺、指尖朝屏幕，绕 −X 转 90°（双手相同）
  *   偏摆 = 竖立→双手手心相对，左手绕 +Y、右手绕 −Y 各 90°（动作本身镜像对称）
  */
-export const MODEL_MOTION_AXES: Record<HandKey, { pitch: Vec3; swing: Vec3 }> = {
-  LH: { pitch: [-1, 0, 0], swing: [0, 1, 0] },
-  RH: { pitch: [-1, 0, 0], swing: [0, -1, 0] },
-};
+export const MODEL_MOTION_AXES: Record<HandKey, { pitch: Vec3; swing: Vec3 }> =
+  {
+    LH: { pitch: [-1, 0, 0], swing: [0, 1, 0] },
+    RH: { pitch: [-1, 0, 0], swing: [0, -1, 0] },
+  };
 
 /** 参考姿态→目标姿态 的相对旋转，拆成转轴（在参考姿态机体系里）与转角 */
 export function relativeAxisAngle(
@@ -255,15 +261,28 @@ export function applyMap(map: number[][], v: Vec3): Vec3 {
  */
 function rotation180About(m: Vec3): number[][] {
   const n = normalize3(m);
-  if (!n) return [[1,0,0],[0,1,0],[0,0,1]];
-  const out: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
+  if (!n)
+    return [
+      [1, 0, 0],
+      [0, 1, 0],
+      [0, 0, 1],
+    ];
+  const out: number[][] = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
   for (let r = 0; r < 3; r++)
     for (let c = 0; c < 3; c++) out[r][c] = 2 * n[r] * n[c] - (r === c ? 1 : 0);
   return out;
 }
 
 function matMul(a: number[][], b: number[][]): number[][] {
-  const out: number[][] = [[0,0,0],[0,0,0],[0,0,0]];
+  const out: number[][] = [
+    [0, 0, 0],
+    [0, 0, 0],
+    [0, 0, 0],
+  ];
   for (let r = 0; r < 3; r++)
     for (let c = 0; c < 3; c++)
       for (let k = 0; k < 3; k++) out[r][c] += a[r][k] * b[k][c];
@@ -324,7 +343,10 @@ export function validateAxisMapWithGravity(
   const upY = applyMap(map, up)[1];
   if (upY >= GRAVITY_DECISIVE) return { map, check: { upY, corrected: false } };
   if (upY <= -GRAVITY_DECISIVE) {
-    const fixed = matMul(rotation180About(MODEL_MOTION_AXES[handKey].pitch), map);
+    const fixed = matMul(
+      rotation180About(MODEL_MOTION_AXES[handKey].pitch),
+      map
+    );
     return { map: fixed, check: { upY, corrected: true } };
   }
   // 落在中间带：零位那步大概没竖直（或者人没站直），不足以下结论。
@@ -431,7 +453,9 @@ export function axisQualityWarning(calib: OrientationCalib): string | null {
     ["手心相对", q.swingDeg],
   ].filter(([, deg]) => (deg as number) > FLIP_RISK_DEG);
   if (flip.length) {
-    const which = flip.map(([n, d]) => `${n} ${(d as number).toFixed(0)}°`).join("、");
+    const which = flip
+      .map(([n, d]) => `${n} ${(d as number).toFixed(0)}°`)
+      .join("、");
     return `${which} 接近 180°，转轴正负号不稳定，下次重标可能整体反向 —— 请重做，转到 ${TARGET_MOTION_DEG}° 就停`;
   }
   const off = [
@@ -439,7 +463,9 @@ export function axisQualityWarning(calib: OrientationCalib): string | null {
     ["手心相对", q.swingDeg],
   ].filter(([, deg]) => Math.abs((deg as number) - TARGET_MOTION_DEG) > 30);
   if (off.length) {
-    const which = off.map(([n, d]) => `${n} ${(d as number).toFixed(0)}°`).join("、");
+    const which = off
+      .map(([n, d]) => `${n} ${(d as number).toFixed(0)}°`)
+      .join("、");
     return `${which} 离 ${TARGET_MOTION_DEG}° 偏远，方位分辨会变差 —— 建议重做这一步`;
   }
   if (q.separationDeg < 75)
@@ -476,7 +502,7 @@ function isValidQuat(q: unknown): q is Quat {
   return (
     Array.isArray(q) &&
     q.length === 4 &&
-    q.every((v) => typeof v === "number" && isFinite(v)) &&
+    q.every(v => typeof v === "number" && isFinite(v)) &&
     Math.hypot(q[0], q[1], q[2], q[3]) > 0.5
   );
 }
@@ -486,10 +512,10 @@ function isValidMap(m: unknown): m is number[][] {
     Array.isArray(m) &&
     m.length === 3 &&
     m.every(
-      (row) =>
+      row =>
         Array.isArray(row) &&
         row.length === 3 &&
-        row.every((v) => typeof v === "number" && isFinite(v))
+        row.every(v => typeof v === "number" && isFinite(v))
     )
   );
 }

@@ -35,8 +35,11 @@ import {
 import {
   applyOrientationCalib,
   loadOrientationCalib,
+  normalizeQuat,
   type OrientationCalib,
 } from "@/lib/orientationCalib";
+
+import { validPose } from "@/lib/motionCalibration";
 
 export interface HandModelDrive {
   driveRef: RefObject<HandDrive>;
@@ -88,11 +91,17 @@ export function useHandModelDrive(
         driveRef.current.quaternion = played.quaternion;
         driveRef.current.curl = played.curl;
         driveRef.current.hasData = true;
-      } else if (frame) {
-        driveRef.current.quaternion = applyOrientationCalib(
-          frame.quaternion,
-          orientRef.current
-        );
+      } else if (
+        channel.isConnected &&
+        frame &&
+        performance.now() - frame.timestamp < 250
+      ) {
+        if (frame.quaternionValid !== false && validPose(frame.quaternion)) {
+          driveRef.current.quaternion = applyOrientationCalib(
+            normalizeQuat(frame.quaternion),
+            orientRef.current
+          );
+        }
         driveRef.current.curl = bendRatios(
           frame.sensor_data,
           frame.hand,
@@ -107,7 +116,7 @@ export function useHandModelDrive(
     };
     raf = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(raf);
-  }, [frameRef, playbackRef]);
+  }, [frameRef, playbackRef, channel.isConnected]);
 
   return {
     driveRef,

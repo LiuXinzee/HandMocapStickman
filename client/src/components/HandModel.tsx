@@ -29,7 +29,14 @@
 
 import { ContactShadows, OrbitControls, useGLTF } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { memo, Suspense, useEffect, useMemo, useRef, type RefObject } from "react";
+import {
+  memo,
+  Suspense,
+  useEffect,
+  useMemo,
+  useRef,
+  type RefObject,
+} from "react";
 import {
   Bone,
   type BufferGeometry,
@@ -158,7 +165,12 @@ const FOREARM_TAPER_MIN_SCALE = 0.03;
 /** 腕(0.18,0.31,0) → 切面形心(0.668,-0.092,-9.101) 的单位向量，网格空间 */
 const FOREARM_STRETCH_DIR = { x: 0.0535, y: -0.0441, z: -0.9976 } as const;
 /** 手臂轴线按 z 参数化：axis(z) = 腕 + 该斜率 × z（由上面的方向向量折算） */
-const FOREARM_AXIS = { x0: 0.18, dxdz: -0.0536, y0: 0.31, dydz: 0.0442 } as const;
+const FOREARM_AXIS = {
+  x0: 0.18,
+  dxdz: -0.0536,
+  y0: 0.31,
+  dydz: 0.0442,
+} as const;
 
 function stretchForearmGeometry(geometry: BufferGeometry) {
   if (geometry.userData.forearmStretched) return;
@@ -447,7 +459,8 @@ for (let f = 0; f < 5; f++) {
   for (let s = 0; s < 3; s++) BONE_LINKS.push([base + s, base + s + 1, f]);
 }
 // 掌弓：食指 MCP → 中指 MCP → 无名 MCP → 小指 MCP（拇指不参与，它从腕单独长出去）
-for (let f = 1; f < 4; f++) BONE_LINKS.push([1 + f * 4, 1 + (f + 1) * 4, PALM_LINK]);
+for (let f = 1; f < 4; f++)
+  BONE_LINKS.push([1 + f * 4, 1 + (f + 1) * 4, PALM_LINK]);
 // 小臂：腕 → 小臂中段 → 肘端。肘端落在取景外，读起来就是"手臂从画面外伸进来"，
 // 正好不必画一个假的肘关节点。用的是 glb 自带那两根骨头（见文件头推论 1）
 BONE_LINKS.push([0, 21, FOREARM_LINK]);
@@ -467,7 +480,7 @@ const AXIS = new Vector3(0, 0, 1);
 
 /** hand1.glb 的骨骼命名：Finger_<手指0-4><指节0-3> */
 const fingerBoneNames = Array.from({ length: 5 }, (_, finger) =>
-  [0, 1, 2, 3].map((segment) => `Finger_${finger}${segment}`)
+  [0, 1, 2, 3].map(segment => `Finger_${finger}${segment}`)
 );
 
 /**
@@ -493,6 +506,8 @@ const THUMB_SEGMENT_MAX_DEG = [45, 55, 45, 0];
 export interface HandDrive {
   /** IMU 四元数 [w, x, y, z]（协议原序；已过朝向标定的话就是标定后的值） */
   quaternion: [number, number, number, number];
+  /** Actual smoothed pose, read by diagnostics to distinguish target and rendered motion. */
+  renderedQuaternion?: [number, number, number, number];
   /** 5 指弯曲度 0~1，canonical 拇指→小指。1 = 握拳，角度分配见 SEGMENT_MAX_DEG */
   curl: number[];
   /** 是否有活数据；false 时手模停在静止姿态 */
@@ -527,7 +542,7 @@ function JointBeacons({
       {fingerBoneNames.map((_, index) => (
         <group
           key={`beacon-${index}`}
-          ref={(node) => {
+          ref={node => {
             beaconRefs.current[index] = node;
           }}
         >
@@ -815,7 +830,8 @@ export function AnimatedHand({
       // 前臂拉长（幂等、原地改共享几何，见 stretchForearmGeometry 上那段）
       stretchForearmGeometry(node.geometry);
       // 臂桩在拉长的基础上再截短，且必须克隆（几何是实例间共享的）
-      if (armStyle === "stub") node.geometry = stubForearmGeometry(node.geometry);
+      if (armStyle === "stub")
+        node.geometry = stubForearmGeometry(node.geometry);
     });
     return cloned;
   }, [gltf.scene, armStyle]);
@@ -837,11 +853,13 @@ export function AnimatedHand({
          * 世界矩阵照常每帧更新，所以 HandBones 读到的姿态不会停在藏起来那一刻。
          */
         node.visible = mode === "mesh";
-        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        const materials = Array.isArray(node.material)
+          ? node.material
+          : [node.material];
         // 克隆材质避免实例间共享；负缩放镜像会翻转三角形绕序，必须双面渲染，
         // 否则右手只剩内表面可见（看起来像"反面"）。
         const preset = dimmed ? HAND_MATERIAL_DIMMED : HAND_MATERIAL;
-        const cloned = materials.map((material) => {
+        const cloned = materials.map(material => {
           const copy = material.clone();
           copy.side = DoubleSide;
           if ("color" in copy && copy.color) copy.color.set(preset.color);
@@ -869,7 +887,12 @@ export function AnimatedHand({
       // 协议的四元数是 [w,x,y,z]，three.js 构造函数是 (x,y,z,w) —— 顺序不能照抄
       const [w, x, y, z] = drive.quaternion;
       targetQuat.current.set(x, y, z, w);
-      handRef.current.quaternion.slerp(targetQuat.current, 1 - Math.exp(-delta * 9));
+      handRef.current.quaternion.slerp(
+        targetQuat.current,
+        1 - Math.exp(-delta * 9)
+      );
+      const shown = handRef.current.quaternion;
+      drive.renderedQuaternion = [shown.w, shown.x, shown.y, shown.z];
     }
 
     fingerBoneNames.forEach((names, fingerIndex) => {
@@ -890,7 +913,10 @@ export function AnimatedHand({
           .clone()
           .multiply(new Quaternion().setFromAxisAngle(AXIS, signedAngle));
         // 越靠近指根收敛越快，让整根手指看起来是一条连续的弧
-        bone.quaternion.slerp(target, 1 - Math.exp(-delta * (12 - segmentIndex)));
+        bone.quaternion.slerp(
+          target,
+          1 - Math.exp(-delta * (12 - segmentIndex))
+        );
       });
     });
 
@@ -921,7 +947,9 @@ export function AnimatedHand({
         <primitive object={model} />
       </group>
       {/* 骨架档不画 JointBeacons：那 5 颗琥珀光点会和骨架自己的关节球撞在一起 */}
-      {mode === "mesh" && !dimmed && <JointBeacons model={model} rootRef={handRef} />}
+      {mode === "mesh" && !dimmed && (
+        <JointBeacons model={model} rootRef={handRef} />
+      )}
       {mode === "skeleton" && (
         <HandBones model={model} rootRef={handRef} dimmed={dimmed} />
       )}
@@ -941,13 +969,19 @@ export function HandSceneLights() {
       <directionalLight position={[4, 7, 7]} intensity={2.3} color="#ffffff" />
       {/* 补光换成中性冷白：原来这两路是青 + 琥珀（深色底上给白手套镀边用的），
           浅底上会把白手染出一层青绿，看着像脏了 */}
-      <directionalLight position={[-6, 1, 4]} intensity={1.05} color="#e8eef8" />
+      <directionalLight
+        position={[-6, 1, 4]}
+        intensity={1.05}
+        color="#e8eef8"
+      />
       <pointLight position={[0, -4, 4]} intensity={0.8} color="#f2f5fa" />
     </>
   );
 }
 
 export interface HandModelProps {
+  /** Lock the viewpoint in calibration targets so directions remain consistent. */
+  interactive?: boolean;
   driveRef: RefObject<HandDrive>;
   side: "left" | "right";
   /**
@@ -968,10 +1002,17 @@ export interface HandModelProps {
  * 走向"镜头下方"、在画面底边就出画了，末端留在取景框外。
  * 相机是 Canvas 挂载时定死的，armStyle 不会中途切换，所以按 props 选一次即可。
  */
-const DEMO_CAMERA = { position: [0, 6.5, 13] as [number, number, number], fov: 34 };
-const DEFAULT_CAMERA = { position: [0, 0.34, 15.4] as [number, number, number], fov: 34 };
+const DEMO_CAMERA = {
+  position: [0, 6.5, 13] as [number, number, number],
+  fov: 34,
+};
+const DEFAULT_CAMERA = {
+  position: [0, 0.34, 15.4] as [number, number, number],
+  fov: 34,
+};
 
 export default memo(function HandModel({
+  interactive = true,
   driveRef,
   side,
   mode = "mesh",
@@ -985,7 +1026,12 @@ export default memo(function HandModel({
     >
       <HandSceneLights />
       <Suspense fallback={null}>
-        <AnimatedHand driveRef={driveRef} side={side} mode={mode} armStyle={armStyle} />
+        <AnimatedHand
+          driveRef={driveRef}
+          side={side}
+          mode={mode}
+          armStyle={armStyle}
+        />
       </Suspense>
       {/* 骨架档不投接触阴影：没有实心网格，投下来的是一地碎斑。
           地面高度要跟着取景走（见文件头第 2 条）：相机是平视的，这个水平面在默认
@@ -1005,6 +1051,7 @@ export default memo(function HandModel({
           留在原点的话画面会绕着手腕下面那截前臂打转，拖两下手就甩出画。
           minDistance 从 9 放到 6：默认距离已经是 13.1，9 那道下限只剩 1.45× 可推近 */}
       <OrbitControls
+        enabled={interactive}
         target={[0, 0.34, 0]}
         enablePan={false}
         minDistance={6}

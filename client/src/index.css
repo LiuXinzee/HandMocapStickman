@@ -438,3 +438,11 @@
 .theme-dark .hud-stage {
   background-image: none;
 }
+
+/* Calibration choices must remain visible despite the base button theme. */
+.motion-calibration .cyber-btn[aria-pressed="true"] {
+  background: rgba(124, 58, 237, 0.12);
+  border-color: var(--hud-violet);
+  color: var(--hud-violet);
+  box-shadow: inset 0 0 0 1px var(--hud-violet);
+}

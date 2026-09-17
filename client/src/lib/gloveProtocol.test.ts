@@ -55,7 +55,7 @@ function makeStream(n: number, type2Len: number): Uint8Array {
 
 function parse(stream: Uint8Array, chunkSize: number, type2Len?: number) {
   const frames: GloveFrame[] = [];
-  const parser = new GloveParser({ type2Len, onFrame: (f) => frames.push(f) });
+  const parser = new GloveParser({ type2Len, onFrame: f => frames.push(f) });
   for (let i = 0; i < stream.length; i += chunkSize) {
     parser.push(stream.slice(i, i + chunkSize));
   }
@@ -63,11 +63,19 @@ function parse(stream: Uint8Array, chunkSize: number, type2Len?: number) {
 }
 
 describe("GloveParser", () => {
+  it("标记无效四元数，避免把占位姿态写入校准，同时保留传感器数据", () => {
+    const stream = makeStream(2, TYPE2_LEN_LEGACY);
+    stream.set(f32([0, 0, 0, 0]), 2 * (HEADER_LEN + 2) + 2 * PACKET1_LEN);
+    const frames = parse(stream, 4096);
+    expect(frames[0].quaternionValid).toBe(false);
+    expect(frames[0].sensor_data.every(v => v === 1)).toBe(true);
+    expect(frames[1].quaternionValid).toBe(true);
+  });
   it("不指定 type2Len 时能解析 144 字节固件（272B 帧）", () => {
     const frames = parse(makeStream(20, TYPE2_LEN_LEGACY), 4096);
     expect(frames).toHaveLength(20);
     expect(frames[0].sensor_data).toHaveLength(256);
-    expect(frames[0].sensor_data.every((v) => v === 1)).toBe(true);
+    expect(frames[0].sensor_data.every(v => v === 1)).toBe(true);
     expect(frames[0].quaternion).toEqual([0.5, 0.5, 0.5, 0.5]);
     expect(frames[0].acceleration).toBeNull();
     expect(frames[0].attitude).toBeNull();
@@ -97,7 +105,11 @@ describe("GloveParser", () => {
   it("显式写死不匹配的 type2Len 会丢掉几乎所有帧（这就是当初的 bug）", () => {
     // 真实抓包下是一帧都出不来；这里是均匀填充的合成流，错位时可能侥幸凑出个别帧，
     // 所以断言"绝大多数丢失"而不是恰好 0
-    const frames = parse(makeStream(20, TYPE2_LEN_LEGACY), 4096, TYPE2_LEN_WITH_ACC);
+    const frames = parse(
+      makeStream(20, TYPE2_LEN_LEGACY),
+      4096,
+      TYPE2_LEN_WITH_ACC
+    );
     expect(frames.length).toBeLessThan(3);
   });
 
@@ -112,8 +124,11 @@ describe("GloveParser", () => {
   it("缓冲区不会随数据量无限增长", () => {
     const parser = new GloveParser({ onFrame: () => {} });
     const stream = makeStream(200, TYPE2_LEN_LEGACY);
-    for (let i = 0; i < stream.length; i += 512) parser.push(stream.slice(i, i + 512));
+    for (let i = 0; i < stream.length; i += 512)
+      parser.push(stream.slice(i, i + 512));
     // 只应剩下末尾那个还没配上下一个帧头的帧头
-    expect(parser["buffer"].length).toBeLessThan(HEADER_LEN + 2 + TYPE2_LEN_WITH_ACC);
+    expect(parser["buffer"].length).toBeLessThan(
+      HEADER_LEN + 2 + TYPE2_LEN_WITH_ACC
+    );
   });
 });
